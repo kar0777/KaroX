@@ -83,7 +83,7 @@ def _real_python_from_path(name: str) -> str | None:
     return None
 
 
-def _resolve_windows_first(name: str) -> str:
+def _resolve_windows_first(name: str, cwd: str | os.PathLike[str] | None = None) -> str:
     real_python = _real_python_from_path(name)
     if real_python:
         return real_python
@@ -92,6 +92,13 @@ def _resolve_windows_first(name: str) -> str:
     # ``CreateProcess`` (which accepts an explicit script path).  A bare name
     # needs the suffix probe because ``shell=False`` skips ``PATHEXT``.
     if os.path.sep in name or os.path.altsep in name or _has_executable_suffix(name):
+        # A relative path such as ``.venv\Scripts\python.exe`` names a file in
+        # the directory the child starts in, not in the one KaroX was started from.
+        has_separator = os.path.sep in name or bool(os.path.altsep and os.path.altsep in name)
+        if cwd is not None and has_separator and not os.path.isabs(name):
+            resolved = shutil.which(os.path.join(os.fspath(cwd), name))
+            if resolved:
+                return resolved
         resolved = shutil.which(name)
         if resolved:
             return resolved
@@ -119,7 +126,9 @@ def _resolve_windows_first(name: str) -> str:
     raise ExecutableResolutionError(name)
 
 
-def resolve_executable(argv: Sequence[str]) -> list[str]:
+def resolve_executable(
+    argv: Sequence[str], cwd: str | os.PathLike[str] | None = None
+) -> list[str]:
     """Return a copy of ``argv`` whose first element is an absolute path.
 
     On non-Windows hosts the input is returned unchanged: ``execvp`` consults
@@ -132,7 +141,7 @@ def resolve_executable(argv: Sequence[str]) -> list[str]:
         return list(argv)
     if os.name != "nt":
         return list(argv)
-    resolved = _resolve_windows_first(argv[0])
+    resolved = _resolve_windows_first(argv[0], cwd)
     return [resolved, *argv[1:]]
 
 

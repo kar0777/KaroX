@@ -1095,6 +1095,44 @@ class OpenAIChatCompletionsProviderTests(unittest.TestCase):
         )
         self.assertEqual(result.finish_reason, "tool_calls")
 
+    def test_calls_without_an_id_or_sharing_one_get_their_own_id(self) -> None:
+        def call(index: int, call_id: str, path: str) -> dict:
+            return {
+                "index": index,
+                "id": call_id,
+                "type": "function",
+                "function": {"name": "read_file", "arguments": json.dumps({"path": path})},
+            }
+
+        event = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            call(0, "", "a.txt"),
+                            call(1, "dup", "b.txt"),
+                            call(2, "dup", "c.txt"),
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+        client = FakeClient([sse_response([event])])
+        provider = OpenAIChatCompletionsProvider("https://provider.example/v1")
+
+        with patch("karox.providers.httpx.Client", return_value=client):
+            result = provider.complete(self.request())
+
+        ids = [item.call_id for item in result.tool_calls]
+        self.assertEqual(len(set(ids)), 3)
+        self.assertEqual(ids[1], "dup")
+        self.assertTrue(all(ids))
+        self.assertEqual(
+            [json.loads(item.raw_arguments)["path"] for item in result.tool_calls],
+            ["a.txt", "b.txt", "c.txt"],
+        )
+
     def test_a_foreign_tool_call_type_is_still_rejected(self) -> None:
         # The empty-string tolerance above must not become a general allowance:
         # a call that names a different kind of tool is still not executable.

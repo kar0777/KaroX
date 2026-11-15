@@ -493,7 +493,7 @@ class ProcessToolsMixin:
         # checks are launched isolated and pinned to this runtime's package, but
         # the logical argv that Core approved and reports remains unchanged.
         launch_source = _karox_module_launch(argv) if ours else list(argv)
-        launch_argv = _resolve_executable(launch_source)
+        launch_argv = _resolve_executable(launch_source, self.repository)
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             process = subprocess.Popen(
                 launch_argv,

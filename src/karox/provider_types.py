@@ -625,14 +625,24 @@ def accumulate_response(
     if decorated is not None:
         return decorated
     try:
-        tool_calls = tuple(
-            ToolCall(
-                call_id=_join_identity_fragments(parts["call_id"]),
-                name=_join_identity_fragments(parts["name"]),
-                raw_arguments="".join(parts["arguments"]),
+        calls: list[ToolCall] = []
+        seen_ids: set[str] = set()
+        for index, parts in sorted(call_parts.items()):
+            call_id = _join_identity_fragments(parts["call_id"])
+            if not call_id or call_id in seen_ids:
+                # Some servers send a call without an id, or one id for two
+                # calls. Every result must answer exactly one call, or the
+                # next request carries a history the API rejects.
+                call_id = f"{call_id or 'call'}-{index}-{uuid.uuid4().hex[:8]}"
+            seen_ids.add(call_id)
+            calls.append(
+                ToolCall(
+                    call_id=call_id,
+                    name=_join_identity_fragments(parts["name"]),
+                    raw_arguments="".join(parts["arguments"]),
+                )
             )
-            for _, parts in sorted(call_parts.items())
-        )
+        tool_calls = tuple(calls)
     except (TypeError, ValueError) as exc:
         raise ProviderError(
             ProviderErrorKind.MALFORMED_RESPONSE,
