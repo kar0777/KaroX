@@ -112,7 +112,8 @@ def parse_arguments(raw: str, schema: dict[str, Any]) -> dict[str, Any]:
     for key, val in value.items():
         spec = props.get(key)
         if spec is None:
-            continue  # unknown keys are ignored, not fatal
+            out[key] = val  # unknown keys pass through unvalidated (tools may accept aliases)
+            continue
         if val is None:
             if key in required:
                 problems.append(f"'{key}' must not be null")
