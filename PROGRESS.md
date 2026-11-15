@@ -143,3 +143,7 @@ git diff --check
   (files seen through shell output such as `sed -n`); approximate matches on such files and
   stale files are still refused, `write` still needs a read. Dev pool: "has not been read"
   cost an extra read + retry 5 times in k6d1 and 5 times in 4 E1 tasks.
+- E1 decision rule, fixed before its last tasks finish: adopt into BASE_PROMPT if on the
+  11 dev tasks it solves >= 7 (baseline k6d1+k6s1) with <= 56 LLM calls per task, or
+  solves >= 9 with <= 62 calls per task; otherwise reject. Cost is compared on calls and
+  miss-normalized price (E1 runs on Synthetic, the baseline ran on ReformBoss).
