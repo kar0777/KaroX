@@ -20,6 +20,7 @@ from pathlib import Path
 @dataclass(slots=True)
 class FileTracker:
     workspace: Path
+    ignore: tuple[str, ...] = ()  # workspace-relative dirs never reported (KaroX's own home)
     _seen: dict[str, tuple[int, int]] = field(default_factory=dict)
     _written: set[str] = field(default_factory=set)
     _git_baseline: set[str] | None = None
@@ -73,7 +74,9 @@ class FileTracker:
                 out.add(path.relative_to(self.workspace).as_posix())
             except ValueError:
                 out.add(path.as_posix())
-        return sorted(out)
+        return sorted(
+            p for p in out if not any(p == d or p.startswith(d + "/") for d in self.ignore)
+        )
 
     def _was_written(self, rel: str) -> bool:
         target = os.path.normcase(str(self.workspace / rel))

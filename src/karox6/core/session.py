@@ -32,6 +32,7 @@ from karox6.core import events as ev
 from karox6.core.loopguard import LoopGuard
 from karox6.core.messages import Message, Price, ToolCall, Usage
 from karox6.core.prompt import build_system_prompt
+from karox6.core.snapshot import write_snapshot
 from karox6.core.store import SessionStore, default_home, new_session_id
 from karox6.providers.base import (
     Delta,
@@ -74,6 +75,7 @@ class SessionConfig:
     apply_patch: bool = False
     replay_reasoning: str = "turn"  # all | turn | none
     loop_hard_stop: int = 20
+    snapshot_on_finish: bool = True  # copy changed files to submissions/NN (grading)
     max_parallel: int = 10
     stream_deltas: bool = False
     extra_body: dict[str, Any] = field(default_factory=dict)
@@ -115,7 +117,7 @@ class Session:
         self.resumed = bool(messages)
         self.usage = usage or Usage()
         self.cost_usd = cost_usd
-        self.files = FileTracker(self.workspace)
+        self.files = FileTracker(self.workspace, ignore=_inside(config.home, self.workspace))
         self.jobs = JobManager()
         self.guard = LoopGuard(hard_stop=config.loop_hard_stop)
         self.approver = approver
@@ -247,6 +249,16 @@ class Session:
             files_changed: list[str] = []
             with contextlib.suppress(Exception):
                 files_changed = await asyncio.to_thread(self.files.changed_files)
+            if self.config.snapshot_on_finish:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        write_snapshot,
+                        self.store.dir,
+                        self.workspace,
+                        files_changed,
+                        step=steps,
+                        status=status,
+                    )
             finished = ev.RunFinished(
                 status=status,
                 reason=reason,
@@ -550,3 +562,11 @@ class Session:
         after = estimate_tokens(self.messages, self.system_prompt)
         self._last_input_tokens, self._chars_since_measure = after, 0
         emit(ev.Compacted(mode="summary", tokens_before=before, tokens_after=after))
+
+
+def _inside(path: Path, workspace: Path) -> tuple[str, ...]:
+    """``path`` relative to the workspace when it lies inside it (else nothing)."""
+    try:
+        return (path.resolve().relative_to(workspace).as_posix(),)
+    except ValueError:
+        return ()

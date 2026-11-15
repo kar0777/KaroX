@@ -1,0 +1,420 @@
+import asyncio
+import json
+import shlex
+import shutil
+import subprocess
+import sys
+
+import pytest
+
+from karox6.context.compaction import COMPACTION_INSTRUCTION, split_for_summary
+from karox6.core.events import RunFinished
+from karox6.core.messages import Message, Price, ToolCall, Usage
+from karox6.core.session import Session, SessionConfig
+from karox6.core.store import SessionStore, drop_dangling_calls
+from karox6.providers.base import ProviderError, RetryPolicy
+from karox6.providers.scripted import ScriptedProvider, Turn
+from karox6.tools.base import ToolResult
+from karox6.tools.danger import DangerMatch
+
+
+def config(tmp_path, **kwargs):
+    return SessionConfig(model="test", workspace=tmp_path, home=tmp_path / "home", **kwargs)
+
+
+def run(session, prompt="task"):
+    async def collect():
+        return [event async for event in session.run(prompt)]
+
+    return asyncio.run(collect())
+
+
+def finish(events):
+    assert isinstance(events[-1], RunFinished)
+    return events[-1]
+
+
+def results(session):
+    return [m for m in session.messages if m.role == "tool"]
+
+
+def test_final_text(tmp_path):
+    provider = ScriptedProvider([Turn(text="done")])
+    events = run(Session(config(tmp_path), provider))
+    assert events[0].type == "run_started"
+    assert events[-1].type == "run_finished"
+    assert finish(events).status == "completed"
+    assert finish(events).final_text == "done"
+    assert len(provider.requests) == 1
+
+
+def test_tool_round_trip(tmp_path):
+    (tmp_path / "a.txt").write_text("hello")
+    provider = ScriptedProvider([Turn(calls=[("read", {"file_path": "a.txt"})]), Turn(text="done")])
+    session = Session(config(tmp_path), provider)
+    assert finish(run(session)).status == "completed"
+    assistant, tool = provider.requests[1].messages[-2:]
+    assert assistant.tool_calls[0].id == tool.tool_call_id
+    assert "hello" in tool.content
+
+
+class RecordingTool:
+    description = "record execution"
+    parameters = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    }
+
+    def __init__(self, name, read_only, trace):
+        self.name, self.read_only, self.trace = name, read_only, trace
+
+    async def run(self, args, ctx):
+        value = args["value"]
+        self.trace.append(("start", value))
+        await asyncio.sleep(0.02 if value != "a" else 0.04)
+        self.trace.append(("end", value))
+        return ToolResult(value)
+
+
+def test_parallel_and_sequential_order(tmp_path):
+    trace = []
+    tools = [RecordingTool("read", True, trace), RecordingTool("write", False, trace)]
+    provider = ScriptedProvider(
+        [
+            Turn(
+                calls=[
+                    ("read", {"value": "a"}),
+                    ("read", {"value": "b"}),
+                    ("write", {"value": "c"}),
+                    ("write", {"value": "d"}),
+                ]
+            ),
+            Turn(text="done"),
+        ]
+    )
+    session = Session(config(tmp_path), provider, tools=tools)
+    assert finish(run(session)).status == "completed"
+    assert trace[:2] == [("start", "a"), ("start", "b")]
+    assert trace[4:] == [("start", "c"), ("end", "c"), ("start", "d"), ("end", "d")]
+    assert [m.content for m in results(session)] == ["a", "b", "c", "d"]
+
+
+@pytest.mark.parametrize("name", ["Read", "functions.read"])
+def test_normalized_tool_name(tmp_path, name):
+    (tmp_path / "a").write_text("hello")
+    session = Session(
+        config(tmp_path),
+        ScriptedProvider([Turn(calls=[(name, {"file_path": "a"})]), Turn(text="done")]),
+    )
+    assert finish(run(session)).status == "completed"
+    assert "hello" in results(session)[0].content
+
+
+def test_unknown_tool(tmp_path):
+    session = Session(
+        config(tmp_path), ScriptedProvider([Turn(calls=[("missing", {})]), Turn(text="done")])
+    )
+    assert finish(run(session)).status == "completed"
+    assert results(session)[0].is_error
+    assert "Available tools" in results(session)[0].content
+
+
+@pytest.mark.parametrize("args", ["{", {}])
+def test_invalid_arguments(tmp_path, args):
+    session = Session(
+        config(tmp_path), ScriptedProvider([Turn(calls=[("read", args)]), Turn(text="done")])
+    )
+    assert finish(run(session)).status == "completed"
+    assert results(session)[0].is_error
+    assert any(
+        s in results(session)[0].content.lower() for s in ("invalid arguments", "not valid json")
+    )
+
+
+def test_loop_notices(tmp_path):
+    turns = [Turn(calls=[("read", {"file_path": "none"})]) for _ in range(8)] + [Turn(text="done")]
+    session = Session(config(tmp_path), ScriptedProvider(turns))
+    events = run(session)
+    notices = [e for e in events if e.type == "notice"]
+    assert len(notices) == 3
+    assert all(e.kind == "loop_guard" for e in notices)
+    assert notices[0].text.startswith("You are repeating")
+    assert "consecutive_calls: 5" in notices[1].text
+    assert "consecutive_calls: 8" in notices[2].text
+    assert len([m for m in session.messages if m.meta.get("kind") == "loop_guard"]) == 3
+
+
+def test_loop_hard_stop(tmp_path):
+    session = Session(
+        config(tmp_path, loop_hard_stop=4),
+        ScriptedProvider([Turn(calls=[("read", {"file_path": "a"})]) for _ in range(4)]),
+    )
+    assert finish(run(session)).status == "loop"
+
+
+def test_loop_resets(tmp_path):
+    turns = [Turn(calls=[("read", {"file_path": x})]) for x in ["a", "a", "b", "a", "a"]] + [
+        Turn(text="done")
+    ]
+    assert not [
+        e for e in run(Session(config(tmp_path), ScriptedProvider(turns))) if e.type == "notice"
+    ]
+
+
+@pytest.mark.parametrize(("count", "status"), [(1, "completed"), (4, "error")])
+def test_truncation(tmp_path, count, status):
+    provider = ScriptedProvider(
+        [Turn(text="partial", finish_reason="length") for _ in range(count)] + [Turn(text="done")]
+    )
+    events = run(Session(config(tmp_path), provider))
+    assert finish(events).status == status
+    assert len([e for e in events if e.type == "notice" and e.kind == "truncated"]) == min(count, 3)
+
+
+def test_step_limit(tmp_path):
+    provider = ScriptedProvider([Turn(calls=[("read", {"file_path": "a"})]) for _ in range(2)])
+    result = finish(run(Session(config(tmp_path, max_steps=2), provider)))
+    assert result.status == "limit"
+    assert "step limit" in result.reason
+
+
+def test_time_limit(tmp_path):
+    class SlowProvider(ScriptedProvider):
+        async def complete(self, request, on_delta=None):
+            await asyncio.sleep(1.2)
+            return await super().complete(request, on_delta)
+
+    assert (
+        finish(
+            run(Session(config(tmp_path, max_seconds=0.01), SlowProvider([Turn(text="done")])))
+        ).status
+        == "limit"
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "status", "event"), [("rate_limit", "completed", "retry"), ("auth", "error", "error")]
+)
+def test_provider_errors(tmp_path, code, status, event):
+    provider = ScriptedProvider([Turn(error=ProviderError(code, "failed")), Turn(text="done")])
+    events = run(Session(config(tmp_path, retry=RetryPolicy(initial_delay_s=0.001)), provider))
+    assert finish(events).status == status
+    assert any(e.type == event for e in events)
+
+
+def test_persistence_resume(tmp_path):
+    cfg = config(tmp_path)
+    original = Session(cfg, ScriptedProvider([Turn(text="first")]))
+    run(original, "old prompt")
+    records = [
+        json.loads(line) for line in original.store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert {"meta", "message", "usage", "event"} <= {r["kind"] for r in records}
+    loaded = SessionStore.load(cfg.home, original.session_id)
+    provider = ScriptedProvider([Turn(text="second")])
+    resumed = Session(
+        cfg, provider, session_id=loaded.session_id, messages=loaded.messages, usage=loaded.usage
+    )
+    events = run(resumed, "new prompt")
+    assert events[0].resumed
+    assert [m.content for m in provider.requests[0].messages] == [
+        "old prompt",
+        "first",
+        "new prompt",
+    ]
+
+
+def test_dangling_calls():
+    messages = [
+        Message("user", "task"),
+        Message("assistant", tool_calls=[ToolCall("id", "read", "{}")]),
+    ]
+    assert drop_dangling_calls(messages) == messages[:1]
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"), [("turn", [None, "new"]), ("none", [None, None]), ("all", ["old", "new"])]
+)
+def test_reasoning_replay(tmp_path, mode, expected):
+    messages = [
+        Message("user", "old task"),
+        Message("assistant", "old", reasoning="old"),
+        Message("user", "new task"),
+        Message("assistant", "new", reasoning="new"),
+        Message("user", "notice", meta={"kind": "loop_guard"}),
+    ]
+    session = Session(
+        config(tmp_path, replay_reasoning=mode), ScriptedProvider([]), messages=messages
+    )
+    assert [m.reasoning for m in session._request().messages if m.role == "assistant"] == expected
+
+
+def test_compaction_prune_and_summary(tmp_path):
+    call = ToolCall("id", "read", "{}")
+    messages = [
+        Message("user", "original"),
+        Message("assistant", tool_calls=[call]),
+        Message("tool", "x" * 20000, tool_call_id="id"),
+    ] + [Message("assistant", "tail" * 100) for _ in range(7)]
+    provider = ScriptedProvider([Turn(text="checkpoint"), Turn(text="done")])
+    session = Session(config(tmp_path, compact_at_tokens=100), provider, messages=messages)
+    (tmp_path / "changed.txt").write_text("changed", encoding="utf-8")
+    session.files.record_write(tmp_path / "changed.txt")
+    events = run(session, "continue")
+    assert [e.mode for e in events if e.type == "compacted"] == ["prune", "summary"]
+    assert provider.requests[0].messages[-1].content == COMPACTION_INSTRUCTION
+    assert any(m.meta.get("pruned") for m in provider.requests[0].messages)
+    assert session.messages[0].content == "original"
+    checkpoint = session.messages[1]
+    assert checkpoint.meta["kind"] == "compaction"
+    assert "<compacted-summary>" in checkpoint.content
+    assert "Files changed in the workspace" in checkpoint.content
+    assert "changed.txt" in checkpoint.content
+
+
+def test_compaction_keeps_tool_pair():
+    pair = [
+        Message("assistant", tool_calls=[ToolCall("id", "read", "{}")]),
+        Message("tool", "result", tool_call_id="id"),
+    ]
+    head, tail = split_for_summary([Message("user", "task"), *pair], retain_tokens=8)
+    assert (pair[0] in head and pair[1] in head) or (pair[0] in tail and pair[1] in tail)
+
+
+def test_denied_command(tmp_path):
+    session = Session(
+        config(tmp_path),
+        ScriptedProvider([Turn(calls=[("bash", {"command": "rm -rf /"})]), Turn(text="done")]),
+    )
+    events = run(session)
+    assert any(e.type == "approval_requested" for e in events)
+    assert any(e.type == "approval_resolved" and not e.approved for e in events)
+    assert "Not executed" in results(session)[0].content
+
+
+def test_approved_harmless_command(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "karox6.tools.shell.check_command", lambda *a, **kw: DangerMatch("test", "test", "test")
+    )
+
+    async def approve(_request):
+        return True
+
+    session = Session(
+        config(tmp_path),
+        ScriptedProvider([Turn(calls=[("bash", {"command": "echo safe"})]), Turn(text="done")]),
+        approver=approve,
+    )
+    events = run(session)
+    assert any(e.type == "approval_resolved" and e.approved for e in events)
+    assert "safe" in results(session)[0].content
+
+
+def test_background_finish_notice(tmp_path):
+    python = shlex.quote(sys.executable.replace("\\", "/"))
+    sleep = python + " -c " + shlex.quote("import time; time.sleep(0.3)")
+    wait = python + " -c " + shlex.quote("import time; time.sleep(0.8)")
+    provider = ScriptedProvider(
+        [
+            Turn(calls=[("bash", {"command": sleep, "run_in_background": True})]),
+            Turn(calls=[("bash", {"command": wait})]),
+            Turn(text="done"),
+        ]
+    )
+    session = Session(config(tmp_path), provider)
+    assert finish(run(session)).status == "completed"
+    assert "[background job 1 finished" in results(session)[-1].content
+
+
+def test_files_changed_write_edit(tmp_path):
+    provider = ScriptedProvider(
+        [
+            Turn(
+                calls=[
+                    ("write", {"file_path": "a.txt", "content": "old"}),
+                    ("edit", {"file_path": "a.txt", "old_string": "old", "new_string": "new"}),
+                ]
+            ),
+            Turn(text="done"),
+        ]
+    )
+    result = finish(run(Session(config(tmp_path), provider)))
+    assert "a.txt" in result.files_changed
+    assert (tmp_path / "a.txt").read_text() == "new"
+
+
+def test_files_changed_shell_git(tmp_path):
+    if not shutil.which("git"):
+        pytest.skip("git unavailable")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    python = shlex.quote(sys.executable.replace("\\", "/"))
+    command = (
+        python
+        + " -c "
+        + shlex.quote("from pathlib import Path; Path('created.txt').write_text('hi')")
+    )
+    session = Session(
+        config(tmp_path),
+        ScriptedProvider([Turn(calls=[("bash", {"command": command})]), Turn(text="done")]),
+    )
+    assert "created.txt" in finish(run(session)).files_changed
+
+
+def test_cost(tmp_path):
+    usage = Usage(input_tokens=1000, cached_tokens=200, output_tokens=500)
+    result = finish(
+        run(
+            Session(
+                config(tmp_path, price=Price(1.0, 2.0, 0.1)),
+                ScriptedProvider([Turn(text="done", usage=usage)]),
+            )
+        )
+    )
+    assert result.cost_usd == pytest.approx((800 + 20 + 1000) / 1_000_000)
+
+
+def test_read_grep_glob_batch(tmp_path):
+    (tmp_path / "sample.txt").write_text("needle", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            Turn(
+                calls=[
+                    ("read", {"file_path": "sample.txt"}),
+                    ("grep", {"pattern": "needle"}),
+                    ("glob", {"pattern": "*.txt"}),
+                ]
+            ),
+            Turn(text="done"),
+        ]
+    )
+    session = Session(config(tmp_path), provider)
+    assert finish(run(session)).status == "completed"
+    assert [m.name for m in results(session)] == ["read", "grep", "glob"]
+    assert all(not m.is_error for m in results(session))
+    assert "needle" in results(session)[1].content
+    assert "sample.txt" in results(session)[2].content
+
+
+def test_finish_writes_snapshot_and_ignores_own_home(tmp_path):
+    provider = ScriptedProvider(
+        [Turn(calls=[("write", {"file_path": "pkg/a.txt", "content": "new"})]), Turn(text="ok")]
+    )
+    session = Session(config(tmp_path), provider)
+    result = finish(run(session))
+    assert result.files_changed == ["pkg/a.txt"]
+    manifest = json.loads(
+        (session.store.dir / "submissions" / "01" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "completed"
+    assert list(manifest["files"]) == ["pkg/a.txt"]
+    copied = session.store.dir / "submissions" / "01" / "files" / "pkg" / "a.txt"
+    assert copied.read_text(encoding="utf-8") == "new"
+
+
+def test_snapshot_can_be_disabled(tmp_path):
+    session = Session(
+        config(tmp_path, snapshot_on_finish=False), ScriptedProvider([Turn(text="ok")])
+    )
+    finish(run(session))
+    assert not (session.store.dir / "submissions").exists()

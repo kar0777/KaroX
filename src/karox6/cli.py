@@ -59,6 +59,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--price-output", type=float, default=None)
     run.add_argument("--price-cached", type=float, default=None)
     run.add_argument("--apply-patch", action="store_true", help="offer the apply_patch tool")
+    run.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help="do not copy changed files to <session>/submissions at the end of the run",
+    )
     run.add_argument("--replay-reasoning", choices=["turn", "all", "none"], default="turn")
     run.add_argument(
         "--approve-dangerous",
@@ -157,6 +162,7 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
         price=price,
         apply_patch=args.apply_patch,
         replay_reasoning=args.replay_reasoning,
+        snapshot_on_finish=not args.no_snapshot,
         stream_deltas=args.stream or not args.json,
         extra_body=extra_body,
         system_prompt=system_prompt,
