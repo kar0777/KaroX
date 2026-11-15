@@ -211,3 +211,12 @@ git diff --check
   at least as many tasks with no more LLM calls per task; otherwise reject and the
   held-out run judges dev2. The step-120 notice barely triggers on the dev pool (E1 max
   110 calls), so its effect is measured on the held-out run.
+- MCP for chat clients: `karox_status`/`karox_run` return `log`, one line per meaningful
+  event (`✓ bash pytest -q → 2 passed (1.5s)`), instead of raw events (`detail: full`
+  keeps them); a brief long-poll gathers lines and wakes early only when the run ends or
+  needs approval, so ChatGPT spends fewer tool calls and context per run. Line digests are
+  shared with the chat UI (`core/digest.py`).
+- MCP compliance and speed: the official MCP Python SDK 2.3.0 client connects over stdio
+  and Streamable HTTP (negotiates 2025-11-25), lists tools, calls them, gets tool errors
+  and pings; stdio `initialize` answers 0.21 s after process start (5 of 5 runs). B1 wheel
+  passed the free replay in real hard12 images (run 43761878216).
