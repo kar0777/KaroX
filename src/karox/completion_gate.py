@@ -247,7 +247,10 @@ def floor(core: Any, record: Any) -> list[str]:
             quoted = ban if len(ban) <= 120 else ban[:117] + "..."
             reasons.append(
                 f'existing test files changed although the task says "{quoted}": '
-                f"{', '.join(touched[:4])} (restore their original content)"
+                f"{', '.join(touched[:4])} (restore their original content). Restoring them "
+                "does not make their old expectations right: keep the fix, and list a restored "
+                "test that then fails only because it asserts behaviour the task changes in "
+                "finish superseded_tests with the task sentence, instead of changing the code back"
             )
     else:
         from . import original_tests

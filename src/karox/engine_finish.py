@@ -122,6 +122,9 @@ class EngineFinishMixin:
         answer = ""
         if isinstance(arguments, dict):
             answer = str(arguments.get("answer") or "")
+            note = getattr(self, "_note_superseded", None)  # EngineGuidanceMixin
+            if callable(note):
+                note(arguments)
         attached, attach_problem = self._answer_files(
             arguments.get(ANSWER_FILES_FIELD) if isinstance(arguments, dict) else None
         )

@@ -1158,6 +1158,8 @@ def test_an_edited_existing_test_blocks_the_finish_when_the_task_forbids_it(tmp_
     assert len(owed) == 1
     assert "testing/test_mark.py" in owed[0]
     assert "Do not modify tests" in owed[0]
+    # Restoring an outdated expectation must not read as an order to undo the fix.
+    assert "keep the fix" in owed[0] and "superseded_tests" in owed[0]
 
 
 def test_a_restored_test_file_no_longer_blocks_the_finish(tmp_path: Path) -> None:

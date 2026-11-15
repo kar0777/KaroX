@@ -150,7 +150,22 @@
   that changes the least existing behaviour is expected. The self-review and
   adversarial pass compare output with the task's examples field by field and
   ask for probes that print expected next to actual and exit non-zero on a
-  mismatch, instead of printed values only.
+  mismatch, instead of printed values only. An output the task shows as part
+  of the reported problem (a bug report's current, wrong output) is never an
+  expected value unless the task calls it correct.
+- The finish gate that asks to restore edited existing tests says to keep the
+  fix and to declare a restored test that asserts the behaviour the task
+  changes in `superseded_tests`, instead of reading as an order to make the
+  old expectation pass again.
+- A test that a finish declared superseded and that a later unfiltered run
+  passes whole is named once, with the declared reason: either the code is back to the
+  behaviour the task changes or the declaration was wrong, and a probe of the
+  task's required result tells which.
+- An unsupported or not-implemented error the code raises today on a variant
+  the task asks to support is part of the gap, not an error path to keep, and
+  values or errors a task reports as wrong are never expected values.
+  The research-budget notice asks for the edit that closes the gap for every
+  form the task names instead of the smallest edit.
 - Editing a test that failed at its last run, while no code under test has
   changed since, adds a notice asking for the source of any new expected value
   (at most twice per run; the edit still runs).

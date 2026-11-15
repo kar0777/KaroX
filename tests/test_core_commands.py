@@ -115,6 +115,47 @@ def test_rewriting_a_failing_test_without_a_code_change_asks_for_the_source() ->
     assert edit("tests/test_d.py") == ""
 
 
+def test_a_superseded_test_that_passes_again_is_named() -> None:
+    from types import SimpleNamespace
+
+    from karox.engine_guidance import EngineGuidanceMixin, _selects
+
+    class _Env(EngineGuidanceMixin):
+        pass
+
+    env = _Env.__new__(_Env)
+    env._core = SimpleNamespace(repository="/testbed")
+    old = "tests/unit/test_regressions.py::test_noqa_issue_2093"
+    run = {"argv": ["python", "-m", "pytest", "/testbed/" + old, "-q"]}
+    # Nothing declared yet: a pass is just a pass.
+    assert env._expectation_notice("checks.run", run, {"exit_code": 0}, True) == ""
+    env._note_superseded({"answer": "done", "superseded_tests": [
+        {"test": old, "reason": "The task says the output ends with the marker."}, {"reason": "no test"}]})
+    # A failing run of it is what the declaration predicts; a filtered or skipped run proves nothing.
+    assert env._expectation_notice("checks.run", run, {"exit_code": 1}, True) == ""
+    filtered = {"argv": run["argv"] + ["-k", "other"]}
+    assert env._expectation_notice("checks.run", filtered, {"exit_code": 0}, True) == ""
+    assert env._expectation_notice("checks.run", run, {"exit_code": 0, "stdout": "1 skipped in 0.1s"}, True) == ""
+    # The tests KaroX runs after a code edit count; the notice quotes the reason once.
+    affected = {"targets": [old], "exit_code": 0}
+    notice = env._expectation_notice("repo.edit_file", {}, {"path": "isort/output.py", "changed": True,
+                                                            "affected_tests": affected}, True)
+    assert notice.startswith(old + " passes again") and "ends with the marker" in notice
+    assert env._expectation_notice("checks.run", run, {"exit_code": 0}, True) == ""
+    # Declaring it again in a later finish does not re-arm the notice.
+    env._note_superseded({"superseded_tests": [{"test": old, "reason": "again"}]})
+    assert env._expectation_notice("checks.run", run, {"exit_code": 0, "stdout": "1 passed"}, True) == ""
+    # Selections cover the declared test whole: files, classes, bare names; one case of it does not.
+    assert _selects("tests/t.py", "tests/t.py::test_a")
+    assert _selects("tests/t.py::TestA", "tests/t.py::TestA::test_b")
+    assert _selects("tests/t.py::test_a", "test_a")
+    assert not _selects("tests/t.py::test_a[1]", "test_a")
+    assert not _selects("tests/t.py::TestA::test_b", "tests/t.py::TestA")
+    assert not _selects("tests/t.py::test_ab", "tests/t.py::test_a")
+    assert not _selects("tests/u.py", "tests/t.py::test_a")
+    assert not _selects("tests/t.py", "test_a")
+
+
 def test_the_environment_block_names_layout_toolchain_and_git(tmp_path) -> None:
     from karox.project_context import render_environment
 

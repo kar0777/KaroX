@@ -42,7 +42,7 @@ import hashlib
 import json
 import re
 import shlex
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Set
 from .agent import AgentEventKind
 from .check_targets import is_test_path
 from .completion_rules import is_doc
@@ -130,6 +130,49 @@ def _whole_test_files(arguments: Mapping[str, Any], data: Mapping[str, Any], roo
     return [_relative(item, root) for item in items if "::" not in item and is_test_path(_relative(item, root))]
 
 
+def _passing_selections(arguments: Mapping[str, Any], data: Mapping[str, Any], root: str) -> List[str]:
+    """Node ids and whole test files a run that exited 0 selected."""
+
+    exit_code = data.get("exit_code", data.get("returncode"))
+    if exit_code != 0 or isinstance(exit_code, bool) or data.get("timed_out"):
+        return []
+    raw = arguments.get("argv") or arguments.get("targets") or data.get("targets") or []
+    items = [str(item) for item in raw] if isinstance(raw, list) else []
+    # A selection filter may have dropped the test; a run that reports no pass proves nothing.
+    if any(item in ("-k", "-m", "--deselect", "--lf", "--last-failed") or item.startswith(("-k=", "--deselect="))
+           for item in items):
+        return []
+    output = str(data.get("stdout") or data.get("output") or "")
+    if output.strip() and " passed" not in output and "PASSED" not in output:
+        return []
+    nodes = [
+        _relative(item, root) + "::" + item.split("::", 1)[1]
+        for item in items
+        if "::" in item and is_test_path(_relative(item, root))
+    ]
+    return nodes + _whole_test_files(arguments, data, root)
+
+
+def _selects(selection: str, test: str) -> bool:
+    """Whether a passing selection ran all of a test named as a node id, a file or a bare name.
+
+    Directional: a run of one parametrized case or one method of a class does
+    not show that the whole declared test passes.
+    """
+
+    sel_file, _, sel_name = selection.partition("::")
+    test_file, _, test_name = test.partition("::")
+    if not test_name and not test_file.endswith(".py"):
+        test_file, test_name = "", test_file
+    if test_file and test_file != sel_file:
+        return False
+    if not sel_name:
+        return bool(test_file)
+    if not test_name:
+        return False
+    return test_name == sel_name or test_name.startswith((sel_name + "::", sel_name + "["))
+
+
 def _changed_paths(data: Mapping[str, Any], root: str) -> List[str]:
     path = data.get("path")
     paths = [path] if isinstance(path, str) and path else data.get("changed_files")
@@ -196,8 +239,8 @@ class EngineGuidanceMixin:
                     f"Research budget: {milestone} model steps have passed without a "
                     "repository change. Stop collecting references: check the covering "
                     "tests for the touched area, name the gap against the task measured "
-                    "the way those tests or the task state it, make the smallest edit "
-                    "for it, then run that test."
+                    "the way those tests or the task state it, make the edit that closes "
+                    "it for every form the task names, then run that test."
                 )
             return (
                 f"Research budget exhausted: {milestone} steps without a change. Make "
@@ -423,7 +466,7 @@ class EngineGuidanceMixin:
         root = str(getattr(getattr(self, "_core", None), "repository", "") or "").replace("\\", "/").rstrip("/")
         if core_name in _TEST_TOOLS:
             self._note_test_result(arguments, data, seq, root)
-            return ""
+            return self._superseded_pass_notice(arguments, data, root)
         changed = ok and core_name in _MUTATION_TOOLS and data.get("changed") is not False
         paths = _changed_paths(data, root) if changed else []
         if any(not is_test_path(p) and not is_scratch_artifact(p) and not is_doc(p) for p in paths):
@@ -431,7 +474,9 @@ class EngineGuidanceMixin:
             # The tests KaroX ran on the edited code count as a run after it.
             affected = data.get("affected_tests")
             if isinstance(affected, dict):
-                self._note_test_result({"targets": affected.get("targets")}, affected, seq, root)
+                targets = {"targets": affected.get("targets")}
+                self._note_test_result(targets, affected, seq, root)
+                return self._superseded_pass_notice(targets, affected, root)
             return ""
         since = int(getattr(self, "_source_change_seq", 0) or 0)
         red: Dict[str, int] = getattr(self, "_red_tests", None) or {}
@@ -448,6 +493,55 @@ class EngineGuidanceMixin:
             "(import, fixture, syntax), that is fine. If it changes an expected value, quote "
             "the task sentence, task example or existing test that supports the new value; "
             "without one, the code is what is wrong."
+        )
+
+    def _note_superseded(self, arguments: Any) -> None:
+        """Remember the tests a finish declared superseded by the task, with their reasons."""
+
+        items = arguments.get("superseded_tests") if isinstance(arguments, Mapping) else None
+        declared: Dict[str, str] = getattr(self, "_declared_superseded", None) or {}
+        named: Set[str] = getattr(self, "_superseded_named", None) or set()
+        for item in items if isinstance(items, list) else ():
+            test = str(item.get("test") or "").strip() if isinstance(item, Mapping) else ""
+            if test and test not in named:
+                declared[test] = str(item.get("reason") or "").strip()
+        self._declared_superseded = declared
+        self._superseded_named = named
+
+    def _superseded_pass_notice(self, arguments: Mapping[str, Any], data: Mapping[str, Any], root: str) -> str:
+        """Name a test the model declared superseded that now passes again.
+
+        rebench v618rb isort-2750: the first finish kept the task's output and
+        declared the old regression test superseded; the self-review then made
+        that test pass again by restoring the reported output, and the hidden
+        test asserted the task's output. Once per declared test.
+        """
+
+        declared: Dict[str, str] = getattr(self, "_declared_superseded", None) or {}
+        if not declared:
+            return ""
+        selections = _passing_selections(arguments, data, root)
+        named: Set[str] = getattr(self, "_superseded_named", None) or set()
+        self._superseded_named = named
+        hits: List[str] = []
+        for test in list(declared):
+            name = _relative(test, root) + ("::" + test.split("::", 1)[1] if "::" in test else "")
+            if any(_selects(selection, name) for selection in selections):
+                hits.append(test)
+        if not hits:
+            return ""
+        reason = declared[hits[0]]
+        for test in hits:
+            declared.pop(test)
+            named.add(test)
+        quote = reason if len(reason) <= 160 else reason[:157] + "..."
+        return (
+            f"{', '.join(hits[:3])} {'pass' if len(hits) > 1 else 'passes'} again, but your finish "
+            "declared it superseded by the task"
+            + (f" ({quote})" if quote else "")
+            + ". Either your code is back to the behaviour you said the task changes, or that "
+            "declaration was wrong. Probe the result the task requires to tell which; if the "
+            "task's result is gone, this edit undid the fix."
         )
 
     def _note_test_result(self, arguments: Mapping[str, Any], data: Mapping[str, Any], seq: int, root: str) -> None:
