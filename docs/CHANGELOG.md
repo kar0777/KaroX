@@ -139,6 +139,11 @@
   no baseline instead of a deleted file, and a tree that could not be fully
   placed at start bytes is never measured.
 
+- Each submitted finish keeps the changed files as they stood under the
+  session's `submissions/NN/` (with a manifest of sha256 per path, null for a
+  deleted path), so a grader can score the first finish against the final one.
+  Telemetry only: a failed snapshot never fails the run.
+
 ### Changed
 
 - Expected values come from the task, not from the change. The agent writes

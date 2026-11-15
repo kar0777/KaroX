@@ -195,6 +195,7 @@ class EngineIoMixin:
                     submission = str(extra.get("submission") or message.get("content") or "")
                     if submission:
                         self._engine_submission = submission
+                        self._snapshot_submission(session_id)
                         if str(extra.get("exit_reason") or "") == "prose-final":
                             # The prose answer was never added as an assistant
                             # message (the bridge raised FormatError for it),
@@ -597,6 +598,50 @@ class EngineIoMixin:
             changed_files=record.changed_files,
             history=record.provider_history,
         )
+
+    def _snapshot_submission(self, session_id: str) -> None:
+        """Keep the changed files as they stand at each submitted finish.
+
+        Telemetry only: ``submissions/NN/files`` plus a manifest (sha256 per
+        path, null for a path that no longer exists) let a later grader score
+        the first finish against the final one, so the passes that run after a
+        finish can be measured instead of guessed (v618rb: all three failures
+        had a correct first finish). Never fails the run.
+        """
+
+        kernel: Any = self  # EngineKernel: sessions and core live there
+        try:
+            record = kernel.sessions.load(session_id)
+            paths = list(dict.fromkeys([*record.changed_files, *record.created_files]))[:_MAX_SNAPSHOT_FILES]
+            root = kernel.sessions.session_dir(session_id) / "submissions"
+            index = len([entry for entry in root.iterdir() if entry.is_dir()]) + 1 if root.is_dir() else 1
+            directory = root / f"{index:02d}"
+            files: Dict[str, Optional[str]] = {}
+            for relative in paths:
+                try:
+                    source = kernel.core.safe_path(str(relative))
+                except Exception:
+                    continue
+                if not source.is_file():
+                    files[str(relative)] = None
+                    continue
+                payload = source.read_bytes()
+                if len(payload) > _MAX_SNAPSHOT_BYTES:
+                    continue
+                target = directory / "files" / pathlib.PurePosixPath(str(relative))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+                files[str(relative)] = hashlib.sha256(payload).hexdigest()
+            directory.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "index": index,
+                "step": session_analysis.step_count(record.provider_history),
+                "files": files,
+                "at": time.time(),
+            }
+            (directory / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - telemetry must never fail a run
+            return
 
     def _snapshot_verified_state(
         self, session_id: str, lease: MutationLease, record: SessionRecord

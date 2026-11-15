@@ -629,6 +629,18 @@ def test_goals_quoting_fresh_output_pass_without_a_refusal(
     assert all(GOAL_REFUSAL not in _request_text(request) for request in provider.requests)
 
 
+def test_each_submitted_finish_keeps_the_changed_files_as_they_stood(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(tmp_path, monkeypatch, _repo(tmp_path), [_fix_call("c1"), _probe_call("c2")])
+    found = sorted((tmp_path / "runtime").rglob("submissions/*/manifest.json"))
+    assert found, "no submission snapshot written"
+    manifest = json.loads(found[0].read_text(encoding="utf-8"))
+    assert manifest["index"] == 1 and "calc.py" in manifest["files"]
+    kept = found[0].parent / "files" / "calc.py"
+    assert "b must not be zero" in kept.read_text(encoding="utf-8")
+
+
 def test_a_run_without_the_review_is_never_asked_for_goals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
