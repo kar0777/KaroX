@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import secrets
 import subprocess
 import time
@@ -26,6 +27,7 @@ from karox6.tools.base import ApprovalRequest, Tool
 from karox6.tools.files import is_generated
 
 MAX_EVENTS = 4000
+MAX_RUNS = 200
 FIELD_CAP = 2000
 DIFF_CAP = 40_000
 WAIT_CAP_S = 50.0
@@ -131,9 +133,12 @@ class RunManager:
         request_id: str | None = None,
     ) -> tuple[Run, bool]:
         """Start a run (or return the run already started for ``request_id``)."""
-        if request_id and request_id in self.by_request:
-            return self.runs[self.by_request[request_id]], True
         task = task.strip()
+        if request_id and request_id in self.by_request:
+            existing = self.runs[self.by_request[request_id]]
+            if existing.task != task:
+                raise RunError(f"request_id {request_id!r} was already used for another task")
+            return existing, True
         if not task:
             raise RunError("task is empty")
         workspace = self._workspace(cwd)
@@ -178,12 +183,22 @@ class RunManager:
         if request_id:
             self.by_request[request_id] = run_id
         run.worker = asyncio.get_running_loop().create_task(self._drive(run))
+        self._forget_old_runs()
         return run, False
+
+    def _forget_old_runs(self) -> None:
+        """Keep at most MAX_RUNS runs in memory, dropping the oldest finished ones."""
+        excess = len(self.runs) - MAX_RUNS
+        for old in [r for r in self.runs.values() if not r.running][: max(excess, 0)]:
+            del self.runs[old.run_id]
+            if old.request_id:
+                self.by_request.pop(old.request_id, None)
 
     async def status(self, run_id: str, *, since: int = 0, wait_s: float = 0.0) -> dict[str, Any]:
         run = self.get(run_id)
         since = max(int(since), 0)
-        wait_s = min(max(float(wait_s), 0.0), WAIT_CAP_S)
+        wait_s = float(wait_s)
+        wait_s = min(max(wait_s, 0.0), WAIT_CAP_S) if math.isfinite(wait_s) else 0.0
         await asyncio.sleep(0)  # let the run make progress even for a non-waiting poll
         if wait_s and run.running and self._next(run) <= since:
             tick = run.tick

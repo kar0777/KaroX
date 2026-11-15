@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from karox6.core.messages import Message, Usage
+
+_SESSION_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}")
 
 
 def default_home() -> Path:
@@ -24,6 +27,11 @@ def default_home() -> Path:
 
 def new_session_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
+
+
+def valid_session_id(session_id: str) -> bool:
+    """A plain directory name: an id from a client can never point outside the store."""
+    return bool(_SESSION_ID.fullmatch(session_id)) and ".." not in session_id
 
 
 @dataclass(slots=True)
@@ -58,7 +66,7 @@ class SessionStore:
     @staticmethod
     def load(home: Path, session_id: str) -> LoadedSession:
         path = home / "sessions" / session_id / "session.jsonl"
-        if not path.is_file():
+        if not valid_session_id(session_id) or not path.is_file():
             raise FileNotFoundError(f"no session {session_id!r} under {home / 'sessions'}")
         loaded = LoadedSession(session_id=session_id, meta={})
         for line in path.read_text(encoding="utf-8").splitlines():

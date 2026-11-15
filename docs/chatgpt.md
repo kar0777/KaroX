@@ -11,13 +11,17 @@ export KAROX_MCP_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe
 karox mcp --http 8765 --root ~/projects --model MODEL [provider flags]
 ```
 
-The server listens on `127.0.0.1:8765` and prints its endpoint,
+The server listens on `127.0.0.1:8765`; its endpoint is
 `http://127.0.0.1:8765/mcp/<token>`. The token in the path is the only credential: keep
-the URL private. Runs may only work inside `--root` (add `--any-cwd` to lift that).
+the URL private. Without `KAROX_MCP_TOKEN` the server makes up a random token and prints
+the full URL; a token you set is not printed. The server removes the token and the API
+key variable from its environment, so the agent's commands cannot read them. Runs may
+only work inside `--root` (add `--any-cwd` to lift that).
 
 Dangerous commands (deletions, force pushes, ...) wait for approval by default: ChatGPT
-sees a pending approval in `karox_status` and answers with `karox_approve`. Use
-`--approve-dangerous deny` to refuse them outright.
+sees a pending approval in `karox_status` and answers with `karox_approve`. Approve only
+what you have read yourself: text in the repository can try to talk the model into
+approving. Use `--approve-dangerous deny` to refuse them outright.
 
 ## 2. Make it reachable over HTTPS
 

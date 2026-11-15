@@ -238,6 +238,67 @@ def test_dynamic_targets(command: str) -> None:
     assert check_command(command, cwd=CWD, workspace=CWD, home=HOME) is None
 
 
+@pytest.mark.parametrize(
+    ("command", "rule"),
+    [
+        # A quote inside double quotes is literal; the substitution still runs.
+        ("echo \"'$(rm -rf ~)'\"", "rm.recursive-force-root-or-home"),
+        ('echo "$( (rm -rf /) )"', "rm.recursive-force-root-or-home"),
+        ("echo $(echo $(rm -rf /))", "rm.recursive-force-root-or-home"),
+        # bash drops unquoted backslashes: r\m is rm.
+        (r"r\m -rf /", "rm.recursive-force-root-or-home"),
+        (r"\rm -rf /", "rm.recursive-force-root-or-home"),
+        (r"sudo r\m -rf /", "rm.recursive-force-root-or-home"),
+        (r"g\it push -f", "git.push-force"),
+        (r"rm -rf \/", "rm.recursive-force-root-or-home"),
+        ("rm -rf //", "rm.recursive-force-root-or-home"),
+        ("git push -uf origin main", "git.push-force"),
+        ("git push origin main -fu", "git.push-force"),
+        # An unset variable expands to nothing.
+        ("rm -rf $HOME/$unset", "rm.recursive-force-root-or-home"),
+        ("rm -rf $BUILD_DIR/", "rm.recursive-force-root-or-home"),
+        ('rm -rf "$STEAMROOT"/*', "rm.recursive-force-root-or-home"),
+        ("rm -rf ${PREFIX}/usr", "rm.recursive-force-root-or-home"),
+    ],
+)
+def test_evasions(command: str, rule: str) -> None:
+    result = check_command(command, cwd=CWD, workspace=CWD, home=HOME)
+    assert result is not None, command
+    assert result.rule == rule
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo '$(rm -rf /)'",
+        "echo '`rm -rf /`'",
+        r'echo "\$(rm -rf /)"',
+        "rm -rf ${OUT:?}/",
+        "rm -rf ${OUT:-build}/",
+        "rm -rf $BUILD/out",
+        'rm -rf "$TMP_DIR"',
+        "git push -u origin feature",
+        "git push --follow-tags",
+        "git push -o ci.skip",
+        "echo $((1 + 2))",
+    ],
+)
+def test_evasion_lookalikes_are_safe(command: str) -> None:
+    assert check_command(command, cwd=CWD, workspace=CWD, home=HOME) is None
+
+
+def test_powershell_subexpression() -> None:
+    result = check_command(
+        'Write-Output "$(Remove-Item C:/ -Recurse)"',
+        shell="pwsh",
+        cwd=CWD,
+        workspace=CWD,
+        home=HOME,
+    )
+    assert result is not None
+    assert result.rule == "powershell.remove-item-root-or-home"
+
+
 def test_powershell_safe() -> None:
     assert (
         check_command(

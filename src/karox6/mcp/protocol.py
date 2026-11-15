@@ -206,7 +206,7 @@ class McpServer:
             data = await self._tool(name, args)
         except _RpcError:
             raise
-        except (RunError, KeyError, TypeError, ValueError) as exc:
+        except (RunError, KeyError, TypeError, ValueError, OverflowError) as exc:
             text = str(exc) if isinstance(exc, RunError) else f"bad arguments: {exc}"
             return {"content": [{"type": "text", "text": text}], "isError": True}
         text = json.dumps(data, ensure_ascii=False, indent=1)

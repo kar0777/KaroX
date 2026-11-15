@@ -170,3 +170,19 @@ git diff --check
   (py3.12/3.13) after fixing the Linux SIGINT-test hang. 574 tests.
 - E1 also removed solution hunting: commands into pip caches / other installed copies / git
   objects fell from 47 of 780 calls (6%, baseline) to 8 of 677 (1.2%).
+- Security review before exposing the MCP server through a tunnel (helper agy Gemini 4 Argon,
+  high; each finding re-checked by hand). Fixed: command guard now sees `$(...)` inside
+  double quotes even next to a `'`, nested `$( (...) )`, `r\m`-style escaped command names,
+  `git push -uf`, `rm -rf $UNSET/` (unknown variables judged as empty when that makes the
+  target root/home) and `//`; HTTP server checks origin/token before reading a body (small
+  refused bodies are drained, large ones close the connection), read timeouts, 64
+  connections, strict framing (repeated/conflicting Content-Length/Transfer-Encoding,
+  malformed or folded headers, chunk endings, trailers -> 400), CORS preflight answered
+  without the token, deep JSON and empty/oversized batches -> 400, MCP sessions capped at
+  1000 and finished runs at 200, `request_id` reuse for another task refused, non-finite
+  `wait_seconds` ignored, session ids validated before loading. The API key variable and
+  `KAROX_MCP_TOKEN` are removed from the process environment after reading, so agent shell
+  commands (and bench transcripts) cannot show them; a user-chosen token is not printed.
+  Kept as designed: localhost origins stay allowed (the token is still required);
+  `karox_approve` stays a client tool marked destructive, docs warn about injected approvals.
+  605 tests.

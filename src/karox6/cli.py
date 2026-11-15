@@ -333,7 +333,9 @@ def _session_config(
 def _provider(args: argparse.Namespace) -> Any:
     from karox6.providers import make_provider
 
-    api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+    # Read the key once, then drop it: the agent's shell commands (and their output in
+    # transcripts) inherit this process's environment.
+    api_key = os.environ.pop(args.api_key_env, None) if args.api_key_env else None
     return make_provider(
         args.provider,
         base_url=args.base_url,
@@ -389,16 +391,20 @@ async def _mcp_async(args: argparse.Namespace) -> None:
             return
         host, _, port = args.http.rpartition(":")
         host = host or "127.0.0.1"
-        token = os.environ.get(args.token_env or "") or secrets.token_urlsafe(24)
+        # Taken out of the environment, so the agent's commands cannot read it.
+        given = os.environ.pop(args.token_env, None) if args.token_env else None
+        token = given or secrets.token_urlsafe(24)
         origins = [*DEFAULT_ORIGINS, *args.allow_origin]
         http = HttpMcp(server, token=token, allowed_origins=origins)
         listener = await http.start(host, int(port))
         bound = listener.sockets[0].getsockname()[1]
         shown = host if host not in ("0.0.0.0", "::") else "127.0.0.1"
+        # A token the user chose is not echoed (stderr often ends up in logs).
+        path_token = f"<${args.token_env}>" if given else token
         sys.stderr.write(
             f"KaroX MCP (Streamable HTTP) on http://{shown}:{bound}/mcp  root={root}\n"
             "  URL for clients that only take a URL (ChatGPT connector, behind an HTTPS\n"
-            f"  tunnel): http://{shown}:{bound}/mcp/{token}\n"
+            f"  tunnel): http://{shown}:{bound}/mcp/{path_token}\n"
             "  or send 'Authorization: Bearer <token>' to /mcp. Keep the token secret.\n"
         )
         sys.stderr.flush()

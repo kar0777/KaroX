@@ -316,3 +316,138 @@ def test_short_token_refused(tmp_path):
     manager, _ = make_manager(tmp_path, [])
     with pytest.raises(ValueError, match="at least 16"):
         HttpMcp(McpServer(manager), token="short")
+
+
+async def exchange(port, data):
+    """Send raw bytes, read until the server closes the connection."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(data)
+    await writer.drain()
+    try:
+        return await asyncio.wait_for(reader.read(), 5)
+    finally:
+        writer.close()
+
+
+def test_http_hardening(tmp_path):
+    manager, _ = make_manager(tmp_path, [])
+    http = HttpMcp(McpServer(manager), token=TOKEN)
+    init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode()
+
+    async def go():
+        listener = await http.start("127.0.0.1", 0)
+        port = listener.sockets[0].getsockname()[1]
+        async with listener:
+            # A large upload without the token is refused from its headers alone.
+            big = b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 4194304\r\n\r\n"
+            assert (await exchange(port, big)).startswith(b"HTTP/1.1 401")
+            for framing in (
+                "Content-Length: 5\r\nContent-Length: 0\r\n",
+                "Content-Length: 5\r\nTransfer-Encoding: chunked\r\n",
+                "Transfer-Encoding: gzip, chunked\r\n",
+                "Content-Length: -1\r\n",
+                "Content-Length : 5\r\n",
+                "X: y\r\n folded\r\n",
+            ):
+                bad = f"POST /mcp/{TOKEN} HTTP/1.1\r\nHost: x\r\n{framing}\r\nhello".encode()
+                assert (await exchange(port, bad)).startswith(b"HTTP/1.1 400"), framing
+            # Chunked body with trailer fields, then the next request on the same connection.
+            chunked = (
+                f"POST /mcp/{TOKEN} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+                f"{len(init):x}\r\n".encode()
+                + init
+                + b"\r\n0\r\nX-Trailer: 1\r\n\r\n"
+                + b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+            )
+            out = await exchange(port, chunked)
+            assert out.count(b"HTTP/1.1 200") == 2
+            assert b'"serverInfo"' in out
+            assert out.endswith(b"ok\n")
+            # Browsers send CORS preflights without credentials.
+            preflight = (
+                b"OPTIONS /mcp HTTP/1.1\r\nHost: x\r\nOrigin: https://chatgpt.com\r\n"
+                b"Access-Control-Request-Method: POST\r\nConnection: close\r\n\r\n"
+            )
+            out = await exchange(port, preflight)
+            assert out.startswith(b"HTTP/1.1 204")
+            assert b"Access-Control-Allow-Origin: https://chatgpt.com" in out
+
+    asyncio.run(go())
+
+
+def test_http_body_limits_and_session_cap(tmp_path, monkeypatch):
+    from karox6.mcp import transport
+
+    manager, _ = make_manager(tmp_path, [])
+    http = HttpMcp(McpServer(manager), token=TOKEN)
+    target = f"/mcp/{TOKEN}"
+    init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode()
+    monkeypatch.setattr(transport, "MAX_SESSIONS", 2)
+
+    async def go():
+        deep = await http.respond("POST", target, {}, b"[" * 100_000 + b"]" * 100_000)
+        assert deep[0] == 400
+        empty = await http.respond("POST", target, {}, b"[]")
+        assert empty[0] == 400
+        sids = []
+        for _ in range(3):
+            status, headers, _ = await http.respond("POST", target, {}, init)
+            assert status == 200
+            sids.append(headers["Mcp-Session-Id"])
+        assert list(http.sessions) == sids[1:]
+
+    asyncio.run(go())
+
+
+def test_run_guards(tmp_path, monkeypatch):
+    from karox6.mcp import runs as runs_module
+
+    monkeypatch.setattr(runs_module, "MAX_RUNS", 2)
+    manager, _ = make_manager(tmp_path, [Turn(text="ok")])
+    server = McpServer(manager)
+
+    async def finish(run_id):
+        since = 0
+        for _ in range(50):
+            view = await manager.status(run_id, since=since, wait_s=1)
+            since = view["next"]
+            if view["status"] != "running":
+                return view
+        raise AssertionError("run did not finish")
+
+    async def go():
+        first = (await tool(server, "karox_run", task="one", request_id="r1"))["structuredContent"]
+        reused = await tool(server, "karox_run", task="two", request_id="r1")
+        assert reused["isError"] is True
+        assert "another task" in reused["content"][0]["text"]
+        nan = await tool(server, "karox_status", run_id=first["run_id"], wait_seconds="nan")
+        assert "isError" not in nan
+        huge = await tool(server, "karox_status", run_id=first["run_id"], since=float("inf"))
+        assert huge["isError"] is True
+        await finish(first["run_id"])
+        travel = await tool(server, "karox_run", task="t", session_id="../../outside")
+        assert travel["isError"] is True
+        assert "no session" in travel["content"][0]["text"]
+        for task in ("two", "three"):
+            run, _ = manager.start(task)
+            await finish(run.run_id)
+        assert first["run_id"] not in manager.runs  # the oldest finished run was forgotten
+        assert "r1" not in manager.by_request
+        assert len(manager.runs) == 2
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_cli_drops_api_key_from_environment(monkeypatch):
+    import os
+
+    from karox6 import cli
+
+    monkeypatch.setenv("TEST_LLM_KEY", "test-secret-value")
+    args = cli._parser().parse_args(
+        ["run", "--model", "m", "--api-key-env", "TEST_LLM_KEY", "--base-url", "http://x/v1", "t"]
+    )
+    provider = cli._provider(args)
+    assert "TEST_LLM_KEY" not in os.environ  # agent shell commands inherit os.environ
+    asyncio.run(provider.aclose())

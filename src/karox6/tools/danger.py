@@ -81,7 +81,51 @@ def _tokens(text: str) -> list[str]:
         return re.findall(r"&&|\|\||>>|[;&|()<>]|[^\s;&|()<>]+", text)
 
 
-def _path(value: str, cwd: str, home: str) -> str | None:
+def _substitutions(text: str, shell: str) -> list[str]:
+    """Bodies of ``$(...)`` and backtick substitutions that the shell would execute.
+
+    Single quotes are literal only outside double quotes, and ``$(...)`` may nest.
+    """
+    bash = shell == "bash"
+    found: list[str] = []
+    i, n, double = 0, len(text), False
+    while i < n:
+        char = text[i]
+        if (char == "\\" and bash) or (char == "`" and not bash):
+            i += 2  # an escaped character (PowerShell escapes with a backtick)
+            continue
+        if char == "'" and not double:
+            end = text.find("'", i + 1)
+            i = n if end < 0 else end + 1
+            continue
+        if char == '"':
+            double = not double
+        elif char == "`":
+            end = text.find("`", i + 1)
+            end = n if end < 0 else end
+            found.append(text[i + 1 : end])
+            i = end + 1
+            continue
+        elif text.startswith("$(", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += {"(": 1, ")": -1}.get(text[j], 0)
+                j += 1
+            found.append(text[i + 2 : j - 1 if depth == 0 else n])
+            i = j
+            continue
+        i += 1
+    return found
+
+
+_VARIABLE = re.compile(r"\$\{[A-Za-z_][A-Za-z_0-9]*\}|\$[A-Za-z_][A-Za-z_0-9]*")
+
+
+def _path(value: str, cwd: str, home: str, *, unset_empty: bool = False) -> str | None:
+    """Resolve a target path; None when it depends on unknown variables.
+
+    ``unset_empty`` resolves it as if every unknown variable were unset (empty).
+    """
     value = value.strip("'\"").replace("\\", "/")
     value = re.sub(r"^\$\{HOME\}|^\$HOME(?=/|$)|^~(?=/|$)", lambda _: home, value, flags=re.I)
     value = re.sub(r"^\$\{PWD\}|^\$PWD(?=/|$)", lambda _: cwd, value, flags=re.I)
@@ -91,6 +135,10 @@ def _path(value: str, cwd: str, home: str) -> str | None:
         value,
         flags=re.I,
     )
+    if unset_empty and "${" not in _VARIABLE.sub("", value):  # ${X:-y}, ${X:?}: not empty
+        value = _VARIABLE.sub("", value)
+        if not value:
+            return None
     if "$" in value or "%" in value:
         return None
     # Git Bash drive notation and native Windows paths share a representation.
@@ -98,7 +146,12 @@ def _path(value: str, cwd: str, home: str) -> str | None:
     cwd = re.sub(r"^/([a-zA-Z])(?=/|$)", lambda m: m.group(1).lower() + ":", cwd.replace("\\", "/"))
     if re.match(r"^[a-zA-Z]:", value) or re.match(r"^[a-zA-Z]:", cwd):
         return ntpath.normcase(ntpath.normpath(ntpath.join(cwd, value))).replace("\\", "/")
-    return posixpath.normpath(posixpath.join(cwd, value))
+    # normpath keeps a leading "//"; for rm it is the root all the same.
+    return re.sub(r"^//+", "/", posixpath.normpath(posixpath.join(cwd, value)))
+
+
+def _glob_base(path: str) -> str:
+    return (path[:-2] or "/") if path.endswith("/*") else path
 
 
 def _within(path: str, base: str) -> bool:
@@ -142,12 +195,10 @@ class _Checker:
         if depth > 8:
             return None
         # Single-quoted text is literal; command substitution in double quotes executes.
-        for substitution in re.finditer(r"'[^']*'|\$\(([^()]*)\)|`([^`]*)`", text):
-            inner = substitution.group(1) or substitution.group(2)
-            if inner:
-                found = self.scan(inner, shell, cwd, depth + 1)
-                if found:
-                    return found
+        for inner in _substitutions(text, shell):
+            found = self.scan(inner, shell, cwd, depth + 1) if inner.strip() else None
+            if found:
+                return found
         tokens = _tokens(text)
         segments: list[tuple[list[str], str]] = []
         part: list[str] = []
@@ -185,6 +236,12 @@ class _Checker:
             args.pop(0)
         if not args:
             return None
+        if shell == "bash" and "\\" in args[0] and depth < 8:
+            # Unquoted, bash drops the backslashes (r\m is rm); quoted, it is a Windows path.
+            unescaped = [args[0].replace("\\", ""), *args[1:]]
+            found = self.simple(unescaped, shell, cwd, depth + 1, producer)
+            if found:
+                return found
         name = _basename(args[0])
         if name in {
             "sudo",
@@ -285,10 +342,16 @@ class _Checker:
                 path = _path(target, cwd, self.home)
                 if path is not None and (recursive or force) and _git(target):
                     return _match("rm.git-metadata", target)
-                if not (recursive and force) or path is None:
+                if not (recursive and force):
+                    continue
+                if path is None:
+                    # An unset variable expands to nothing: `rm -rf $DIR/` deletes `/`.
+                    empty = _path(target, cwd, self.home, unset_empty=True)
+                    if empty and _root(_glob_base(empty), self.home):
+                        return _match("rm.recursive-force-root-or-home", target)
                     continue
                 stripped = target.replace("\\", "/").rstrip("/")
-                base = (path[:-2] or "/") if path.endswith("/*") else path
+                base = _glob_base(path)
                 if _root(base, self.home):
                     return _match("rm.recursive-force-root-or-home", target)
                 if stripped in {".", "*", "./*", "..", "$PWD", "${PWD}"} or path == self.workspace:
@@ -363,7 +426,8 @@ class _Checker:
         if name == "git" and "push" in args[1:]:
             index = args.index("push")
             if any(
-                a in {"--force", "-f", "--force-with-lease", "--force-if-includes", "--mirror"}
+                a in {"--force", "--force-with-lease", "--force-if-includes", "--mirror"}
+                or (a.startswith("-") and not a.startswith("--") and "f" in a[1:])  # -f, -uf
                 or a.startswith("--force-with-lease=")
                 or a.startswith("+")
                 for a in args[index + 1 :]
