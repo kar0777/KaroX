@@ -66,6 +66,19 @@ TRUNCATION_NOTICE = (
     "Continue from where it stopped. Keep each response shorter: split large file contents "
     "into several smaller write or edit calls."
 )
+WRAP_UP_STEPS = 120  # dev-pool solved runs needed at most 94 model calls
+FINAL_CALL_STEPS = 30  # after the wrap-up notice, ask for the final answer
+HEADLESS_MAX_STEPS = 200  # default hard limit for `run` / `mcp` (runaway guard)
+WRAP_UP_NOTICE = (
+    "This run has taken {steps} steps, and every further step re-sends the whole "
+    "conversation. Wrap up: keep the changes that work, run the most relevant tests once, "
+    "and reply with your final summary. Continue past that only for a concrete fix you "
+    "can name."
+)
+FINAL_NOTICE = (
+    "This run has taken {steps} steps. Stop now: reply with your final summary (what you "
+    "changed, what is verified, what remains) without calling more tools."
+)
 
 
 @dataclass(slots=True)
@@ -93,6 +106,7 @@ class SessionConfig:
     system_prompt: str | None = None  # replaces the base prompt (environment is still added)
     system_append: str | None = None  # appended after the base prompt (A/B variants, users)
     subagents: bool = False  # offer the `agent` tool (M5, off until it wins an A/B)
+    wrap_up_steps: int | None = WRAP_UP_STEPS  # None/0: never remind about long runs
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def compaction_threshold(self) -> int:
@@ -259,6 +273,11 @@ class Session:
                 if stop:
                     status, reason = "loop", stop
                     break
+                wrap = self.config.wrap_up_steps
+                if wrap and steps == wrap:
+                    self._notice("wrap_up", WRAP_UP_NOTICE.format(steps=steps), emit)
+                elif wrap and steps == wrap + FINAL_CALL_STEPS:
+                    self._notice("wrap_up", FINAL_NOTICE.format(steps=steps), emit)
         except ProviderError as exc:
             status, reason = "error", str(exc)
             emit(ev.ErrorEvent(code=exc.code, message=str(exc)))

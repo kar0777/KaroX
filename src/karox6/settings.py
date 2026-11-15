@@ -30,6 +30,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "context_window": (int,),
     "max_output_tokens": (int,),
     "max_steps": (int,),
+    "wrap_up_steps": (int,),
     "max_seconds": (int, float),
     "max_cost": (int, float),
     "reasoning_effort": (str,),

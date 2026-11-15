@@ -194,3 +194,20 @@ git diff --check
   detected (Windows only, so no bench effect). The same run also committed to the user's
   repo unasked: candidate prompt rule "do not commit/push unless asked" goes into the next
   A/B batch (D-021), not straight into BASE_PROMPT.
+- Night plan (user: 9 h until review, "make KaroX the best"): Synthetic allows 3 parallel
+  tasks, so: prepare batch B1 while k6h2s keeps running, cancel k6h2s (finished trials kept),
+  A/B B1 on the dev pool (~1 h), then one held-out run of the winner by morning.
+- Why B1: on k6h1s KaroX made 1.38x DSH's model calls (3620 vs 2627) with fewer tool calls
+  per step (1.27 vs 1.42); tasks with >120 calls hold 56% of its input tokens (one task: 285
+  calls, 80M tokens); DSH's prompt has no verification push at all. On the dev pool no
+  solved KaroX run needed more than 94 calls.
+- B1 (6.0.0.dev3): (1) wrap-up notice at step 120 and a final-answer notice at 150
+  (`--wrap-up-steps`, 0 = off); headless `run`/`mcp` default `--max-steps 200` (0 = none,
+  chat unlimited); (2) "Work economically" also asks to check edge cases with one script
+  rather than one probe per step; (3) "Do not commit, push or create branches unless the
+  task asks for it" (product rule; a live run committed unasked).
+- B1 decision rule, fixed before the run: adopt if on the dev pool, against E1 (k6e1) on
+  the tasks both ran cleanly (and against k6d1 for 68/71, lost to 503s in E1), B1 solves
+  at least as many tasks with no more LLM calls per task; otherwise reject and the
+  held-out run judges dev2. The step-120 notice barely triggers on the dev pool (E1 max
+  110 calls), so its effect is measured on the held-out run.

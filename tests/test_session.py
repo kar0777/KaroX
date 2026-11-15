@@ -418,3 +418,41 @@ def test_snapshot_can_be_disabled(tmp_path):
     )
     finish(run(session))
     assert not (session.store.dir / "submissions").exists()
+
+
+def test_wrap_up_notices_on_long_runs(tmp_path, monkeypatch):
+    from karox6.core import session as session_module
+
+    monkeypatch.setattr(session_module, "FINAL_CALL_STEPS", 2)
+    # different files, so the loop guard stays quiet
+    turns = [Turn(calls=[("read", {"file_path": f"f{i}"})]) for i in range(6)] + [Turn(text="done")]
+    session = Session(config(tmp_path, wrap_up_steps=2), ScriptedProvider(turns))
+    events = run(session)
+    notices = [e for e in events if e.type == "notice" and e.kind == "wrap_up"]
+    assert [n.text.split(".")[0] for n in notices] == [
+        "This run has taken 2 steps, and every further step re-sends the whole conversation",
+        "This run has taken 4 steps",
+    ]
+    assert "without calling more tools" in notices[1].text
+    assert finish(events).status == "completed"
+    quiet = Session(config(tmp_path, wrap_up_steps=None), ScriptedProvider(list(turns)))
+    assert not [e for e in run(quiet) if e.type == "notice"]
+
+
+def test_step_limits_by_command(tmp_path):
+    from karox6 import cli
+    from karox6.core.session import HEADLESS_MAX_STEPS, WRAP_UP_STEPS
+
+    assert cli.WRAP_UP_DEFAULT == WRAP_UP_STEPS
+
+    def built(*argv):
+        args = cli._parser().parse_args([*argv, "--model", "m"])
+        return cli._session_config(args, tmp_path, tmp_path / "home", stream_deltas=False)
+
+    assert built("run", "t").max_steps == HEADLESS_MAX_STEPS
+    assert built("mcp").max_steps == HEADLESS_MAX_STEPS
+    assert built("chat").max_steps is None
+    assert built("run", "t", "--max-steps", "0").max_steps is None
+    assert built("run", "t", "--max-steps", "7").max_steps == 7
+    assert built("chat").wrap_up_steps == WRAP_UP_STEPS
+    assert built("run", "t", "--wrap-up-steps", "0").wrap_up_steps is None
