@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "karox6"
+dynamic = ["version"]
+description = "KaroX 6: a small, fast coding-agent CLI (headless, TUI, MCP) on one core"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "KaroX contributors" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Software Development",
+]
+# Core stays tiny: one HTTP client. Everything heavier lives in extras and is
+# imported lazily, so `karox --version` and an idle session stay cheap.
+dependencies = ["httpx>=0.27,<1"]
+
+[project.optional-dependencies]
+tui = []
+mcp = []
+
+[project.scripts]
+karox = "karox6.cli:main"
+karox6 = "karox6.cli:main"
+
+[project.urls]
+Repository = "https://github.com/kar0777/KaroX"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[tool.hatch.version]
+path = "src/karox6/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/karox6"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/karox6", "tests", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PL", "PT"]
+ignore = [
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR2004",  # size/magic-number heuristics
+    "PLC0415",  # lazy imports are a design goal (startup time / RSS)
+    "RUF001", "RUF002", "RUF003",  # Russian text in docs/messages is intended
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/karox6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

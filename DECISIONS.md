@@ -1,0 +1,58 @@
+# KaroX 6 — decisions
+
+Each entry: what was decided and why. User decisions (from `KAROX6_BUILD_PROMPT.md`)
+are marked **[user]** and are not revisited without asking the user.
+
+## Fixed by the user
+
+- **D-001 [user]** Rebuild from scratch in `D:\проекты\KaroX-6`; KaroX 5 is a source of
+  lessons only, none of its code is carried over.
+- **D-002 [user]** Python 3.12+, `uv`, minimal dependencies, lazy imports.
+- **D-003 [user]** Windows, Linux and macOS from the first release (CI matrix on all three).
+- **D-004 [user]** One core, many clients: headless CLI (JSON stream), light TUI, MCP server
+  (stdio + Streamable HTTP), MCP client. Providers: OpenAI-compatible Chat Completions and
+  Responses, Anthropic Messages, Gemini (with `thought_signature` round-trip).
+- **D-005 [user]** No ChatGPT-subscription login, no ACP or other editor protocols.
+- **D-006 [user]** Minimal safety at start: only explicitly destructive commands need
+  confirmation, using a ready-made, permissively licensed rule set. No word bans
+  (e.g. "publish").
+- **D-007 [user]** Bench = Harbor + `kar0777/karox-hard12-bench`; new adapter
+  `harbor_agents/karox6_agent.py`, the KaroX 5 adapter stays untouched. Model
+  `deepseek-v4.1-flash-1017` via ReformBoss, one paid run at a time, parallel <= 3.
+  Push only to a new branch (`karox6/main`) of `kar0777/KaroX`; never `main`; publishing
+  only with explicit permission.
+
+## Engineering decisions
+
+- **D-008** Resource targets enforced in CI by `scripts/perf_check.py`: `karox --version`
+  <= 300 ms (median of 7), idle RSS of the headless stack <= 80 MiB.
+- **D-009** Distribution and import package are `karox6` (so it can sit next to an installed
+  KaroX 5, whose import package is `karox`); console scripts are `karox` and `karox6`.
+  Build backend hatchling (pure-Python wheel, no compilers).
+- **D-010** Only runtime dependency in core: `httpx`. Tests use plain `pytest` and
+  `asyncio.run` (no pytest-asyncio).
+- **D-011** Design reference is DeepSeek Harness (MIT) because DeepSeek-V4.1-Flash scores
+  well with it and was very likely trained on harnesses of this shape. Tool names and
+  argument names follow the de-facto standard shared by DSH, OpenCode and Claude Code
+  (`bash`, `read`, `write`, `edit`, `glob`, `grep`, `todo_write`, `job_*`), so models
+  meet in-distribution tools. Source study: DSH 0.2.2-rc.1 local package (2026-11-15).
+- **D-012** Dangerous-command guard: port of the rules of
+  `kenryu42/claude-code-safety-net` (MIT, 2k stars, also shipped as a DSH/OpenCode
+  plugin), restricted to the catastrophic subset the user listed (rm -rf of root/home/
+  workspace/.git, PowerShell/cmd equivalents, find -delete on .git, dd/mkfs/disk erase/
+  writes to block devices, git push --force). One own rule is added because the catalog
+  lacks it: SQL `DROP DATABASE`/`DROP SCHEMA` through database CLIs. Codex CLI's rule set
+  (Apache-2.0) was considered and rejected: on POSIX it flags every forced `rm`
+  (`rm -rf build`), which would block normal autonomous work. Not blocked at start (a user
+  decision if wanted later): `git reset --hard`, `git clean -fd`, `git checkout -- path`.
+
+## Evaluation hygiene
+
+- **D-020** Judge only on held-out tasks. Night tasks are `data/night_tasks.txt` lines 13-73
+  of the bench repo. Burned (analysed before KaroX 6, never used for scoring):
+  **13, 28, 32, 39, 40, 46, 52, 57, 59, 68, 71**. Every task whose trajectory is analysed
+  to change KaroX 6 gets added here and leaves the scoring pool.
+- **D-021** No rule may mention a specific task, repository or library. Every prompt/tool
+  change goes through an A/B on the same tasks; a rule without measurable gain is removed.
+- **D-022** Rival baseline (already paid): run `43027228648`, night tasks 13-73,
+  OpenCode 24/61, DSH 24/61, KaroX 5 17/61 (Synthetic upstream, same model).
