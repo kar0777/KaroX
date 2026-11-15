@@ -247,13 +247,13 @@ def test_rate_limit_retries_until_budget():
     class Flaky:
         name = "flaky"
 
-        def __init__(self, failures, code="rate_limit"):
-            self.failures, self.code, self.calls = failures, code, 0
+        def __init__(self, failures, code="rate_limit", status=None):
+            self.failures, self.code, self.status, self.calls = failures, code, status, 0
 
         async def complete(self, request, on_delta=None):
             self.calls += 1
             if self.calls <= self.failures:
-                raise ProviderError(self.code, "busy")
+                raise ProviderError(self.code, "busy", status=self.status)
             return ModelResponse(Message("assistant", "ok"), Usage(), "stop", None)
 
         async def aclose(self):
@@ -278,5 +278,26 @@ def test_rate_limit_retries_until_budget():
         with pytest.raises(ProviderError):
             await complete_with_retry(provider, request(), policy=tight)
         assert provider.calls == 4
+        # "Service unavailable" outages are waited out like rate limits...
+        for status in (502, 503, 529):
+            provider = Flaky(12, code="server", status=status)
+            reply = await complete_with_retry(provider, request(), policy=fast)
+            assert reply.message.content == "ok"
+            assert provider.calls == 13
+        # ...on their own budget, while a plain 500 keeps the short policy.
+        provider = Flaky(100, code="server", status=503)
+        short = RetryPolicy(
+            initial_delay_s=0.01,
+            rate_limit_max_delay_s=0.01,
+            jitter=0.0,
+            unavailable_budget_s=0.035,
+        )
+        with pytest.raises(ProviderError):
+            await complete_with_retry(provider, request(), policy=short)
+        assert provider.calls == 4
+        provider = Flaky(12, code="server", status=500)
+        with pytest.raises(ProviderError):
+            await complete_with_retry(provider, request(), policy=fast)
+        assert provider.calls == fast.max_retries + 1
 
     asyncio.run(go())

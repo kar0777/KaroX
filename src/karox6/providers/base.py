@@ -30,6 +30,7 @@ ErrorCode = Literal[
 RETRYABLE: frozenset[str] = frozenset(
     {"rate_limit", "server", "timeout", "transport", "empty_response"}
 )
+UNAVAILABLE_STATUSES = frozenset({502, 503, 529})  # not processed: safe to wait out
 
 
 class ProviderError(Exception):
@@ -106,7 +107,10 @@ class RetryPolicy:
     addresses in a 10-minute window), so ``rate_limit`` errors are retried until
     ``rate_limit_budget_s`` of waiting is spent, with delays growing to
     ``rate_limit_max_delay_s``. A request refused with 429 was not executed, so
-    waiting it out is always safe; the session deadline still bounds it.
+    waiting it out is always safe; the session deadline still bounds it. "Service
+    unavailable" answers (502, 503, 529: the request was not processed either) are
+    waited out the same way on ``unavailable_budget_s``, so an upstream outage of a few
+    minutes does not end the run; other server errors and timeouts keep the short policy.
     """
 
     max_retries: int = 5
@@ -116,6 +120,7 @@ class RetryPolicy:
     max_retry_after_s: float = 60.0
     rate_limit_budget_s: float = 900.0
     rate_limit_max_delay_s: float = 60.0
+    unavailable_budget_s: float = 600.0
 
     def delay(self, attempt: int, retry_after: float | None, *, rate_limit: bool = False) -> float:
         if retry_after is not None and 0 < retry_after <= self.max_retry_after_s:
@@ -137,7 +142,7 @@ async def complete_with_retry(
 ) -> ModelResponse:
     policy = policy or RetryPolicy()
     attempt = 0
-    rate_limit_waited = 0.0
+    waited = {"rate_limit": 0.0, "unavailable": 0.0}
     while True:
         try:
             response = await provider.complete(request, on_delta)
@@ -145,11 +150,23 @@ async def complete_with_retry(
             attempt += 1
             if exc.code not in RETRYABLE:
                 raise
-            if exc.code == "rate_limit":
+            kind = (
+                "rate_limit"
+                if exc.code == "rate_limit"
+                else "unavailable"
+                if exc.status in UNAVAILABLE_STATUSES
+                else None
+            )
+            if kind is not None:
+                budget = (
+                    policy.rate_limit_budget_s
+                    if kind == "rate_limit"
+                    else policy.unavailable_budget_s
+                )
                 delay = policy.delay(attempt, exc.retry_after, rate_limit=True)
-                if rate_limit_waited + delay > policy.rate_limit_budget_s:
+                if waited[kind] + delay > budget:
                     raise
-                rate_limit_waited += delay
+                waited[kind] += delay
             elif attempt > policy.max_retries:
                 raise
             else:
