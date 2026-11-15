@@ -780,3 +780,59 @@ def test_rerun_targets_keep_package_local_node_ids() -> None:
         "sympy/core/tests/test_basic.py::test_value",
         "tests/admin_views/tests.py",
     ]
+
+
+def test_a_very_long_line_is_parsed_in_linear_time() -> None:
+    import time
+
+    from karox.check_parsers import _last_location
+
+    started = time.monotonic()
+    assert _last_location("a" * 200_000) is None
+    log = JEST_LOG.replace("    Expected:", "    " + "x" * 200_000 + "\n    Expected:")
+    payload = analyze(log)
+    assert time.monotonic() - started < 5
+    assert payload["total"] == 1
+    assert (_failure(payload)["path"], _failure(payload)["line"]) == ("tests/format.test.js", 12)
+    assert _last_location("at fn (src/a.test.js:12:5)") == ("src/a.test.js", 12, 5)
+
+
+def test_go_verbose_log_keeps_each_test_its_own_line() -> None:
+    log = (
+        "=== RUN   TestTotal\n"
+        "    cart_test.go:14: total = 3, want 4\n"
+        "--- FAIL: TestTotal (0.00s)\n"
+        "=== RUN   TestOther\n"
+        "    other_test.go:5: just a log line\n"
+        "--- PASS: TestOther (0.00s)\n"
+        "=== RUN   TestParse\n"
+        "=== RUN   TestParse/empty\n"
+        "    parse_test.go:12: got 1, want 0\n"
+        "--- FAIL: TestParse (0.00s)\n"
+        "    --- FAIL: TestParse/empty (0.00s)\n"
+        "FAIL\n"
+    )
+    payload = analyze(log)
+    rows = [_failure(payload, index) for index in range(payload["total"])]
+    assert [(row["test_id"], row["path"], row["line"], row["message"]) for row in rows] == [
+        ("TestTotal", "cart_test.go", 14, "total = 3, want 4"),
+        ("TestParse/empty", "parse_test.go", 12, "got 1, want 0"),
+    ]
+
+
+def test_a_pytest_section_cut_above_its_frame_keeps_the_assertion() -> None:
+    log = (
+        "___________________ test_bad ___________________\n"
+        "E   AssertionError: got 3 expected 4\n"
+    )
+    row = _failure(analyze(log))
+    assert row["test_id"] == "test_bad"
+    assert row["message"] == "AssertionError: got 3 expected 4"
+
+
+def test_cargo_panic_on_a_windows_path_keeps_its_place() -> None:
+    log = CARGO_TEST_LOG.replace("src/lib.rs:7:9", r"C:\work\src\lib.rs:42:5")
+    row = _failure(analyze(log))
+    assert (row["line"], row["column"]) == (42, 5)
+    assert row["path"].endswith("lib.rs")
+    assert row["message"] == "assertion `left == right` failed"

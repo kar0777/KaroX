@@ -21,7 +21,11 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 _WHITESPACE = re.compile(r"\s+")
 
+# A match starts only where a path token starts. Without the look-behind a
+# long run of path characters with no ``:line`` after it was rescanned from
+# every position in it: 16k characters took 1.6 s, a minified line minutes.
 _LOCATION = re.compile(
+    r"(?<![^\s:()\[\]{}])"
     r"(?P<path>(?:[A-Za-z]:[\\/]|file://)?[^\s:()\[\]{}]+)"
     r":(?P<line>\d+)(?::(?P<column>\d+))?"
 )
@@ -332,7 +336,8 @@ def _pytest_sections(
         location = locations[-1] if locations else None
         name = mark.group("name").strip()
         if location is None:
-            result.append((name, "", None, None, ""))
+            # A cut log may keep the E line without the frame under it.
+            result.append((name, "", None, None, _first_error_line(block)))
             continue
         message = (location.group("msg") or "").strip()
         if not message:
@@ -679,10 +684,42 @@ _GO_LOCATION = re.compile(
 
 _GO_PANIC = re.compile(r"^panic: (?P<msg>.*)$", re.M)
 
+_GO_RUN = re.compile(r"^=== (?:RUN|CONT|NAME)\s+(?P<test>\S+)\s*$")
+
+def _go_verbose_locations(lines: Sequence[str]) -> dict[str, tuple[str, int, str]]:
+    """First log line with a place for each test, as ``go test -v`` prints it.
+
+    In verbose mode a test's ``t.Errorf`` lines come after its ``=== RUN``
+    line and before its ``--- FAIL`` verdict, not under the verdict.
+    """
+
+    found: dict[str, tuple[str, int, str]] = {}
+    current: Optional[str] = None
+    for raw in lines:
+        stripped = raw.strip()
+        run = _GO_RUN.match(stripped)
+        if run is not None:
+            current = run.group("test")
+            continue
+        if stripped.startswith(("--- ", "=== ")):
+            current = None
+            continue
+        if current is None or current in found:
+            continue
+        location = _GO_LOCATION.match(raw)
+        if location is not None:
+            found[current] = (
+                location.group("path"),
+                int(location.group("line")),
+                location.group("msg").strip(),
+            )
+    return found
+
 _GO_PANIC_LOCATION = re.compile(r"^(?P<path>[^\s:]+\.go):(?P<line>\d+)", re.M)
 
 def _go_test(text: str) -> list[dict[str, object]]:
     lines = text.splitlines()
+    verbose = _go_verbose_locations(lines)
     rows: list[dict[str, object]] = []
     index = 0
     while index < len(lines):
@@ -695,7 +732,9 @@ def _go_test(text: str) -> list[dict[str, object]]:
         path = ""
         line: Optional[int] = None
         message = ""
-        while index < len(lines) and not lines[index].strip().startswith("--- "):
+        # In -v mode ``=== RUN`` starts the next test's output; its log
+        # lines are not this test's.
+        while index < len(lines) and not lines[index].strip().startswith(("--- ", "=== ")):
             location = _GO_LOCATION.match(lines[index])
             if location is not None and not path:
                 path = location.group("path")
@@ -707,6 +746,8 @@ def _go_test(text: str) -> list[dict[str, object]]:
         following = _GO_FAILED.match(lines[index].strip()) if index < len(lines) else None
         if not path and following is not None and following.group("test").startswith(test + "/"):
             continue  # the parent of failed subtests: each subtest has its own row
+        if not path and test in verbose:
+            path, line, message = verbose[test]
         rows.append(
             _row(
                 "go-test",
@@ -739,13 +780,13 @@ _CARGO_FAILED = re.compile(r"^test (?P<test>[\w:]+) \.\.\. FAILED\s*$", re.M)
 _CARGO_BLOCK = re.compile(r"^---- (?P<test>[\w:]+) stdout ----\s*$", re.M)
 
 _CARGO_PANIC = re.compile(
-    r"panicked at (?P<path>[^:\n]+):(?P<line>\d+):(?P<column>\d+):\s*$", re.M
+    r"panicked at (?P<path>(?:[A-Za-z]:)?[^:\n]+):(?P<line>\d+):(?P<column>\d+):\s*$", re.M
 )
 
 _CARGO_ERROR = re.compile(r"^error(?:\[(?P<code>E\d+)\])?: (?P<msg>.+)$", re.M)
 
 _CARGO_ARROW = re.compile(
-    r"^\s*-->\s+(?P<path>[^:\n]+):(?P<line>\d+):(?P<column>\d+)\s*$", re.M
+    r"^\s*-->\s+(?P<path>(?:[A-Za-z]:)?[^:\n]+):(?P<line>\d+):(?P<column>\d+)\s*$", re.M
 )
 
 def _cargo_test(text: str) -> list[dict[str, object]]:
