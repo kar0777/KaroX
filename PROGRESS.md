@@ -238,3 +238,8 @@ git diff --check
   read. dev2 sessions hit 5 such refusals in 2 sessions; in one the agent re-viewed the
   file with `sed -n`, which does not count as a read, and was refused again. Each refusal
   ended in a full-file `read`. Bug-level tool-contract fix, measured on the held-out run.
+- Note on the two tool fixes above: the error counts came from a scan of every session on
+  disk, including the partial held-out runs k6h1s/k6h2s. Only tool-contract error
+  messages were counted (no task content, no prompt rules derived from them), and both
+  fixes only change what a tool accepts, so the held-out judgment stays usable; the
+  report states it.
