@@ -127,3 +127,11 @@ git diff --check
   measurement (D-027). Live check on CrowLLM grok-4.7-fast (free): fixed a bug, `/diff`
   and `/status` correct, 429s ridden out. Generated caches (`__pycache__`, `*.pyc`, tool
   caches) no longer count as changed files. 555 tests; `karox --version` ~100 ms.
+- Cache misses (`karox6-bench-data/uncached.py`, `misses.py`; gateway audits only): the
+  held-out rivals' baseline 43027228648 ran on W&B Inference (audit `api_base`), KaroX 6's
+  k6h1s on Synthetic, so the 1.85x cost ratio crossed upstreams. Misses are random (gap
+  before a miss median 0 s, no TTL effect) at similar rates (KaroX 3.3%, DSH 2.2%,
+  OpenCode 2.5% of calls) but cost KaroX more (mean 116k vs 70k context); they are 72% of
+  KaroX's uncached input on Synthetic and 0% on ReformBoss dev runs. Repricing misses as
+  cache hits: KaroX $2.91 vs DSH $2.41 vs OpenCode $4.57 for the 50 tasks (1.21x DSH).
+  Cost comparisons from now on report this miss-normalized price next to the raw one.
