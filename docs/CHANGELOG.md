@@ -50,6 +50,9 @@
   and no longer names the diff review KaroX collects itself.
 - A command that only asks which tools are installed (`which ruff`,
   `mypy --version`, `command -v black`) is never owed as a failed check.
+- The adversarial deep pass also runs when a test suite is approved (with at
+  least 60% of a 30+ minute budget left): existing tests pin old behaviour,
+  not the combinations a change must handle.
 - The deep pass names general states (empty, boundary, several, interleaved,
   partial then repeated, removal) instead of one task's data model.
 

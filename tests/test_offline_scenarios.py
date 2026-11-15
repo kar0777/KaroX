@@ -315,11 +315,13 @@ def test_an_early_probe_only_finish_gets_one_adversarial_pass(
     assert _request_text(provider.requests[-1]).count("one adversarial pass (asked only once)") == 1
 
 
-def test_a_run_with_an_approved_test_suite_skips_the_adversarial_pass(
+def test_a_run_with_an_approved_test_suite_still_gets_the_adversarial_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """rebench26 v60h: existing tests stayed green on a fix missing a combination."""
+
     provider = _run_budget(tmp_path, monkeypatch, [[sys.executable, "-m", "pytest", "*"], [sys.executable, "*"]], 3600)
-    assert "adversarial pass" not in _request_text(provider.requests[-1])
+    assert _request_text(provider.requests[-1]).count("one adversarial pass (asked only once)") == 1
 
 
 def test_a_short_budget_skips_the_adversarial_pass(
