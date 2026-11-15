@@ -441,18 +441,17 @@ def test_wrap_up_notices_on_long_runs(tmp_path, monkeypatch):
 
 def test_step_limits_by_command(tmp_path):
     from karox6 import cli
-    from karox6.core.session import HEADLESS_MAX_STEPS, WRAP_UP_STEPS
-
-    assert cli.WRAP_UP_DEFAULT == WRAP_UP_STEPS
 
     def built(*argv):
         args = cli._parser().parse_args([*argv, "--model", "m"])
         return cli._session_config(args, tmp_path, tmp_path / "home", stream_deltas=False)
 
-    assert built("run", "t").max_steps == HEADLESS_MAX_STEPS
-    assert built("mcp").max_steps == HEADLESS_MAX_STEPS
+    assert built("run", "t").max_steps is None
+    assert built("mcp").max_steps is None
     assert built("chat").max_steps is None
     assert built("run", "t", "--max-steps", "0").max_steps is None
     assert built("run", "t", "--max-steps", "7").max_steps == 7
-    assert built("chat").wrap_up_steps == WRAP_UP_STEPS
+    assert built("chat").wrap_up_steps is None
+    assert built("run", "t").wrap_up_steps is None
+    assert built("run", "t", "--wrap-up-steps", "120").wrap_up_steps == 120
     assert built("run", "t", "--wrap-up-steps", "0").wrap_up_steps is None

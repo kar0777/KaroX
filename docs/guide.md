@@ -89,18 +89,15 @@ With `--json` every line is an event with a `type`: `run_started`, `assistant_me
 
 Limits:
 
-- `--max-steps N`: model calls per turn. Default 200 for `run` and `mcp`, none for `chat`;
-  `0` means no limit.
-- `--wrap-up-steps N`: after N steps (default 120) the agent is told to finish its current
-  line of work and verify; 30 steps later it is asked for its final answer. `0` turns this
-  off.
+- `--max-steps N`: model calls per turn (no limit by default).
+- `--wrap-up-steps N`: after N steps the agent is told to finish its current line of work
+  and verify; 30 steps later it is asked for its final answer (off by default).
 - `--max-seconds`, `--max-cost` (needs prices).
 
 ## Safety
 
 KaroX works on its own for ordinary engineering work: reading, editing, tests, builds and
-local git commands run without prompts. It does not commit, push or create branches unless
-the task asks for it. A small set of destructive shell commands is held back: recursive
+local git commands run without prompts. A small set of destructive shell commands is held back: recursive
 deletes of the root, home, the workspace itself or paths outside it, deleting `.git`,
 writes to block devices, disk formatting and erasing, `git push --force` and its variants,
 and `DROP DATABASE` through database clients. The check looks inside `bash -c`, `$(...)`,

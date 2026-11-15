@@ -243,3 +243,14 @@ git diff --check
   messages were counted (no task content, no prompt rules derived from them), and both
   fixes only change what a tool accepts, so the held-out judgment stays usable; the
   report states it.
+- B1 verdict (run 43762127729, tag k6b1, Synthetic, no retries; report
+  `karox6-bench-data/reports/dev-k6b1`): raw 7/11 (DSH 7, OpenCode 9). By the rule fixed
+  before the run: against E1 on its 9 clean tasks plus k6d1 on 68/71, the reference solved
+  9 and B1 7 (B1 lost 32, 39, 57, won 52), with 43 vs 55 LLM calls per task (-21%).
+  Rejected: fewer solved. The step-120 notice and the 200-step cap never fired (max 80
+  calls), so the loss sits in the prompt rules or noise; the "one script for edge cases"
+  clause is the likely culprit (one-off edge-case probes won 32/57/59 before). B1 is off:
+  BASE_PROMPT is dev2's again, `--wrap-up-steps` and `--max-steps` stay as opt-in flags
+  with no default limit, and "do not commit unless asked" waits for its own A/B.
+- 6.0.0.dev5 = dev2 prompt + tool fixes (`job_output` timeout waits, `edit` exact match on
+  changed files) + MCP brief log + outage retries. It goes to the final held-out run.

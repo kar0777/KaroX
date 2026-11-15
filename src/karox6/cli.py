@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from karox6.tools.base import ApprovalRequest
 
 EXIT_CODES = {"completed": 0, "error": 1, "limit": 3, "loop": 4, "cancelled": 130}
-WRAP_UP_DEFAULT = 120  # = core.session.WRAP_UP_STEPS (not imported: keeps start-up light)
 
 
 def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
@@ -121,14 +120,14 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
         "--max-steps",
         type=int,
         default=None,
-        help="model calls per turn (default: 200 for run/mcp, none for chat; 0: no limit)",
+        help="model calls per turn (default: no limit)",
     )
     p.add_argument(
         "--wrap-up-steps",
         type=int,
-        default=WRAP_UP_DEFAULT,
+        default=None,
         help="ask the model to wrap up after this many steps, and for its final answer 30 "
-        "steps later (0: never)",
+        "steps later (default: never)",
     )
     p.add_argument("--max-seconds", type=float, default=None)
     p.add_argument("--max-cost", type=float, default=None, help="USD, needs --price-*")
@@ -304,7 +303,7 @@ def _session_config(
     args: argparse.Namespace, workspace: Path, home: Path, *, stream_deltas: bool
 ) -> Any:
     from karox6.core.messages import Price
-    from karox6.core.session import HEADLESS_MAX_STEPS, SessionConfig
+    from karox6.core.session import SessionConfig
 
     price = None
     if args.price_input is not None and args.price_output is not None:
@@ -318,15 +317,12 @@ def _session_config(
     system_prompt = None
     if args.system_prompt_file:
         system_prompt = args.system_prompt_file.read_text(encoding="utf-8")
-    max_steps = args.max_steps
-    if max_steps is None and getattr(args, "command", None) in ("run", "mcp"):
-        max_steps = HEADLESS_MAX_STEPS  # nobody watches a headless run: stop a runaway
     return SessionConfig(
         model=args.model,
         provider_name=args.provider,
         workspace=workspace,
         home=home,
-        max_steps=max_steps or None,  # 0: no limit
+        max_steps=args.max_steps or None,  # 0: no limit
         max_seconds=args.max_seconds,
         max_cost_usd=args.max_cost,
         max_output_tokens=args.max_output_tokens,
