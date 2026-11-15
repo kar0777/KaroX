@@ -67,3 +67,8 @@ are marked **[user]** and are not revisited without asking the user.
   report over the union of the new KaroX 6 trials and the baseline trials of D-022, because
   the report's environment-failure rule (a P2P test failing in every trial of a task) must
   see all arms.
+- **D-025** [user, 2026-11-15] Bench runs use the Synthetic upstream (`upstream=synthetic`,
+  same model DeepSeek-V4.1-Flash-1017 and the same enforced sampling profile; also the
+  upstream of the D-022 baseline). ReformBoss was too slow: it refuses a key seen from more
+  than 3 client IPs in 10 minutes, and parallel GitHub runners keep tripping it. The first
+  held-out run on ReformBoss (43723372988) was cancelled before any task finished.
