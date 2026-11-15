@@ -177,7 +177,22 @@ def test_edit_stale_after_read(ctx):
     path.write_text("ab")
     st = path.stat()
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
-    assert "changed on disk" in edit(ctx, "a", "c").content
+    result = edit(ctx, "a", "c")  # exact and unique: the stale read does not matter
+    assert not result.is_error
+    assert path.read_text() == "cb"
+
+
+def test_edit_stale_needs_exact_match(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("a\nb\n")
+    read(ctx)
+    path.write_text("a  \nb  \n")
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+    result = edit(ctx, "a\nb", "c\nd")  # only a trailing-whitespace match
+    assert result.is_error
+    assert "changed on disk" in result.content
+    assert path.read_text() == "a  \nb  \n"
 
 
 def test_edit_crlf_bom(ctx):

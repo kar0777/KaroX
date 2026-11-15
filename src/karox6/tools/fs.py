@@ -206,10 +206,14 @@ class EditTool:
                 "Error: old_string is empty. Quote the text to replace, or use write.",
                 is_error=True,
             )
-        stale = ctx.files.check_fresh(path, require_seen=False)
-        if stale:
-            return ToolResult(f"Error: {stale}", is_error=True)
-        unseen = not ctx.files.seen(path)
+        # An exact, unique old_string proves the agent knows the text it replaces, even if
+        # it saw the file only through shell output or the file changed since its last
+        # read (its own shell command, a formatter). Only a fuzzy match needs a fresh read.
+        unsure = ""
+        if not ctx.files.seen(path):
+            unsure = "has not been read in this session"
+        elif ctx.files.check_fresh(path):
+            unsure = "changed on disk since it was last read"
         try:
             data = path.read_bytes()
         except OSError as exc:
@@ -228,10 +232,10 @@ class EditTool:
         if isinstance(result, str):
             return ToolResult(f"Error: {result.replace('{path}', shown)}", is_error=True)
         updated, count, how = result
-        if unseen and how != "exactly":
+        if unsure and how != "exactly":
             return ToolResult(
                 f"Error: old_string matches {shown} only approximately ({how}) and the file "
-                "has not been read in this session. Read it, then retry.",
+                f"{unsure}. Read it, then retry.",
                 is_error=True,
             )
         if crlf:

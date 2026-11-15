@@ -1,10 +1,11 @@
 """The one place that knows which files the agent has seen and changed.
 
 * ``observe`` records the on-disk version (mtime, size) after a read or a write by a
-  tool. ``write`` refuses to replace an existing file the agent has not seen; ``write``
-  and ``edit`` refuse one that changed on disk since it was seen (a formatter, a shell
-  command) — the agent would be editing from a stale picture. ``edit`` may change a file
-  never read through ``read`` (seen via shell output) when ``old_string`` matches exactly.
+  tool. ``write`` refuses to replace an existing file the agent has not seen, or one that
+  changed on disk since it was seen (a formatter, a shell command) — the agent would be
+  overwriting from a stale picture. ``edit`` needs neither when ``old_string`` matches
+  exactly: the exact text proves the agent knows what it replaces; a fuzzy match on an
+  unread or changed file is refused.
 * ``changed_files`` answers "what did this session change": ``git status`` when the
   workspace is a git repository (covers shell edits too), plus every path a file tool
   wrote. There is no second bookkeeping anywhere else.

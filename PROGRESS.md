@@ -233,3 +233,8 @@ git diff --check
   `wait: true`, came straight back and were followed by more polls and `/proc` checks (dev
   task 40: steps 97-124 spent babysitting a full test-suite run). Bug-level fix of the
   tool contract; its effect is measured with the rest on the held-out run.
+- `edit` on a file that changed on disk since its last read: allowed when `old_string`
+  matches exactly (same rule as for a never-read file); a fuzzy match still needs a fresh
+  read. dev2 sessions hit 5 such refusals in 2 sessions; in one the agent re-viewed the
+  file with `sed -n`, which does not count as a read, and was refused again. Each refusal
+  ended in a full-file `read`. Bug-level tool-contract fix, measured on the held-out run.
