@@ -320,3 +320,14 @@ git diff --check
   Against k6h1s only task 35 changed (3 of 4 F2P tests). M2 bar still not met: one task
   behind DSH and 18% dearer; ahead of OpenCode on both. KaroX alone solves 48 again and
   breaks one P2P test on 60 again. C1 (run 43794614606) started 02:51 UTC.
+- MCP client hardening (commit e6bf3d4 + review fixes): server pings answered (other server
+  requests get -32601 instead of silence), timed-out/interrupted calls cancelled on the
+  server, crashed stdio servers restarted on the next call (max 3), per-server `timeout`,
+  HTTP session renewal after a 404 (once, under a lock, concurrent callers share it),
+  stderr tail quoted when a server fails. Independent review (agy Gemini 4 Argon, high,
+  768 s, ~$1.25 API-equivalent): 7 findings, all confirmed by hand and fixed (cancelled
+  stderr task leaking CancelledError, broken pipe without the stderr tail, close() leaking
+  the process when cancelled, 404 renewal race, SSE server request taken for the reply,
+  cancel notice for an unsent request, httpx timeout below the connect timeout). Live check
+  against `karox6 mcp` over stdio: 7 tools in 0.23 s; killed server restarted in 0.2 s.
+  624 tests.

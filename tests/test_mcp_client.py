@@ -270,3 +270,62 @@ def test_http_starts_a_new_session_after_404(ctx):
     assert versions.count(None) == 2  # only the two initialize requests go without it
     assert set(versions) == {None, "2025-06-18"}
     assert [s for m, s, _ in seen if m == "DELETE"] == ["s2"]
+
+
+def test_http_concurrent_404s_renew_the_session_once(ctx):
+    import httpx
+
+    from karox6.mcp.client import HttpConnection, McpServerHandle, McpTool
+
+    state = {"session": 0, "dead": set()}
+
+    def handler(request):
+        sid = request.headers.get("mcp-session-id")
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        message = json.loads(request.content)
+        if message["method"] == "initialize":
+            assert sid is None  # a new session never reuses the old id
+            state["session"] += 1
+            reply = {"jsonrpc": "2.0", "id": message["id"], "result": {}}
+            return httpx.Response(
+                200, json=reply, headers={"mcp-session-id": f"s{state['session']}"}
+            )
+        if "id" not in message:
+            return httpx.Response(202)
+        if sid in state["dead"]:
+            return httpx.Response(404)
+        # a server request that reuses the client's id must not be taken for the reply
+        ping = {"jsonrpc": "2.0", "id": message["id"], "method": "ping"}
+        reply = {
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {"content": [{"type": "text", "text": sid}]},
+        }
+        body = f"data: {json.dumps(ping)}\n\ndata: {json.dumps(reply)}\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async def go():
+        conn = HttpConnection("http://mcp.test/mcp", transport=httpx.MockTransport(handler))
+        await conn.request("initialize", {"protocolVersion": "x"}, 10)
+        tool = McpTool(McpServerHandle("remote", conn, []), {"name": "t"})
+        state["dead"].add("s1")
+        results = await asyncio.gather(*(tool.run({}, ctx) for _ in range(4)))
+        assert [r.content for r in results] == ["s2"] * 4
+        assert conn.sessions_started == 2
+        await conn.close()
+
+    asyncio.run(go())
+
+
+def test_stdio_close_leaves_no_process(tmp_path):
+    from karox6.mcp.client import connect
+
+    async def go():
+        handle = await connect("fake", {"command": sys.executable, "args": [FAKE]})
+        proc = handle.connection.proc
+        await handle.connection.close()
+        assert proc.returncode is not None
+        assert proc.stdin.is_closing()
+
+    asyncio.run(go())

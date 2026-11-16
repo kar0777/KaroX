@@ -84,10 +84,10 @@ class StdioConnection:
         )
 
     async def _settle(self) -> None:
-        """Let the stderr reader catch the last words of a server that just died."""
-        if self._stderr is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(asyncio.shield(self._stderr), 0.5)
+        """Let the stderr reader catch the last words of a server that just died.
+        (asyncio.wait neither raises if that task was cancelled nor cancels it.)"""
+        if self._stderr is not None and not self._stderr.done():
+            await asyncio.wait({self._stderr}, timeout=0.5)
 
     async def start(self) -> None:
         env = {**os.environ, **(self.env or {})}
@@ -161,12 +161,17 @@ class StdioConnection:
             await self._send(reply)
 
     async def _send(self, payload: dict[str, Any]) -> None:
-        if not self.alive or self.proc is None or self.proc.stdin is None:
-            await self._settle()
-            raise self.gone("server process is not running")
+        data = (json.dumps(payload) + "\n").encode("utf-8")
         async with self._lock:
-            self.proc.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
-            await self.proc.stdin.drain()
+            if not self.alive or self.proc is None or self.proc.stdin is None:
+                await self._settle()
+                raise self.gone("server process is not running")
+            try:
+                self.proc.stdin.write(data)
+                await self.proc.stdin.drain()
+            except (OSError, RuntimeError) as exc:  # the pipe broke: the server just died
+                await self._settle()
+                raise self.gone("server process exited") from exc
 
     def _cancel(self, rid: int, reason: str) -> None:
         """Tell the server to drop a request (best effort, without waiting)."""
@@ -184,16 +189,15 @@ class StdioConnection:
         rid = next(self._ids)
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._waiting[rid] = future
+        sent = False
         try:
             await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+            sent = True
             reply = await asyncio.wait_for(future, timeout)
-        except TimeoutError:
-            if method != "initialize":
-                self._cancel(rid, f"timed out after {timeout:g}s")
-            raise
-        except asyncio.CancelledError:
-            if method != "initialize":
-                self._cancel(rid, "interrupted")
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            if sent and method != "initialize":  # only requests the server has seen
+                timed_out = isinstance(exc, TimeoutError)
+                self._cancel(rid, f"timed out after {timeout:g}s" if timed_out else "interrupted")
             raise
         finally:
             self._waiting.pop(rid, None)
@@ -203,26 +207,34 @@ class StdioConnection:
         await self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     async def close(self) -> None:
-        if self.proc is not None and self.proc.returncode is None:
-            with contextlib.suppress(Exception):
-                if self.proc.stdin is not None:
-                    self.proc.stdin.close()
-            try:
-                await asyncio.wait_for(self.proc.wait(), 3)
-            except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    self.proc.kill()
+        proc = self.proc
+        try:
+            if proc is not None:
                 with contextlib.suppress(Exception):
-                    await self.proc.wait()
-        for task in (self._reader, self._stderr, *self._replies):
-            if task is not None:
+                    if proc.stdin is not None:
+                        proc.stdin.close()  # also after an exit: frees the pipe transport
+                if proc.returncode is None:
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(proc.wait(), 3)
+        finally:
+            # Runs even if close() itself is cancelled: no process or task is left behind.
+            if proc is not None and proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+            tasks = [t for t in (self._stderr, self._reader, *self._replies) if t is not None]
+            for task in tasks:
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+            if proc is not None and proc.returncode is None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(proc.wait(), 3)
+            if tasks:
+                await asyncio.wait(tasks, timeout=1)
 
 
 class _SessionExpired(Exception):
-    pass
+    def __init__(self, session: str | None) -> None:
+        super().__init__(session)
+        self.session = session
 
 
 class HttpConnection:
@@ -241,7 +253,8 @@ class HttpConnection:
             **(headers or {}),
         }
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(call_timeout + 5, connect=20.0), transport=transport
+            timeout=httpx.Timeout(max(call_timeout, CONNECT_TIMEOUT_S) + 5, connect=20.0),
+            transport=transport,
         )
         self.session_id: str | None = None
         self.sessions_started = 0
@@ -249,61 +262,68 @@ class HttpConnection:
         self._init_params: dict[str, Any] | None = None
         self._ids = itertools.count(1)
         self._background: set[asyncio.Task[Any]] = set()
+        self._session_lock = asyncio.Lock()
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, *, fresh: bool = False) -> dict[str, str]:
         headers = dict(self.headers)
-        if self._initialized:
-            headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
-        if self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
+        if not fresh:  # an initialize request carries neither header
+            if self._initialized:
+                headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
+            if self.session_id:
+                headers["Mcp-Session-Id"] = self.session_id
         return headers
 
     async def request(self, method: str, params: dict[str, Any], timeout: float) -> Any:
         if method == "initialize":
             self._init_params = params
-            self._initialized = False
-            self.session_id = None
         try:
             return await self._request(method, params, timeout)
-        except _SessionExpired:
+        except _SessionExpired as expired:
             # The server forgot the session (restart, idle expiry): the spec says start a
             # new one with a fresh initialize, then repeat the request once.
-            await self._start_session(timeout)
+            await self._renew(expired.session, timeout)
             try:
                 return await self._request(method, params, timeout)
             except _SessionExpired:
                 raise McpClientError("HTTP 404: the server dropped the new session too") from None
 
-    async def _start_session(self, timeout: float) -> None:
+    async def _renew(self, stale: str | None, timeout: float) -> None:
         if self._init_params is None:
             raise McpClientError("HTTP 404 before the session was initialized")
-        self.session_id = None
-        self._initialized = False
-        await self._request("initialize", self._init_params, timeout)
-        await self.notify("notifications/initialized", {})
+        async with self._session_lock:
+            if self.session_id != stale:
+                return  # a concurrent call already started the new session
+            await self._request("initialize", self._init_params, timeout)
+            await self.notify("notifications/initialized", {})
 
     async def _request(self, method: str, params: dict[str, Any], timeout: float) -> Any:
         rid = next(self._ids)
         payload = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
-        sent_session = self.session_id
+        fresh = method == "initialize"
+        sent_session = None if fresh else self.session_id
         try:
             response = await asyncio.wait_for(
-                self.client.post(self.url, json=payload, headers=self._headers()), timeout
+                self.client.post(self.url, json=payload, headers=self._headers(fresh=fresh)),
+                timeout,
             )
         except (TimeoutError, asyncio.CancelledError) as exc:
             if method != "initialize":
                 reason = "interrupted" if isinstance(exc, asyncio.CancelledError) else "timed out"
                 self._cancel(rid, reason)
             raise
-        if response.status_code == 404 and sent_session and method != "initialize":
-            raise _SessionExpired
+        if response.status_code == 404 and sent_session:
+            raise _SessionExpired(sent_session)
         if response.status_code >= 400:
             raise McpClientError(f"HTTP {response.status_code}: {response.text[:300]}")
         kind = response.headers.get("content-type", "")
         reply: Any = None
         if "text/event-stream" in kind:
             for message in _sse_messages(response.text):
-                if isinstance(message, dict) and message.get("id") == rid:
+                if (
+                    isinstance(message, dict)
+                    and message.get("id") == rid
+                    and "method" not in message
+                ):
                     reply = message
                     break
             else:
@@ -334,9 +354,8 @@ class HttpConnection:
         await self.client.post(self.url, json=payload, headers=self._headers())
 
     async def close(self) -> None:
-        for task in list(self._background):
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(task, 2)
+        if self._background:  # pending cancel notices; asyncio.wait never raises for them
+            await asyncio.wait(set(self._background), timeout=2)
         if self.session_id:
             with contextlib.suppress(Exception):
                 await self.client.delete(self.url, headers=self._headers())
@@ -366,10 +385,18 @@ class McpServerHandle:
             self.restarts += 1
             await connection.close()
             fresh = await _open(self.spec)
+            if not isinstance(fresh, StdioConnection):  # the spec of a stdio server
+                await fresh.close()
+                raise McpClientError("cannot restart: the server is no longer a local command")
             try:
                 await _initialize(fresh)
-            except BaseException:
+            except BaseException as exc:
                 await fresh.close()
+                self.connection = fresh  # dead as well; its stderr tells the next caller why
+                if isinstance(exc, TimeoutError):
+                    raise fresh.gone(
+                        f"restarted server did not initialize within {CONNECT_TIMEOUT_S:g}s"
+                    ) from None
                 raise
             self.connection = fresh
 
