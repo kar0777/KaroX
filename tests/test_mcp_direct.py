@@ -1,11 +1,15 @@
 import asyncio
+import base64
 import subprocess
 
 import pytest
 
 from karox6.cli import main
 from karox6.mcp.direct import DirectTools
-from karox6.mcp.protocol import McpServer
+from karox6.mcp.protocol import TOOLS, McpServer
+from karox6.tools import screen
+from karox6.tools.registry import build_tools
+from karox6.tools.shell import detect_shell
 
 
 def make_server(tmp_path, **kwargs):
@@ -46,8 +50,9 @@ def test_tools_list_and_instructions(tmp_path):
             "job_output",
             "job_list",
             "job_kill",
+            "screenshot",
         }
-        for name in ("read", "grep", "glob", "job_output", "job_list"):
+        for name in ("read", "grep", "glob", "job_output", "job_list", "screenshot"):
             assert tools[name]["annotations"]["readOnlyHint"] is True, name
             assert tools[name]["annotations"]["destructiveHint"] is False, name
         for name in ("write", "edit", shell, "job_kill"):
@@ -56,6 +61,8 @@ def test_tools_list_and_instructions(tmp_path):
         assert tools[shell]["inputSchema"]["properties"]["confirmed"]["type"] == "boolean"
         assert "confirmed" not in direct.tools[shell].parameters["properties"]  # agent's own
         assert "50000" in tools[shell]["inputSchema"]["properties"]["timeout"]["description"]
+        assert tools["screenshot"]["annotations"]["openWorldHint"] is False
+        assert "Call screenshot to see" in init["result"]["instructions"]
         refused = await rpc(server, "tools/call", {"name": "karox_run", "arguments": {}})
         assert refused["error"]["code"] == -32602
         await direct.shutdown()
@@ -246,3 +253,65 @@ def test_direct_mode_needs_no_model(tmp_path, monkeypatch, capsys):
     # Past the model check: the next check (tunnel without --http) answers instead.
     assert main(["mcp", "--direct", "--tunnel", "tailscale", "--no-mcp"]) == 2
     assert "--tunnel needs --http" in capsys.readouterr().err
+
+
+def test_screenshot_can_be_left_out_and_is_not_an_agent_tool(tmp_path):
+    _, direct = make_server(tmp_path, screenshot=False)
+    assert "screenshot" not in {t["name"] for t in direct.specs()}
+    assert "Call screenshot" not in direct.instructions  # the root path may say screenshot
+    assert "screenshot" not in {t["name"] for t in TOOLS}
+    assert "screenshot" not in {t.name for t in build_tools(detect_shell())}
+
+
+def test_no_screenshot_flag_reaches_direct_mode(tmp_path, monkeypatch):
+    seen = {}
+
+    class Stop(ValueError):
+        pass
+
+    def fake_direct(root, **kwargs):
+        seen.update(kwargs)
+        raise Stop("stop here")
+
+    monkeypatch.setattr("karox6.mcp.direct.DirectTools", fake_direct)
+    # A key variable of its own: direct mode removes it from this process's environment.
+    common = ["mcp", "--direct", "--no-mcp", "--api-key-env", "KAROX_SCREEN_TEST_KEY"]
+    common += ["--home", str(tmp_path), "--root", str(tmp_path)]
+    assert main([*common, "--no-screenshot"]) == 2
+    assert seen["screenshot"] is False
+    assert main(common) == 2
+    assert seen["screenshot"] is True
+
+
+def test_screenshot_reply_carries_the_image(tmp_path, monkeypatch):
+    server, direct = make_server(tmp_path)
+    png = screen.encode_png(2, 1, bytes([255, 0, 0, 0, 0, 255]))
+    asked = []
+
+    def fake_capture(window, max_width):
+        asked.append((window, max_width))
+        if window == "missing":
+            raise screen.ScreenError("no visible window title contains 'missing'")
+        return screen.Shot(png, 2, 1, "the whole desktop (1 monitor, 2x1 px)")
+
+    monkeypatch.setattr(screen, "capture", fake_capture)
+
+    async def go():
+        params = {"name": "screenshot", "arguments": {"max_width": 99999}}
+        result = (await rpc(server, "tools/call", params))["result"]
+        image, text = result["content"]
+        assert image == {
+            "type": "image",
+            "data": base64.b64encode(png).decode("ascii"),
+            "mimeType": "image/png",
+        }
+        assert text["type"] == "text"
+        assert text["text"].startswith("Captured the whole desktop (1 monitor, 2x1 px)")
+        assert result["isError"] is False
+        text, error = await call(server, "screenshot", window="missing")
+        assert error
+        assert text == "Error: no visible window title contains 'missing'"
+        assert asked == [(None, screen.MAX_WIDTH), ("missing", screen.DEFAULT_WIDTH)]
+        await direct.shutdown()
+
+    asyncio.run(go())

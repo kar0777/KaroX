@@ -133,6 +133,11 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
         "second model; read, write, edit, grep, glob, the shell and background jobs)",
     )
     mcp.add_argument(
+        "--no-screenshot",
+        action="store_true",
+        help="with --direct: leave out the screenshot tool (the client cannot see the screen)",
+    )
+    mcp.add_argument(
         "--root",
         type=Path,
         default=None,
@@ -549,7 +554,11 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         if args.api_key_env:
             os.environ.pop(args.api_key_env, None)
         backend = DirectTools(
-            root, home=home, any_path=args.any_cwd, approval_mode=args.approve_dangerous
+            root,
+            home=home,
+            any_path=args.any_cwd,
+            approval_mode=args.approve_dangerous,
+            screenshot=not args.no_screenshot,
         )
         server = McpServer(direct=backend)
     else:
