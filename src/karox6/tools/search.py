@@ -9,6 +9,7 @@ contents are searched with Python's ``re``. Result shapes follow DSH (MIT).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from karox6.context.spill import write_spill
+from karox6.lifetime import bind_to_karox
 from karox6.tools.base import ToolContext, ToolResult
 
 GLOB_MAX = 100
@@ -268,9 +270,19 @@ async def _grep_rg(
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL,
         )
-        out, err = await asyncio.wait_for(proc.communicate(), 60)
-    except (OSError, TimeoutError):
+    except OSError:
         return None
+    bind_to_karox(proc.pid)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), 60)
+    except TimeoutError:
+        return None
+    finally:
+        if proc.returncode is None:  # timed out or cancelled: rg must not search on
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), 5)
     if proc.returncode not in (0, 1):
         message = err.decode("utf-8", "replace").strip()
         if "regex" in message.lower():

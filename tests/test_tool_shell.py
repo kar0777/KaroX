@@ -1,12 +1,15 @@
 import asyncio
+import os
 import shlex
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 from karox6.tools.jobs import JobKillTool, JobListTool, JobOutputTool
-from karox6.tools.shell import ShellTool, detect_shell
+from karox6.tools.proc import ProcessRun
+from karox6.tools.shell import ShellTool, detect_shell, is_msys_bash
 
 
 def python(code):
@@ -205,6 +208,81 @@ def test_backslashes_reach_the_shell_unchanged(ctx, count):
         result = shell(ctx, command=f"printf '%s|' {literal}")
         assert result.meta["exit_code"] == 0, result.content
         assert result.content.count(backslash) == count, result.content
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (r"C:\Program Files\Git\bin\bash.exe", True),
+        (r"C:\msys64\usr\bin\bash.exe", True),
+        ("C:/cygwin64/bin/bash", True),
+        (r"C:\Windows\System32\bash.exe", False),  # the WSL launcher
+        (r"C:\Users\u\AppData\Local\Microsoft\WindowsApps\bash.exe", False),
+        (r"C:\tools\zsh.exe", False),
+        ("bash", False),
+    ],
+)
+def test_msys_bash_from_karox_shell_gets_the_script_file(path, expected):
+    """KAROX_SHELL pointing at Git Bash must get the backslash-safe launch too."""
+    assert is_msys_bash(path) is expected
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+def test_kill_reaches_a_child_the_shell_left_behind(ctx):
+    async def scenario():
+        run = await ProcessRun.start(
+            ["bash", "-c", "sleep 300 & echo $!"],
+            cwd=ctx.workspace,
+            env=dict(os.environ),
+            log_path=ctx.workspace / "left.log",
+            command="left behind",
+        )
+        await asyncio.wait_for(run.exited(), 10)
+        for _ in range(100):
+            if run.head.strip():
+                break
+            await asyncio.sleep(0.02)
+        assert not run.reader.done()  # the sleep still holds the output pipe
+        await run.kill()
+        return run, int(run.head.decode().strip())
+
+    run, child = asyncio.run(scenario())
+    for _ in range(100):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(child, 9)
+        pytest.fail("the child the shell left behind survived kill()")
+    assert run.killed is False  # the shell itself had exited on its own
+
+
+def test_command_that_leaves_a_child_running_returns_when_the_shell_exits(ctx):
+    """`server &` keeps the output pipe open; the call must not wait for its timeout."""
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash syntax")
+
+    async def scenario():
+        started = time.monotonic()
+        command = "sleep 30 & echo started"
+        result = await ShellTool(ctx.shell).run({"command": command, "timeout": 20000}, ctx)
+        took = time.monotonic() - started
+        assert took < 5, f"took {took:.1f}s"
+        assert result.meta.get("exit_code") == 0, result.content
+        assert "started" in result.content
+        # The child is tracked as a background job, so the session can stop it.
+        job = ctx.jobs.get(result.meta["job_id"])
+        assert job is not None
+        assert job.status == "running"
+        assert ctx.jobs.running() == [job]
+        assert ctx.jobs.drain_finished() == []
+        await ctx.jobs.shutdown()
+        if sys.platform != "win32":  # Windows: the job object ends it with KaroX
+            assert ctx.jobs.running() == []
+
+    asyncio.run(scenario())
 
 
 def test_command_longer_than_a_windows_command_line(ctx):

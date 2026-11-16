@@ -105,13 +105,28 @@ class ProcessRun:
         logging in the background.
         """
         try:
-            await asyncio.wait_for(asyncio.shield(self.proc.wait()), timeout_s)
+            await asyncio.wait_for(self.exited(), timeout_s)
         except TimeoutError:
             return False
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(asyncio.shield(self.reader), 2.0)
         self._release()
         return True
+
+    @property
+    def active(self) -> bool:
+        """Still running, or a process it left behind still writes to its output."""
+        return self.proc.returncode is None or not self.reader.done()
+
+    async def exited(self) -> int:
+        """The exit status as soon as the process ends. (asyncio's Process.wait() also
+        waits until its output pipe closes, which a child the command left running,
+        `server &`, holds open: a finished command looked like one still running.)"""
+        delay = 0.002
+        while (code := self.proc.returncode) is None:
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 0.05)
+        return code
 
     def _release(self) -> None:
         """Close the pipe transport once the process and its reader are done. asyncio
@@ -142,11 +157,16 @@ class ProcessRun:
             self._log.flush()
 
     async def kill(self) -> None:
-        if self.proc.returncode is None:
-            self.killed = True
+        # A child the command left behind (`server &`) may still hold the output pipe
+        # after the shell itself exited. On POSIX its process group outlives the shell and
+        # can still be signalled; on Windows a dead PID may already be someone else's.
+        leader_running = self.proc.returncode is None
+        lingering = not self.reader.done() and sys.platform != "win32"
+        if leader_running or lingering:
+            self.killed = self.killed or leader_running
             await asyncio.to_thread(kill_tree, self.proc.pid)
             with contextlib.suppress(TimeoutError, ProcessLookupError):
-                await asyncio.wait_for(self.proc.wait(), 5.0)
+                await asyncio.wait_for(self.exited(), 5.0)
         if not self.reader.done():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(self.reader), 1.0)

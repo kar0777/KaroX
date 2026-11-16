@@ -26,7 +26,7 @@ class Job:
     @property
     def status(self) -> str:
         code = self.run.returncode
-        if code is None:
+        if code is None or self.run.active:
             return "running"
         if self.run.killed:
             return "killed"
@@ -48,13 +48,13 @@ class JobManager:
         return self._jobs.get(str(job_id).strip())
 
     def running(self) -> list[Job]:
-        return [j for j in self._jobs.values() if j.run.returncode is None]
+        return [j for j in self._jobs.values() if j.run.active]
 
     def drain_finished(self) -> list[str]:
         """One line per job that finished since the last call (model-killed jobs are silent)."""
         notes = []
         for job in self._jobs.values():
-            if job.notified or job.run.returncode is None:
+            if job.notified or job.run.active:
                 continue
             job.notified = True
             if job.killed_by_model:

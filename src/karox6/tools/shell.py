@@ -64,6 +64,8 @@ def detect_shell(environ: dict[str, str] | None = None) -> ShellInfo:
         name = Path(override).name.lower()
         if "pwsh" in name or "powershell" in name:
             return ShellInfo("pwsh", override, "pwsh" if "pwsh" in name else "powershell")
+        if sys.platform == "win32" and is_msys_bash(shutil.which(override) or override):
+            return ShellInfo("bash", override, "git-bash")
         return ShellInfo("bash", override, "bash")
     if sys.platform != "win32":
         found = shutil.which("bash")
@@ -78,6 +80,16 @@ def detect_shell(environ: dict[str, str] | None = None) -> ShellInfo:
         if found:
             return ShellInfo("pwsh", found, name)
     return ShellInfo("pwsh", "powershell.exe", "powershell")
+
+
+def is_msys_bash(path: str) -> bool:
+    """A Windows bash on the MSYS/Cygwin runtime (Git Bash, MSYS2, Cygwin), which takes
+    its command as a script file; not the WSL launcher (System32, WindowsApps), which
+    could not open a Windows path."""
+    lowered = path.replace("/", "\\").lower()
+    name = lowered.rsplit("\\", 1)[-1]
+    wsl = "\\windows\\system32\\" in lowered or "\\windowsapps\\" in lowered
+    return name in ("bash", "bash.exe") and "\\" in lowered and not wsl
 
 
 def _find_git_bash(env: dict[str, str]) -> str | None:
@@ -229,6 +241,15 @@ class ShellTool:
         if finished:
             marker = f"[exit code: {run.returncode}]"
             meta: dict[str, Any] = {"exit_code": run.returncode}
+            if run.active:  # a process it started (`server &`) still writes to the output
+                job = ctx.jobs.register(run)
+                job.read_offset = run.total_bytes
+                marker = (
+                    f"[exit code: {run.returncode}; a process it started is still running and "
+                    f"writing to this output: background job {job.id}. Use job_output to "
+                    "read it, job_kill to stop it.]"
+                )
+                meta["job_id"] = job.id
         else:
             job = ctx.jobs.register(run)
             job.read_offset = run.total_bytes

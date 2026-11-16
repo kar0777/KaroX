@@ -457,3 +457,19 @@ git diff --check
   A cancelled karox_run/karox_status only stops waiting; the run goes on (karox_cancel ends
   runs). Before, a long-poll the user had cancelled kept its slot for up to 50 s and then
   answered nobody. 640 tests (Linux 629 + 13 Windows-only).
+- Linux/macOS (and Windows): a foreground `bash` call that leaves a child running
+  (`python -m http.server &`, `server & sleep 1 && curl ...`) returned only after its full
+  timeout (120 s by default) as "still running ... moved to background job", although the
+  shell had exited at once: since Python 3.12 asyncio's `Process.wait()` also waits for the
+  output pipe to close, which the child holds. Exit is now taken from the exit status (WSL
+  probe: 20.0 s -> immediate). Such a child is registered as a background job (the model is
+  told its id), so `job_output` reads it and the session stops it at the end; on POSIX
+  `kill()` now also reaches a process group whose leader already exited.
+- Independent review (codex gpt-6.1-terra, 58 s, ~$0.09) of today's lifecycle changes:
+  fixed `KAROX_SHELL` pointing at Git Bash/MSYS2 (it bypassed the script-file launch), `rg`
+  not bound to the Windows job and not killed on timeout/cancel, and the left-behind child
+  above. Not taken: the microsecond race between process start and job assignment (bash and
+  node take tens of ms to spawn children; atomic assignment needs CREATE_SUSPENDED, which
+  Python's subprocess cannot resume) and `$0` being the script path (checked: exit codes,
+  heredocs, set -e, pipefail, Cyrillic, syntax errors behave the same). 648 tests (Linux
+  638 + 13 Windows-only).
