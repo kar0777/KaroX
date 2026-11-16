@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 from karox6 import __version__
-from karox6.mcp.runs import RunError, RunManager
+from karox6.mcp.runs import REPLY_CAP, RunError, RunManager, reply_text
 
 SUPPORTED_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 LATEST = "2025-06-18"
@@ -244,8 +244,9 @@ class McpServer:
             raise
         except (RunError, KeyError, TypeError, ValueError, OverflowError) as exc:
             text = str(exc) if isinstance(exc, RunError) else f"bad arguments: {exc}"
+            text = text if len(text) <= REPLY_CAP else text[: REPLY_CAP - 100] + " [cut]"
             return {"content": [{"type": "text", "text": text}], "isError": True}
-        text = json.dumps(data, ensure_ascii=False, indent=1)
+        data, text = fit_reply(data)
         return {"content": [{"type": "text", "text": text}], "structuredContent": data}
 
     async def _tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -300,6 +301,38 @@ class _RpcError(Exception):
 
 def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def fit_reply(data: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """The reply and its text, cut to at most REPLY_CAP characters (clients choke on more).
+
+    Tools keep their big parts in bounds where they can say how to get the rest
+    (karox_status pages with since/next, karox_diff says what to ask for). This guards
+    everything else: the largest field loses its tail (text) or its first items (a list,
+    such as the oldest runs) until the reply fits, and "cut" says what was left out."""
+    text = reply_text(data)
+    if len(text) <= REPLY_CAP:
+        return data, text
+    data, cuts = dict(data), []
+    while (excess := len(text) - REPLY_CAP) > 0:
+        key = max((k for k in data if k != "cut"), key=lambda k: len(reply_text(data[k])))
+        value, need = data[key], excess + 300  # room for the note below
+        if isinstance(value, str):
+            data[key] = value[: max(len(value) - need, 0)]
+            cuts.append(f"{key}: its last {len(value) - len(data[key])} characters")
+        elif isinstance(value, list) and value:
+            drop = freed = 0
+            while drop < len(value) and freed < need:  # each item frees at least its text
+                freed += len(reply_text(value[drop]))
+                drop += 1
+            data[key] = value[drop:]
+            cuts.append(f"{key}: its first {drop} of {len(value)} items")
+        else:
+            data[key] = None
+            cuts.append(f"{key}: all of it")
+        data["cut"] = f"reply over {REPLY_CAP} characters; left out " + "; ".join(cuts)
+        text = reply_text(data)
+    return data, text
 
 
 def parse_error(detail: str) -> dict[str, Any]:

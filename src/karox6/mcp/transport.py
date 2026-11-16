@@ -2,8 +2,9 @@
 
 The HTTP side is a deliberately small HTTP/1.1 server on asyncio streams (no web
 framework): POST carries JSON-RPC and is answered with application/json, GET has no
-server-initiated stream (405), DELETE ends an MCP session. Every request must carry
-the access token, either as the last path segment (``/mcp/<token>``, for clients
+server-initiated stream (405), DELETE ends an MCP session; a session id from before a
+server restart is carried on, as clients may never initialize again. Every request must
+carry the access token, either as the last path segment (``/mcp/<token>``, for clients
 such as ChatGPT connectors that only take a URL) or as ``Authorization: Bearer``.
 Browser origins outside the allow-list are refused (DNS-rebinding protection).
 """
@@ -20,16 +21,19 @@ import secrets
 import sys
 import threading
 from collections.abc import Awaitable, Callable, Iterable
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from karox6.mcp.protocol import McpServer, parse_error
+from karox6.mcp.protocol import LATEST, McpServer, parse_error
 
 MAX_BODY = 4 * 1024 * 1024
 DRAIN_LIMIT = 64 * 1024  # a refused request's body is read (and dropped) only up to this
 MAX_HEADERS = 100
 MAX_CONNECTIONS = 64
-MAX_SESSIONS = 1000
+MAX_SESSIONS = 1000  # live sessions, and separately the ids of ended ones
+SESSION_ID = re.compile(r"[\x21-\x7e]{1,128}")  # visible ASCII (MCP spec), bounded
+TOKEN_FORMAT = re.compile(r"[A-Za-z0-9_-]{16,256}")  # a saved token fits in a URL path
 MAX_BATCH = 100
 HEAD_TIMEOUT_S = 30.0  # also how long an idle keep-alive connection stays open
 BODY_TIMEOUT_S = 60.0
@@ -169,6 +173,7 @@ class HttpMcp:
         self.path = "/" + path.strip("/")
         self.allowed_origins = {o.rstrip("/").lower() for o in allowed_origins}
         self.sessions: dict[str, str] = {}  # MCP session id -> negotiated protocol version
+        self.ended: dict[str, None] = {}  # ids the client ended with DELETE, oldest first
         self._open = 0
 
     async def start(self, host: str, port: int) -> asyncio.Server:
@@ -260,7 +265,10 @@ class HttpMcp:
         cors = self._cors(headers.get("origin"))
         session_id = headers.get("mcp-session-id")
         if method == "DELETE":
-            if session_id and self.sessions.pop(session_id, None) is not None:
+            # An id from before a restart is ended just the same: it would be adopted below.
+            if session_id and SESSION_ID.fullmatch(session_id) and session_id not in self.ended:
+                self.sessions.pop(session_id, None)
+                _remember(self.ended, session_id, None)
                 return 200, cors, b""
             return _json(404, {"error": "unknown session"}, cors)
         if method == "GET":
@@ -301,7 +309,7 @@ class HttpMcp:
                 },
                 cors,
             )
-        elif session_id not in self.sessions:
+        elif session_id in self.ended or not SESSION_ID.fullmatch(session_id):
             return _json(
                 404,
                 {
@@ -314,6 +322,11 @@ class HttpMcp:
                 },
                 cors,
             )
+        elif session_id not in self.sessions:
+            # Most likely a session with this server before it restarted. The request
+            # carries the token, so carry on with it instead of answering 404: some hosted
+            # clients never initialize again and the connector would stay broken.
+            _remember(self.sessions, session_id, LATEST)
         peer = session_id or ""
         replies = [
             r for r in [await self.server.handle(m, peer=peer) for m in items] if r is not None
@@ -327,9 +340,7 @@ class HttpMcp:
                 ),
                 "",
             )
-            self.sessions[session_id] = str(version or "")
-            while len(self.sessions) > MAX_SESSIONS:  # forget the oldest sessions
-                self.sessions.pop(next(iter(self.sessions)))
+            _remember(self.sessions, session_id, str(version or ""))
         if not replies:
             return 202, {**cors, **extra}, b""
         payload = replies if batch else replies[0]
@@ -358,6 +369,36 @@ class HttpMcp:
             "Vary": "Origin",
             "Access-Control-Expose-Headers": "Mcp-Session-Id",
         }
+
+
+def _remember(table: dict[str, Any], key: str, value: Any) -> None:
+    table[key] = value
+    while len(table) > MAX_SESSIONS:  # forget the oldest
+        table.pop(next(iter(table)))
+
+
+def saved_token(path: Path, *, renew: bool = False) -> str:
+    """The HTTP access token kept in ``path`` (made on first use, or anew with ``renew``).
+
+    A token that survives restarts keeps the connector URL pasted into ChatGPT or Claude
+    working. The file is readable by its owner only where the OS has such modes (POSIX;
+    on Windows the user profile is private already)."""
+    if not renew:
+        with contextlib.suppress(OSError, UnicodeDecodeError):
+            token = path.read_text(encoding="utf-8").strip()
+            if TOKEN_FORMAT.fullmatch(token):
+                return token
+    token = secrets.token_urlsafe(24)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Written beside and renamed over: a crash never leaves a half-written token, and the
+    # new file gets 0o600 even when an older one had looser modes.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(token + "\n")
+    os.replace(tmp, path)
+    return token
 
 
 class _BadRequest(Exception):

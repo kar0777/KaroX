@@ -517,3 +517,16 @@ git diff --check
   credentials). The Origin check still refuses token-less requests from unknown pages
   (DNS rebinding). Docs: chatgpt.md/.ru.md cover Tailscale first, ngrok/cloudflared as
   alternatives, and ChatGPT, Claude and other clients. 663 tests on Windows.
+- Connector survives restarts: without `KAROX_MCP_TOKEN` the HTTP token is kept in
+  `<home>/mcp/http-token` (0o600 on POSIX, written beside and renamed over) and reused, so
+  the pasted URL stays valid; `--new-token` replaces it; an env token is still neither
+  saved nor printed. An authorized request with an Mcp-Session-Id this process never
+  issued is carried on as a live session (version LATEST) instead of 404, as hosted
+  clients may never initialize again; ids ended with DELETE (up to 1000 remembered) and
+  malformed ids still get 404. An unknown run_id now says the server was probably
+  restarted, the work is on disk (karox_run there + karox_diff, or git) and session_id
+  continues the conversation. Tool replies are capped at 100,000 characters:
+  karox_status pages events by size (`next` + a `more` note), final_text is cut at 50,000,
+  karox_diff cuts to fit JSON escapes and says how much was left out, and `fit_reply`
+  guards the rest (largest field cut, oldest runs first, `cut` says what). Not done: an
+  offset/path parameter for karox_diff (tool schema unchanged). 668 tests on Windows.
