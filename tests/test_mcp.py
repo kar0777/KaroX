@@ -407,6 +407,12 @@ def test_http_transport(tmp_path):
             r = await client.options("/mcp", headers=preflight)
             assert r.status_code == 204
             assert r.headers["access-control-allow-origin"] == "https://claude.ai"
+            for probe in (
+                "/.well-known/oauth-protected-resource",
+                "/.well-known/oauth-authorization-server",
+            ):
+                r = await client.get(probe, headers={"Origin": "https://claude.ai"})
+                assert r.status_code == 404  # no OAuth: the client goes on without sign-in
             good = {"Mcp-Session-Id": sid, "Origin": "https://chatgpt.com"}
             r = await client.post(f"/mcp/{TOKEN}", json=ping, headers=good)
             assert r.status_code == 200
