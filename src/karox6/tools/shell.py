@@ -210,6 +210,10 @@ class ShellTool:
         index = len(list(log_dir.glob("*.log"))) + 1 if log_dir.exists() else 1
         log_path = log_dir / f"cmd-{index:04d}.log"
         try:
+            # Claim the number before the first await: a concurrent call (MCP direct mode)
+            # would otherwise count the same logs and share this log and script file.
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path.touch()
             run = await ProcessRun.start(
                 self.shell.argv(command, script=log_path.with_suffix(".sh")),
                 cwd=cwd,
