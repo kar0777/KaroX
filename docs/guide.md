@@ -162,7 +162,7 @@ the server with SIGTERM, or kills it outright on Windows), running tasks are can
 their commands stopped; a request the client cancels gets no answer, while its run goes on
 until `karox_cancel`.
 
-Using KaroX from ChatGPT on the web: [chatgpt.md](chatgpt.md).
+Using KaroX from ChatGPT, Claude and other web clients (Tailscale tunnel built in): [chatgpt.md](chatgpt.md).
 
 ## Experimental options
 

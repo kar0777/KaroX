@@ -136,6 +136,13 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
         help="destructive commands: ask the client (karox_approve), deny, or allow",
     )
     mcp.add_argument("--approval-timeout", type=float, default=600.0, help="seconds, then deny")
+    mcp.add_argument(
+        "--tunnel",
+        choices=("tailscale", "tailnet"),
+        default=None,
+        help="with --http: an HTTPS address through Tailscale; 'tailscale' is public (Funnel: "
+        "ChatGPT, Claude and other hosted connectors), 'tailnet' only your devices (Serve)",
+    )
 
     debug = sub.add_parser("debug", help="diagnostics for developers")
     debug_sub = debug.add_subparsers(dest="debug_command", required=True)
@@ -447,6 +454,7 @@ def _provider(args: argparse.Namespace) -> Any:
 
 
 def _mcp(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    from karox6.mcp.tunnel import TunnelError
 
     if not args.model:
         parser.error("--model is required (or set KAROX_MODEL)")
@@ -454,7 +462,7 @@ def _mcp(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         run_async(_mcp_async(args))
     except KeyboardInterrupt:
         pass
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, TunnelError) as exc:
         sys.stderr.write(f"karox mcp: {exc}\n")
         return 2
     return 0
@@ -468,11 +476,15 @@ async def _mcp_async(args: argparse.Namespace) -> None:
     from karox6.mcp.protocol import McpServer
     from karox6.mcp.runs import RunManager
     from karox6.mcp.transport import DEFAULT_ORIGINS, HttpMcp, serve_stdio
+    from karox6.mcp.tunnel import Tunnel, open_tailscale
 
     home = (args.home or default_home()).expanduser().resolve()
     root = (args.root or Path.cwd()).expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"root {root} is not a directory")
+    if args.tunnel and args.http is None:
+        raise ValueError("--tunnel needs --http PORT (the tunnel forwards to it)")
+    tunnel: Tunnel | None = None
     mcp_tools, mcp_handles = await _mcp_tools(args, home)
     provider = _provider(args)
     runs = RunManager(
@@ -501,16 +513,29 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         shown = host if host not in ("0.0.0.0", "::") else "127.0.0.1"
         # A token the user chose is not echoed (stderr often ends up in logs).
         path_token = f"<${args.token_env}>" if given else token
-        sys.stderr.write(
-            f"KaroX MCP (Streamable HTTP) on http://{shown}:{bound}/mcp  root={root}\n"
-            "  URL for clients that only take a URL (ChatGPT connector, behind an HTTPS\n"
-            f"  tunnel): http://{shown}:{bound}/mcp/{path_token}\n"
-            "  or send 'Authorization: Bearer <token>' to /mcp. Keep the token secret.\n"
-        )
-        sys.stderr.flush()
         async with listener:
+            if args.tunnel:
+                tunnel = await asyncio.to_thread(
+                    open_tailscale, bound, public=args.tunnel == "tailscale"
+                )
+            where = "public internet" if tunnel and tunnel.public else "your tailnet"
+            sys.stderr.write(
+                f"KaroX MCP (Streamable HTTP) on http://{shown}:{bound}/mcp  root={root}\n"
+                + (
+                    f"  Connector URL ({where}, Tailscale): {tunnel.url}/mcp/{path_token}\n"
+                    "  Paste it into ChatGPT (Settings > Connectors), Claude (Settings >\n"
+                    "  Connectors > Add custom connector) or any MCP client; no sign-in.\n"
+                    if tunnel
+                    else "  URL for clients that only take a URL (ChatGPT connector, behind an\n"
+                    f"  HTTPS tunnel): http://{shown}:{bound}/mcp/{path_token}\n"
+                )
+                + "  or send 'Authorization: Bearer <token>' to /mcp. Keep the token secret.\n"
+            )
+            sys.stderr.flush()
             await asyncio.Event().wait()
     finally:
+        if tunnel is not None:
+            await asyncio.to_thread(tunnel.stop)
         await runs.shutdown()
         await provider.aclose()
         await _close_mcp(mcp_handles)

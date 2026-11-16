@@ -167,7 +167,7 @@ args = ["mcp", "--root", "/path/to/project"]
 останавливаются; запрос, который клиент отменил, остаётся без ответа, а сама задача идёт
 дальше до `karox_cancel`.
 
-KaroX из ChatGPT в браузере: [chatgpt.ru.md](chatgpt.ru.md).
+KaroX из ChatGPT, Claude и других веб-клиентов (туннель Tailscale встроен): [chatgpt.ru.md](chatgpt.ru.md).
 
 ## Экспериментальные опции
 

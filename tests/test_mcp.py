@@ -388,8 +388,25 @@ def test_http_transport(tmp_path):
             assert r.status_code == 202
             assert r.content == b""
             assert (await client.get(f"/mcp/{TOKEN}")).status_code == 405
+            # A page that does not know the token is refused before the token check; a
+            # client that has the token works from any host (Claude, Le Chat, a web IDE).
             evil = {"Mcp-Session-Id": sid, "Origin": "https://evil.example"}
-            assert (await client.post(f"/mcp/{TOKEN}", json=ping, headers=evil)).status_code == 403
+            assert (await client.post("/mcp", json=ping, headers=evil)).status_code == 403
+            assert (await client.post("/mcp/wrong-token-xxxxxxxx", headers=evil)).status_code == 403
+            other = {"Mcp-Session-Id": sid, "Origin": "https://claude.ai"}
+            r = await client.post(f"/mcp/{TOKEN}", json=ping, headers=other)
+            assert r.status_code == 200
+            assert r.headers["access-control-allow-origin"] == "https://claude.ai"
+            r = await client.post("/mcp", json=ping, headers={**other, **bearer})
+            assert r.status_code == 200
+            preflight = {
+                "Origin": "https://claude.ai",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "authorization, content-type",
+            }
+            r = await client.options("/mcp", headers=preflight)
+            assert r.status_code == 204
+            assert r.headers["access-control-allow-origin"] == "https://claude.ai"
             good = {"Mcp-Session-Id": sid, "Origin": "https://chatgpt.com"}
             r = await client.post(f"/mcp/{TOKEN}", json=ping, headers=good)
             assert r.status_code == 200

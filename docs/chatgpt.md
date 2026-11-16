@@ -1,8 +1,9 @@
-# Using KaroX from ChatGPT on the web
+# Using KaroX from ChatGPT, Claude and other web clients
 
-`karox mcp --http` serves KaroX as a remote MCP server (Streamable HTTP). ChatGPT can
-use it as a custom connector: you describe the task in the chat, ChatGPT starts a KaroX
-run on your machine, follows its progress and shows the diff.
+`karox mcp --http` serves KaroX as a remote MCP server (Streamable HTTP). ChatGPT, Claude
+and any other client that takes a remote MCP URL can use it as a connector: you describe
+the task in the chat, the assistant starts a KaroX run on your machine, follows its
+progress and shows the diff.
 
 ## 1. Start the server
 
@@ -25,22 +26,45 @@ approving. Use `--approve-dangerous deny` to refuse them outright.
 
 ## 2. Make it reachable over HTTPS
 
-ChatGPT connects from the internet, so the local port needs a public HTTPS address, for
-example with a tunnel:
+Hosted assistants connect from the internet, so the local port needs a public HTTPS
+address. With [Tailscale](https://tailscale.com/download) (signed in, MagicDNS and HTTPS
+certificates on) KaroX sets it up itself:
+
+```bash
+karox mcp --http 8765 --root ~/projects --model MODEL --tunnel tailscale
+```
+
+It publishes the port with Tailscale Funnel and prints the connector URL,
+`https://<machine>.<tailnet>.ts.net/mcp/<token>` (or with `:8443` / `:10000` when another
+program already uses 443). The address stays the same across restarts, the certificate is
+real, and the route is removed when KaroX stops; routes other programs configured are left
+alone. If Tailscale says Funnel is not enabled, it prints the admin-console link that turns
+it on. `--tunnel tailnet` uses Tailscale Serve instead: only devices in your tailnet reach
+the URL (a client on your phone or laptop, not hosted assistants).
+
+Any other HTTPS tunnel works too:
 
 ```bash
 ngrok http 8765            # or: cloudflared tunnel --url http://127.0.0.1:8765
 ```
 
 The connector URL is then `https://<tunnel-host>/mcp/<token>`. Anyone who learns the full
-URL can start runs on your machine; stop the tunnel when you are done.
+URL can start runs on your machine; stop the server or tunnel when you are done.
 
-## 3. Add the connector in ChatGPT
+## 3. Add the connector
 
-In ChatGPT settings, enable developer mode for connectors, create a connector with the
-URL from step 2 and choose no authentication (the token in the URL is the secret). Then
-enable the connector in a chat and ask, for example: "Use KaroX to fix the failing test in
-~/projects/app and show me the diff".
+The token in the URL is the secret, so choose no authentication wherever the client asks.
+
+- **ChatGPT**: in Settings > Apps & Connectors enable developer mode, create a connector
+  with the URL from step 2, then enable it in a chat.
+- **Claude** (claude.ai, desktop and mobile apps): Settings > Connectors > Add custom
+  connector, paste the URL.
+- **Other clients** (Le Chat, Cursor, VS Code, MCP Inspector, ...): add a remote /
+  Streamable HTTP MCP server with that URL, or send `Authorization: Bearer <token>` to
+  `https://<host>/mcp` if the client prefers a header.
+
+Then ask, for example: "Use KaroX to fix the failing test in ~/projects/app and show me
+the diff".
 
 ## Tools
 

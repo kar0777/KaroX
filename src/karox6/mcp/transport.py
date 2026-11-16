@@ -221,10 +221,18 @@ class HttpMcp:
         if path == "/healthz" and method == "GET":
             return 200, {"Content-Type": "text/plain"}, b"ok\n"
         origin = headers.get("origin")
-        if origin and not self._origin_ok(origin):
+        authorized = self._authorized(path, headers)
+        preflight = method == "OPTIONS" and (path == self.path or path.startswith(self.path + "/"))
+        # The origin check guards against DNS rebinding: a page in the user's browser
+        # reaching this server without knowing the token. A request that carries the token
+        # comes from a client the user gave it to, so every connector host (ChatGPT, Claude,
+        # Le Chat, a web IDE, ...) works without listing its origin. A preflight carries no
+        # credentials and only lets the browser send the real request, which still needs
+        # the token.
+        if origin and not (authorized or preflight or self._origin_ok(origin)):
             return _json(403, {"error": "origin not allowed"})
         cors = self._cors(origin)
-        if method == "OPTIONS" and (path == self.path or path.startswith(self.path + "/")):
+        if preflight:
             # Browsers send CORS preflights without credentials: answer before the token check.
             return (
                 204,
@@ -236,7 +244,7 @@ class HttpMcp:
                 },
                 b"",
             )
-        if not self._authorized(path, headers):
+        if not authorized:
             return _json(401 if path.startswith(self.path) else 404, {"error": "not found"}, cors)
         return None
 

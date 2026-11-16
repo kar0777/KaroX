@@ -496,3 +496,24 @@ git diff --check
   fixed before results: one attempt on 11 tasks swings 3-4 tasks, so only a gap of 4+
   solved tasks counts as a difference in score; calls, tokens and minutes per trial are
   compared on tasks every arm finished. Dev-pool trajectories may be read for causes.
+- 07:40 UTC, user: Tailscale is on; the connector must work for every client, not only
+  ChatGPT; Claude Code subagents may be used too. OpenRouter: the keyring key
+  (openrouter@KaroX/provider) and the `.env` keys found on the PC all have a key limit of
+  $0-0.01, already used up (the account itself has $15.49 left); a key with a limit is
+  needed before any OpenRouter run. Replays on dev8 failed only on tb41
+  `risk-scorer-replay`, whose image runs as a non-root user that cannot write /app (the
+  replay defaults, not a KaroX change; the other two tasks passed); re-run on hard12.
+- `karox mcp --http PORT --tunnel tailscale|tailnet` (new `mcp/tunnel.py`): checks that
+  Tailscale runs and has a ts.net name, takes the first of 443/8443/10000 that is free
+  (or still routes to this port after a killed KaroX), runs `tailscale funnel|serve --bg
+  --yes --https=P http://127.0.0.1:PORT`, prints the connector URL and removes only that
+  route on exit. Failures say what to do (sign in, MagicDNS/HTTPS, the Funnel enable link,
+  ports taken). Live: Funnel came up in 0.2 s on 443 next to KaroX 5's routes on 8443 and
+  10000 (left intact); initialize + tools/list answered 200 over the tailnet and through
+  two public Funnel relays (curl --resolve), a wrong token 401, route removed after.
+- Connector for every client: a request that carries the token is now accepted from any
+  Origin (Claude, Le Chat, web IDEs were refused with 403 before unless listed by
+  `--allow-origin`), and CORS preflights are answered for any origin (they carry no
+  credentials). The Origin check still refuses token-less requests from unknown pages
+  (DNS rebinding). Docs: chatgpt.md/.ru.md cover Tailscale first, ngrok/cloudflared as
+  alternatives, and ChatGPT, Claude and other clients. 663 tests on Windows.

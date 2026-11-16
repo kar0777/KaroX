@@ -39,7 +39,7 @@ base_url = "http://127.0.0.1:11434/v1"
 ```
 
 Полное руководство (чат, запуск без интерфейса и коды выхода, лимиты, безопасность, MCP в обе
-стороны): [docs/guide.ru.md](docs/guide.ru.md). KaroX из ChatGPT в браузере: [docs/chatgpt.ru.md](docs/chatgpt.ru.md).
+стороны): [docs/guide.ru.md](docs/guide.ru.md). KaroX из ChatGPT, Claude и других веб-клиентов (туннель Tailscale встроен): [docs/chatgpt.ru.md](docs/chatgpt.ru.md).
 
 ## Разработка
 

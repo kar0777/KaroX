@@ -34,7 +34,7 @@ base_url = "http://127.0.0.1:11434/v1"
 ```
 
 Full user guide (chat, headless runs and exit codes, limits, safety, MCP both ways):
-[docs/guide.md](docs/guide.md). Using KaroX from ChatGPT on the web: [docs/chatgpt.md](docs/chatgpt.md).
+[docs/guide.md](docs/guide.md). Using KaroX from ChatGPT, Claude and other web clients (Tailscale tunnel built in): [docs/chatgpt.md](docs/chatgpt.md).
 
 ## Development
 
