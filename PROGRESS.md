@@ -691,3 +691,19 @@ git diff --check
   max_tokens as a cut (`length`) whatever finish reason the server sends, so the
   truncation notice fires and the step is logged as cut. Test scoping, promotion hint and
   the economy bullet are candidates for a pre-registered A/B on held-out tasks.
+- 09:40 UTC, dev-pool A/B verdict (runs 43835356411 k6n2, 43835368408 k6r2, 43835380463
+  k6s2; 11 dev tasks x 2 attempts, no upstream failures, versions checked: dev8, dev8,
+  dev8+s1; V2 prompt present only in k6r2):
+
+  | arm | solved / 22 | P2P-regression trials | LLM calls / trial | cost | agent wall |
+  |---|---|---|---|---|---|
+  | k6n2 control | 15 | 0 | 50.4 | $0.618 | 151 min |
+  | k6r2 V2 | 18 | 0 | 48.7 (97%) | $0.588 | 169 min |
+  | k6s2 S1 | 17 | 2 (montepy, both attempts) | 50.7 (101%) | $0.632 | 156 min |
+
+  V2 meets its rule (solved >= control, calls <= 110%): candidate for the next held-out
+  run. S1 fails its P2P rule (2 > control + 1): rejected; its "fix it everywhere" wording
+  widened montepy changes into breaking existing tests. V2 costs 12% more agent wall time
+  (stash-and-rerun checks); the speed candidates target that. Evaluator:
+  scratchpad ab.py (F2P/P2P from data/val_new.jsonl, env failures = P2P failing in every
+  attempt of the task across arms).
