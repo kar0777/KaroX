@@ -350,3 +350,12 @@ git diff --check
   V1 rule stays as fixed above and waits for a working upstream; ReformBoss is paid and
   limited to one runner at a time (2.5 h for 6 jobs last time), GLM is a different model.
   Bench runs are blocked until the Synthetic subscription is renewed (the user's call).
+- Code mode prompt: with `--code-mode` the system prompt now gets one paragraph saying when
+  to use `run_code` (several tool calls whose inputs are already known), because C1 showed
+  the tool alone is never picked. Off without the flag; BASE_PROMPT unchanged. A live check
+  on a free model (CrowLLM grok-4.7-fast) was inconclusive: it batched four reads into one
+  step without `run_code`, then claimed a fix it never made (a model failure). Code mode
+  waits for its C2 A/B on DeepSeek when an upstream is available.
+- 6.0.0.dev7 = dev6 + MCP client hardening + the code-mode paragraph (flag only). For
+  bench runs without MCP servers or flags it behaves as dev6, so the V1 rule can be run on
+  it unchanged. 624 tests; clean-venv wheel smoke OK.

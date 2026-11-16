@@ -162,5 +162,8 @@ def test_session_offers_run_code_only_with_the_flag(tmp_path, monkeypatch):
     assert events[-1].status == "completed"
     tool_messages = [m for m in session.messages if m.role == "tool"]
     assert "hello" in tool_messages[0].content
+    assert code_module.CODE_MODE_APPEND in session.system_prompt
     plain = SessionConfig(model="t", workspace=tmp_path, home=tmp_path / "home")
-    assert "run_code" not in [t.name for t in Session(plain, ScriptedProvider([])).tools]
+    plain_session = Session(plain, ScriptedProvider([]))
+    assert "run_code" not in [t.name for t in plain_session.tools]
+    assert code_module.CODE_MODE_APPEND not in plain_session.system_prompt

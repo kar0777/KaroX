@@ -29,6 +29,15 @@ from karox6.tools.base import Tool, ToolArgsError, ToolContext, ToolResult, pars
 from karox6.tools.proc import ProcessRun
 from karox6.tools.shell import shell_env
 
+# Added to the system prompt with --code-mode: without it models keep making one tool call
+# per step (C1: run_code offered in 11 dev trials, called 0 times).
+CODE_MODE_APPEND = (
+    "Code mode: the run_code tool runs a Python program that calls the other tools as "
+    "functions. Use it whenever a step needs several tool calls whose inputs you already "
+    "know - reading or grepping several files, reading the hits of a search, running a few "
+    "commands and comparing their results, applying a series of similar edits - so they "
+    "cost one step instead of several. Print only what you need to see."
+)
 DEFAULT_TIMEOUT_MS = 300_000
 MAX_TIMEOUT_MS = 1_200_000
 NOT_NESTED = frozenset({"run_code", "agent"})

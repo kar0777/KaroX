@@ -162,8 +162,13 @@ class Session:
         self.jobs = JobManager()
         self.guard = LoopGuard(hard_stop=config.loop_hard_stop)
         self.approver = approver
+        append = config.system_append
+        if "run_code" in self._tool_map:
+            from karox6.tools.code import CODE_MODE_APPEND
+
+            append = "\n\n".join(p for p in (append, CODE_MODE_APPEND) if p)
         self.system_prompt = build_system_prompt(
-            self.workspace, self.shell, base=config.system_prompt, append=config.system_append
+            self.workspace, self.shell, base=config.system_prompt, append=append
         )
         self._last_input_tokens = 0
         self._chars_since_measure = 0
