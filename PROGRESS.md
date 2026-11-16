@@ -312,3 +312,11 @@ git diff --check
   either way. Provenance: the wording is generic; the motivation is the dev-pool phase
   analysis (E1/B1: 2-20 steps after the last edit) plus the aggregate held-out time split
   above, looked at after the held-out run was scored (no task content used).
+- Held-out verdict k6h3s (run 43766318734, wheel 6.0.0.dev5, Synthetic, 50 tasks, 1 attempt;
+  report `karox6-bench-data/reports/heldout-k6h3s`): KaroX 6 16/50, DSH 17/50, OpenCode
+  15/50. Raw usage $3.20 / $2.30 / $4.80; miss-normalized (`uncached.py --heldout`, same 50
+  tasks) $2.41 / $2.04 / $4.10, i.e. KaroX 1.18x DSH (k6h1s: 1.43x). LLM calls 2835 / 2256
+  / 4351 (k6h1s KaroX: 3670, so dev5 makes 23% fewer calls). Min per trial 11.9 / 4.7 / 7.9.
+  Against k6h1s only task 35 changed (3 of 4 F2P tests). M2 bar still not met: one task
+  behind DSH and 18% dearer; ahead of OpenCode on both. KaroX alone solves 48 again and
+  breaks one P2P test on 60 again. C1 (run 43794614606) started 02:51 UTC.
