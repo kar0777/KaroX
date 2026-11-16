@@ -817,3 +817,22 @@ git diff --check
   excluded for all arms of that task; then minutes and LLM calls on tasks every arm
   finished. Not a tuning set afterwards: trajectories may be read for causes, any change
   is judged on other DeepSWE tasks.
+- 22:40 UTC, dsg1 interim (16 of 54 trials): Harbor's ApiRateLimitError label also lands on
+  trials that recovered and solved the task (karox6 dynamodb, reward 1), so the label alone
+  does not mark an upstream failure. Clarification written before the remaining 38 trials:
+  "upstream-failed" = the agent's run ended on a provider error (its last model reply was a
+  429/5xx or an empty reply it took as the end); the final report gives the score both ways
+  (this definition and Harbor's label).
+- 22:40 UTC, pre-registered A/B "spec audit" (from reading dsg1 karox6 misses cattrs and
+  fastapi-implicit-head: in both the agent wrote its own tests around a misreading of one
+  task sentence and finished on them green). Arm A = dev10 as is; arm B = dev10 +
+  `--append-system-prompt` "Before you finish, re-read the task statement sentence by
+  sentence and check each stated requirement against your code: exact names, return types
+  and shapes, what must be preserved, excluded or matched. Your own tests only prove what
+  you wrote them to check; if the code and the statement disagree, fix the code, not the
+  statement or docstring." Tasks: the 16 other DeepSWE-set tasks picked by seed 20261117
+  (4 per language where available; set indices 1,2,5,6,7,14,18,19,23,24,26,31,35,36,42,44),
+  1 attempt, FreeInference GLM, both runs at parallel 2, dispatched after dsg1 ends.
+  Reading: B adopted into the base prompt only if solved(B) >= solved(A) + 3 with
+  upstream-failed tasks (definition above) dropped for both arms; otherwise not adopted
+  (1-attempt noise is 3-4 tasks). Wall minutes reported, not a gate.
