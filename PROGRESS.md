@@ -730,3 +730,16 @@ git diff --check
   task. A FreeInference GLM smoke (tasks 19 and 20, 1 attempt, VT only) comes first and is
   not a verdict: it only checks that the prompt and the marker are live and counts test
   commands and their time.
+- 10:00 UTC, or1 final (30 held-out tasks, 1 attempt, same model and fp8 providers for all
+  arms, prices of deepinfra/fp8 for all): solved KaroX 6 (dev8) 16, OpenCode 15, DSH 12
+  (DSH hit the 60 min limit on task 70); cost $0.84 / $0.76 / $0.76; agent wall 304 /
+  256 / 226 min (LLM 156 / 132 / 130 min). By the pre-registered reading (a gap under 4
+  is a tie at 1 attempt) KaroX ties OpenCode and leads DSH by 4; it is the slowest and
+  ~10% the dearest. The six tasks finished last (47, 54, 58, 62, 70, 73) show the same
+  time sinks as the speed report: whole test directories re-run (4-5 min each) and
+  300 s job_output waits. OpenRouter key: $4.22 of $6 used.
+  Caveat on the rule above: the 20 held-out tasks or1 left out are the never-reached ones
+  (no arm solved or half-passed them before), so solved counts there will barely move and
+  trials there are long and dear (~$0.05-0.10 each); two arms likely exceed the $1.78
+  left. The held-out VT run waits for more budget or a different task choice, fixed here
+  before it starts.
