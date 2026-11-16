@@ -800,3 +800,20 @@ git diff --check
   20 tasks per arm (14: 25 vs 26 min, 15: 60 vs 57 min): no verdict under the 16:58 rule;
   T is not adopted and stays on wt/speed. Main keeps dev9 behaviour (600 s cap, old verify
   bullet). FreeInference concurrency (2) is per account; a second key shares it.
+- 19:58 UTC, new held-out source (user: only verifiably solvable tasks, from public benches):
+  DeepSWE v1.1 (datacurve-ai/deep-swe @ 0b9fabb, 113 never-merged tasks, public-API
+  verifiers). Per-task data from deepswe.datacurve.ai/artifacts/v1.1/trials.json: kept the
+  45 tasks GLM-5.3-Flash (mini-swe-agent, max effort, 4 runs) solved 1-3 times, minus the 23
+  Epoch flagged. Bench repo set `deepswe` (scripts/import_deepswe.py): gateway-only agent
+  network, agent timeout 3600 s for every arm, collect = committed + uncommitted work vs
+  base through a temporary index. Oracle arm: 45/45 solved on GitHub runners (run
+  43941849886; the first oracle run died on CRLF from a Windows clone). The old hard12
+  held-out tasks: 3 of 73 need private names absent from the task text (14, 15, 17).
+- 19:58 UTC, pre-registered DeepSWE run on FreeInference GLM-5.3-Flash (user approved, night):
+  18 tasks (seed 20261116, 6 each Python / TypeScript / Go; set indices
+  3,8,12,15,16,17,20,22,25,27,28,29,30,33,37,40,41,45), 1 attempt, arms karox6 (wheel
+  6.0.0.dev10 = main, no extra flags), opencode_v2, deepseek_harness, parallel 4. Reading:
+  solved trials per arm; a gap under 4 is a tie at 1 attempt; upstream-failed trials are
+  excluded for all arms of that task; then minutes and LLM calls on tasks every arm
+  finished. Not a tuning set afterwards: trajectories may be read for causes, any change
+  is judged on other DeepSWE tasks.
