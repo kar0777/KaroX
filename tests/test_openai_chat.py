@@ -152,7 +152,9 @@ def test_finish_reason(finish):
     assert result.finish_reason == finish
 
 
-@pytest.mark.parametrize(("output", "finish"), [(100, "length"), (99, "tool_calls")])
+@pytest.mark.parametrize(
+    ("output", "finish"), [(100, "length"), (99, "tool_calls"), (101, "tool_calls")]
+)
 def test_reply_at_the_token_cap_is_a_cut(output, finish):
     """A router reported tool_calls for 32768-token replies whose arguments were cut."""
     req = request()

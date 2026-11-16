@@ -124,8 +124,8 @@ class OpenAIChatProvider:
         except json.JSONDecodeError as exc:
             raise ProviderError("server", f"invalid JSON from server: {exc}") from exc
         response = acc.result()
-        cap = request.max_output_tokens
-        if cap and response.finish_reason != "length" and response.usage.output_tokens >= cap:
+        cap = body.get("max_tokens") or body.get("max_completion_tokens")  # as sent
+        if cap and response.finish_reason != "length" and response.usage.output_tokens == cap:
             # Some routers report tool_calls (or stop) for a reply cut at max_tokens; its
             # last call's arguments are then incomplete, so treat it as the cut it is.
             response.finish_reason = "length"

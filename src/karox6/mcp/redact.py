@@ -90,7 +90,7 @@ _URL_CREDS = re.compile(r"://[^\s:/?#@\"'\\<>]{0,200}:(?P<cred>[^\s/?#@\"'\\<>]{
 # from trying every word: only names holding a secret-ish word go on.
 _ASSIGN = re.compile(
     r"(?:(?<![\w.\\-])|(?<=\\[nrt]))"
-    r"(?=[\w.-]{0,60}?(?i:pass|secret|credential|key|token))"
+    r"(?=[\w.-]{0,60}?(?i:pass|secret|credential|key|token|pwd|auth))"
     r"(?P<key>[\w.-]{1,80})(?:\\{0,3}[\"'])?[ \t]{0,3}(?P<sep>=>|:=|[:=](?!=))[ \t]{0,3}"
     r"(?:(?P<q>\\{0,3}[\"'])(?P<qv>[^\"'\\\r\n]{1,2000})(?P=q)"
     r"|(?P<bv>[^\s\"'`\\,;&|<>(){}\[\]]{1,2000}))"
@@ -144,6 +144,14 @@ def secret_name(name: str) -> bool:
     parts = [p.lower() for p in _NAME_PARTS.split(name) if p]
     if not parts or parts[-1] in _PLAIN_LAST:
         return False
+    # MYSQL_PWD, a registry's "auth", AccountKey, and env-style *_KEY names (APP_KEY).
+    # A bare PWD is the shell's working directory.
+    if (parts[-1] == "pwd" and len(parts) > 1) or parts[-1] == "auth":
+        return True
+    if parts[-2:] == ["account", "key"]:
+        return True
+    if parts[-1] == "key" and name.isupper():
+        return True
     return _SECRET_WORD.search("_".join(parts)) is not None
 
 
@@ -201,12 +209,21 @@ def redact_json(data: Any, mask: Callable[[str], str]) -> Any:
 
 
 def _each_string(value: Any, mask: Callable[[str], str]) -> Any:
+    # Strings are masked one by one, so a key no longer sits beside its value: a value
+    # under a secret name is replaced whole, whatever it looks like.
     if isinstance(value, str):
         return mask(value)
     if isinstance(value, list | tuple):
         return [_each_string(v, mask) for v in value]
     if isinstance(value, dict):
-        return {mask(str(k)): _each_string(v, mask) for k, v in value.items()}
+        return {
+            mask(str(k)): (
+                f"{MARK}secret]"
+                if secret_name(str(k)) and isinstance(v, str | int) and not isinstance(v, bool)
+                else _each_string(v, mask)
+            )
+            for k, v in value.items()
+        }
     return value
 
 
@@ -248,7 +265,7 @@ def _plain(value: str) -> bool:
     return (
         len(value) < MIN_LEN
         or _TEMPLATE.search(value) is not None
-        or _NUMBER.fullmatch(value) is not None
+        or (_NUMBER.fullmatch(value) is not None and not value.isdigit())  # digits: a PIN
         or _ENV_NAME.fullmatch(value) is not None
     )
 

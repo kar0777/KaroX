@@ -322,3 +322,23 @@ def test_speed():
 def test_numeric_secret_env_values_are_masked_exactly():
     redactor = Redactor.from_env({"DB_PASSWORD": "123456789012", "PORT_NUMBER_KEY": "123"})
     assert redactor("pw=123456789012 port 123") == ("pw=[secret removed: $DB_PASSWORD] port 123")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "APP_KEY=base64:ZmFrZTBmYWtlMGZha2UwZmFrZTA=",
+        "MYSQL_PWD=fake0pass0word",
+        '{"auths": {"ghcr.io": {"auth": "dXNlcjpmYWtlMHBhc3Mw"}}}',
+        "DefaultEndpointsProtocol=https;AccountKey=ZmFrZTBmYWtlMGZha2Uw;EndpointSuffix=x",
+        "api_key=12345678",
+    ],
+)
+def test_bare_key_pwd_auth_names_and_digit_secrets(text):
+    assert MARK in redact(text)
+    assert "fake0" not in redact(text).lower().replace("[secret removed", "")
+
+
+def test_json_fallback_keeps_secret_names():
+    data = {"headers": {"authorization": 1234567890}, "db": {"password": "hunter2hunter2"}}
+    assert "hunter2hunter2" not in json.dumps(redact_json(data, redact))

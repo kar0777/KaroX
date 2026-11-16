@@ -775,3 +775,15 @@ git diff --check
   newest 50, so a long-lived `karox mcp --direct` server does not keep every job (Gemini's
   growth finding; agent runs never reach 50 finished jobs, so bench behaviour is unchanged).
   File-tracker sets and spill files still grow with use (small; logged).
+- 15:40 UTC, OpenCode (deepseek-v4.1-flash-free, effort high) review fixes, each probed:
+  masking now covers bare *_KEY env-style names (APP_KEY), *_PWD, a registry's "auth",
+  AccountKey, and digit-only values under secret names; the JSON fallback (used when
+  pattern masking would break JSON) masks values under secret-named keys whole instead
+  of failing open; cut detection compares with the max_tokens actually sent (extra_body
+  may override it) and needs output == cap (a provider ignoring the cap is not a cut).
+  Logged, not changed: the marker guard also refuses edits to KaroX's own masking code.
+- GLM-5.3-Flash mini A/B (directional, not a verdict), tasks 58 and 62, all four solved:
+  gv2 (dev9 + V2) 13.6 + 11.4 = 25.0 min, 92 calls, $0.070; gvt (dev9+t + V2) 13.0 + 7.9
+  = 20.9 min (-16%), 80 calls, $0.050. Smoke (dev9+t + V2): task 19 solved in 59 min on
+  GLM (shared 2-concurrency key with the A/B runs), task 20 unsolved in 20 min.
+  Consistent with T's aim; the held-out verdict still needs the same-model run.
