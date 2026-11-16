@@ -71,6 +71,18 @@ The token in the URL is the secret, so choose no authentication wherever the cli
 Then ask, for example: "Use KaroX to fix the failing test in ~/projects/app and show me
 the diff".
 
+## 4. Keep it running
+
+Add `--supervise` to keep the connector up unattended: `karox mcp` then runs the server as
+a child process and starts it again when it stops unexpectedly, after 1 s, then twice as
+long each time up to a minute (a server that ran five minutes starts the count over). Exit
+code 2 (bad arguments or configuration) is not retried. Ctrl+C stops both, and the server
+removes its Tailscale route as usual. With `--tunnel` the server also checks its route
+every 30 s and puts it back if it vanished (Tailscale restarted, `tailscale serve reset`),
+unless another program took the port meanwhile. Starting it at login is up to you: on
+Windows, a Task Scheduler task with an "At log on" trigger can run the same command. On
+Linux, a systemd user unit (`systemctl --user`) can run it as its `ExecStart=`.
+
 ## Direct mode: no second model
 
 With `--direct` the assistant in the chat (ChatGPT's own model, Claude, ...) does the

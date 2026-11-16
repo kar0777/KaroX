@@ -102,9 +102,12 @@ def test_without_safe_streams_the_legacy_code_page_raises() -> None:
     assert b"UnicodeEncodeError" in out.stderr
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is POSIX")
 @pytest.mark.parametrize("signals", [1, 2])
-def test_sigterm_runs_the_cleanup_and_a_second_one_exits_at_once(signals: int) -> None:
+def test_sigterm_or_ctrl_break_runs_the_cleanup_and_a_second_one_exits_at_once(
+    signals: int,
+) -> None:
+    """SIGTERM on POSIX; on Windows CTRL_BREAK, which `karox mcp --supervise` sends to its
+    server (Python's default for it ends the process without running `finally`)."""
     import signal
     import time
 
@@ -121,16 +124,22 @@ def test_sigterm_runs_the_cleanup_and_a_second_one_exits_at_once(signals: int) -
         "        print('cleaned', flush=True)\n"
         "run_async(main())\n"
     ).replace("CLEANUP_FAST", str(signals == 1))
+    windows = sys.platform == "win32"
+    stop = signal.CTRL_BREAK_EVENT if windows else signal.SIGTERM
     proc = subprocess.Popen(
-        [sys.executable, "-c", code], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0,
     )
     try:
         assert proc.stdout is not None
         assert proc.stdout.readline().strip() == "ready"
-        proc.send_signal(signal.SIGTERM)
+        proc.send_signal(stop)
         assert proc.stdout.readline().strip() == "cleaning"
         if signals == 2:
-            proc.send_signal(signal.SIGTERM)
+            proc.send_signal(stop)
         started = time.monotonic()
         proc.wait(timeout=10)
         assert time.monotonic() - started < 5

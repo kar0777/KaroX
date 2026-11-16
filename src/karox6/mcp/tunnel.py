@@ -5,7 +5,9 @@ it); Serve keeps it inside your tailnet (your own devices only). Tailscale termi
 with a real certificate for ``<machine>.<tailnet>.ts.net`` and proxies to 127.0.0.1, so
 KaroX itself never listens on a public interface. The proxy is configured in the
 background (``--bg``) and removed again when KaroX stops; only the HTTPS port KaroX took
-is touched, routes other programs configured stay as they are.
+is touched, routes other programs configured stay as they are. While KaroX runs,
+``Tunnel.keep`` puts the route back if it vanished (Tailscale restarted, ``tailscale
+serve reset``), again only onto a port that is free or still ours.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -37,6 +40,9 @@ class Tunnel:
     url: str  # https://host[:port], no trailing slash
     public: bool
     stop: Callable[[], None]
+    # Re-apply the route if it vanished; returns a line worth logging, or None when the
+    # route is in place. Call it from a thread, like stop.
+    keep: Callable[[], str | None]
 
 
 def run_cli(argv: list[str], timeout_s: float) -> tuple[int, str]:
@@ -126,24 +132,52 @@ def open_tailscale(
         )
     kind = "funnel" if public else "serve"
     url = f"https://{host}" if port == 443 else f"https://{host}:{port}"
+    publish = [exe, kind, "--bg", "--yes", f"--https={port}", target]
+    # stop and keep run in threads: once stop has run, a keep still in flight or a later
+    # one must not put the route back.
+    lock = threading.Lock()
+    stopped = False
 
     def stop() -> None:
         """Remove the route only while it is still exactly ours: another program may have
         replaced it meanwhile, and `off` would remove whatever serves the port."""
-        try:
-            now = _serve_config(exe, run)
-        except TunnelError:
-            return
-        if _routes(now, host, port) == {"/": {"Proxy": target}}:
-            with contextlib.suppress(TunnelError):
-                run([exe, kind, f"--https={port}", "--set-path=/", target, "off"], 30)
+        nonlocal stopped
+        with lock:
+            stopped = True
+            try:
+                now = _serve_config(exe, run)
+            except TunnelError:
+                return
+            if _routes(now, host, port) == {"/": {"Proxy": target}}:
+                with contextlib.suppress(TunnelError):
+                    run([exe, kind, f"--https={port}", "--set-path=/", target, "off"], 30)
 
-    code, out = run([exe, kind, "--bg", "--yes", f"--https={port}", target], 60)
+    def keep() -> str | None:
+        with lock:
+            if stopped:
+                return None
+            try:
+                now = _serve_config(exe, run)
+                if not usable(now, host, port, target, public=public):
+                    return (
+                        f"the Tailscale route on port {port} now serves something else; "
+                        "KaroX leaves it alone, so the connector URL does not reach KaroX"
+                    )
+                if port in _ports(now):
+                    return None  # still ours
+                code, out = run(publish, 60)
+            except TunnelError as exc:
+                return str(exc)
+            if code != 0:
+                return "could not put the Tailscale route back: " + explain_failure(kind, code, out)
+            return f"the Tailscale route had vanished; put it back ({url} -> {target})"
+
+    code, out = run(publish, 60)
     if code != 0:
         if code == TIMED_OUT:  # it may have been applied after all
             stop()
         raise TunnelError(explain_failure(kind, code, out))
-    return Tunnel(url=url, public=public, stop=stop)
+    return Tunnel(url=url, public=public, stop=stop, keep=keep)
 
 
 def _serve_config(exe: str, run: Runner) -> dict[str, Any]:
@@ -164,24 +198,24 @@ def _routes(config: dict[str, Any], host: str, port: int) -> Any:
 
 
 def free_port(config: dict[str, Any], host: str, target: str, *, public: bool) -> int | None:
-    """The first Funnel-capable HTTPS port that is unused, or already routes only "/" to
-    ``target`` with the same visibility (left over from a KaroX that was killed)."""
-    funnel = _section(config, "AllowFunnel")
+    """The first Funnel-capable HTTPS port KaroX may use (see `usable`)."""
+    ports = (p for p in FUNNEL_PORTS if usable(config, host, p, target, public=public))
+    return next(ports, None)
+
+
+def usable(config: dict[str, Any], host: str, port: int, target: str, *, public: bool) -> bool:
+    """``port`` is unused, or already routes only "/" to ``target`` with the same
+    visibility (ours, or left over from a KaroX that was killed)."""
     # Routes of a foreground `tailscale funnel` (no --bg) live per session under
     # "Foreground"; their ports are never free and never ours to reuse.
-    foreground: set[int] = set()
     for session in _section(config, "Foreground").values():
-        if isinstance(session, dict):
-            foreground.update(_ports(session))
-    for port in FUNNEL_PORTS:
-        if port in foreground:
-            continue
-        if port not in _ports(config):
-            return port
-        ours = _routes(config, host, port) == {"/": {"Proxy": target}}
-        if ours and bool(funnel.get(f"{host}:{port}")) == public:
-            return port
-    return None
+        if isinstance(session, dict) and port in _ports(session):
+            return False
+    if port not in _ports(config):
+        return True
+    ours = _routes(config, host, port) == {"/": {"Proxy": target}}
+    funnel = _section(config, "AllowFunnel")
+    return ours and bool(funnel.get(f"{host}:{port}")) == public
 
 
 def _ports(config: dict[str, Any]) -> set[int]:
