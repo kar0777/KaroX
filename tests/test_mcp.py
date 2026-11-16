@@ -248,6 +248,53 @@ def test_busy_workspace_is_refused(tmp_path):
     asyncio.run(go())
 
 
+def test_client_cancels_a_long_poll(tmp_path):
+    """notifications/cancelled ends that client's request (no answer); the run goes on."""
+    manager, _ = make_manager(
+        tmp_path, [Turn(calls=[("bash", {"command": "sleep 30", "timeout": 60000})])]
+    )
+    server = McpServer(manager)
+    out = []
+
+    async def write(payload):
+        out.append(payload)
+
+    def message(rid, **arguments):
+        params = {"name": "karox_status", "arguments": arguments}
+        return {"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": params}
+
+    def cancel(rid):
+        params = {"requestId": rid, "reason": "user pressed Esc"}
+        return {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": params}
+
+    async def go():
+        run, _ = manager.start("long")
+        poll = asyncio.create_task(
+            server.handle(message(7, run_id=run.run_id, wait_seconds=30), peer="a")
+        )
+        await asyncio.sleep(0.2)
+        assert await server.handle(cancel(7), peer="b") is None  # another client's ids
+        assert await server.handle(cancel("7"), peer="a") is None  # a different id
+        await asyncio.sleep(0.2)
+        assert not poll.done()
+        await server.handle(cancel(7), peer="a")
+        assert await asyncio.wait_for(poll, 2) is None
+
+        async def lines():
+            yield json.dumps(message("p", run_id=run.run_id, wait_seconds=30)).encode()
+            await asyncio.sleep(0.2)
+            yield json.dumps(cancel("p")).encode()
+            yield json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}).encode()
+
+        await asyncio.wait_for(serve_lines(server, lines(), write), 5)
+        assert run.running
+        await manager.shutdown()
+
+    asyncio.run(go())
+    assert out == [{"jsonrpc": "2.0", "id": 2, "result": {}}]
+    assert server._in_flight == {}
+
+
 def test_stdio_lines(tmp_path):
     manager, _ = make_manager(tmp_path, [])
     server = McpServer(manager)

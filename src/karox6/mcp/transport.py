@@ -295,7 +295,10 @@ class HttpMcp:
                 },
                 cors,
             )
-        replies = [r for r in [await self.server.handle(m) for m in items] if r is not None]
+        peer = session_id or ""
+        replies = [
+            r for r in [await self.server.handle(m, peer=peer) for m in items] if r is not None
+        ]
         if initializing and session_id:
             version = next(
                 (

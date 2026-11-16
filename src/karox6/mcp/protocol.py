@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -162,27 +163,52 @@ class McpServer:
     def __init__(self, runs: RunManager, *, name: str = "karox") -> None:
         self.runs = runs
         self.name = name
+        self._in_flight: dict[tuple[str, str], asyncio.Future[dict[str, Any]]] = {}
 
-    async def handle(self, message: Any) -> dict[str, Any] | None:
-        """Answer one JSON-RPC message; notifications and client responses get None."""
+    async def handle(self, message: Any, *, peer: str = "") -> dict[str, Any] | None:
+        """Answer one JSON-RPC message; notifications and client responses get None.
+
+        ``peer`` names the client (its HTTP session): `notifications/cancelled` stops that
+        client's request with the given id, which then gets no answer. A cancelled
+        karox_run or karox_status only stops waiting; the run itself goes on."""
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
             return _error(None, INVALID_REQUEST, "not a JSON-RPC 2.0 message")
         method = message.get("method")
         if not isinstance(method, str):
             return None  # a response to a server request: we send none
         if "id" not in message:
-            return None  # notification (initialized, cancelled, ...)
+            if method == "notifications/cancelled":
+                self._cancel(peer, message.get("params"))
+            return None  # other notifications (initialized, ...) need nothing
         request_id = message["id"]
         params = message.get("params") or {}
         if not isinstance(params, dict):
             return _error(request_id, INVALID_PARAMS, "params must be an object")
+        key = (peer, json.dumps(request_id))
+        work = asyncio.ensure_future(self._dispatch(method, params))
+        if method != "initialize":  # a client must not cancel initialize
+            self._in_flight[key] = work
         try:
-            result = await self._dispatch(method, params)
+            result = await work
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if work.cancelled() and current is not None and not current.cancelling():
+                return None  # cancelled by the client, who expects no answer
+            raise
         except _RpcError as exc:
             return _error(request_id, exc.code, exc.message)
         except Exception as exc:  # pragma: no cover - defensive
             return _error(request_id, INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
+        finally:
+            if self._in_flight.get(key) is work:
+                del self._in_flight[key]
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+    def _cancel(self, peer: str, params: Any) -> None:
+        if isinstance(params, dict) and "requestId" in params:
+            work = self._in_flight.get((peer, json.dumps(params["requestId"])))
+            if work is not None:
+                work.cancel()
 
     async def _dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method == "initialize":

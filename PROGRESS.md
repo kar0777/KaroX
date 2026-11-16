@@ -452,3 +452,8 @@ git diff --check
   kill of a KaroX process -> its command is gone; a breakaway child survives; without the
   binding the command outlived KaroX. 639 tests (Linux 628 + 13 Windows-only), startup
   115 ms.
+- MCP server honours `notifications/cancelled`: the client's request with that id (per
+  client: the HTTP session, or the stdio peer) stops and gets no answer, as the spec asks.
+  A cancelled karox_run/karox_status only stops waiting; the run goes on (karox_cancel ends
+  runs). Before, a long-poll the user had cancelled kept its slot for up to 50 s and then
+  answered nobody. 640 tests (Linux 629 + 13 Windows-only).
