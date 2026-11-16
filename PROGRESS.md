@@ -632,3 +632,22 @@ git diff --check
   encode ~0.35 s. Gaps: no live multi-monitor or high-DPI check here; PrintWindow can
   still return a black frame for some GPU/protected windows; macOS/Linux paths are tested
   with a fake runner only. 700 passed, 5 skipped on Windows (11 new).
+- 09:00 UTC, key limit raised to $6. Dev-pool A/B, all three arms dispatched together on
+  OpenRouter (same model, fp8 providers), 11 dev tasks x 2 attempts, wheel named
+  explicitly per arm (new bench input `karox6_wheel`):
+  - k6n2 control: dev8, no flags.
+  - k6r2 V2: dev8 + the V2 sentence (rule fixed above: candidate if solved trials >=
+    k6n2's and LLM calls per trial <= 110% of k6n2's).
+  - k6s2 S1: wheel 6.0.0.dev8+s1 = dev8 with one BASE_PROMPT line replaced ("Make the
+    smallest change that fully solves the task, in the style of the surrounding code. Do
+    not reformat or rewrite unrelated code." -> "Fix the root cause everywhere it applies:
+    once you find the faulty logic, look for the same logic in sibling implementations
+    (other backends, subclasses, duplicated helpers) and in other entry points that reach
+    it, and fix those too, preferably at the shared point they all go through. Keep the
+    diff focused and in the style of the surrounding code; do not reformat or rewrite
+    unrelated code."). Rule fixed now: candidate for the next held-out run if its solved
+    trials >= k6n2's + 2, its P2P-regression trials <= k6n2's + 1, and its LLM calls per
+    trial <= 115% of k6n2's; otherwise rejected. Secondary: share of trials whose
+    reasoning cites "smallest" (expected near 0), non-test source files per diff.
+  Trials an upstream error stopped (no successful call, or HTTP 402/429/5xx ending the
+  run) are excluded from all arms' counts for that task-attempt.
