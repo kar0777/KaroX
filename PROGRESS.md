@@ -659,3 +659,26 @@ git diff --check
   also broke `$` in both backends: rg now gets `--crlf`, the prefilter reads `\r\n` as
   `\n`. Tool-contract bug fix, no prompt or behaviour choice involved: no A/B. New test
   fails on the old code in both backends, passes now; full suite green on Windows.
+- Secret masking for `karox mcp` (new `mcp/redact.py`): everything sent back to the
+  client goes through it, in both modes; KaroX's own model and the disk see real values.
+  Rules: private key blocks (also cut short, END-only tails, line-numbered reads and
+  JSON-escaped keys), token formats (sk-/sk-ant-/sk-or-, gh*_/github_pat_, glpat-, xox*,
+  AKIA/ASIA, AIza, JWT, sk_/rk_live/test, hf_, npm_, pypi-), Authorization headers and
+  bare Bearer/Basic, URL passwords, `KEY=value` / `key: value` / `"key": "value"` under a
+  secret-ish name, and exact values of secret-looking environment variables (taken before
+  the key and token variables leave the environment) plus the HTTP access token. Agent
+  replies are masked as one JSON text (a key beside its value), then fitted; the rules
+  keep JSON valid, with a string-by-string fallback. Deliberately not masked: random
+  strings with no known prefix or secret-ish name (git SHAs, UUIDs, lockfile hashes,
+  base64), code references (`os.environ[...]`, `settings.X`, `f(token=token)`), templates
+  (`${X}`, `<...>`, `xxxx`). Direct mode refuses a write/edit/shell call that carries a
+  marker, so a masked secret is never written back over the real one. `--no-redact`
+  turns it off; the initialize instructions say secrets are masked. 100k characters take
+  about 10-30 ms (adversarial inputs included). Known gaps: lowercase keys with
+  letters-only values in code style (`password=letmeinplease`), numeric-only secrets, secrets
+  with quotes/backslashes for exact matching, XML `<password>`, `.netrc`, tokens glued to
+  ANSI colour codes. 784 passed, 5 skipped on Windows (95 new).
+- 10:15 UTC, merged wt/secrets. Integration fix: the masking loop read `item["text"]` on
+  every content item, and the screenshot reply (merged in parallel) carries an image item:
+  KeyError -> internal error on every screenshot; now only text items are masked (the
+  existing screenshot reply test catches it).

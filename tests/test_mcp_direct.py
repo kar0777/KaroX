@@ -7,6 +7,7 @@ import pytest
 from karox6.cli import main
 from karox6.mcp.direct import DirectTools
 from karox6.mcp.protocol import TOOLS, McpServer
+from karox6.mcp.redact import Redactor
 from karox6.tools import screen
 from karox6.tools.registry import build_tools
 from karox6.tools.shell import detect_shell
@@ -315,3 +316,91 @@ def test_screenshot_reply_carries_the_image(tmp_path, monkeypatch):
         await direct.shutdown()
 
     asyncio.run(go())
+
+
+FAKE_KEY = "sk-proj-" + "FAKE0fake" * 5  # fake: masked as an API key
+MARKED_KEY = "[secret removed: API key]"
+
+
+def test_secrets_are_masked_and_markers_never_written(tmp_path):
+    server, direct = make_server(tmp_path)
+    shell = direct.shell_name
+    env_file = direct.root / ".env"
+    env_file.write_text(f"DB_PASSWORD=fake0pass0\nOPENAI_API_KEY={FAKE_KEY}\n")
+    original = env_file.read_text()
+    with_env = McpServer(
+        direct=direct, redactor=Redactor.from_env({"MY_SERVICE_TOKEN": "Fake0value0for0tests"})
+    )
+    plain = McpServer(direct=direct, redactor=None)
+
+    async def go():
+        text, error = await call(server, "read", file_path=".env")
+        assert not error
+        assert "1: DB_PASSWORD=[secret removed: password]" in text
+        assert f"2: OPENAI_API_KEY={MARKED_KEY}" in text
+        text, error = await call(server, shell, command="cat .env")
+        assert not error
+        assert FAKE_KEY not in text
+        assert "fake0pass0" not in text
+        text, _ = await call(with_env, shell, command="echo Fake0value0for0tests")
+        assert text.startswith("[secret removed: $MY_SERVICE_TOKEN]")
+        # A marker written back would replace the real value in the file: refused.
+        for name, args in (
+            ("write", {"file_path": ".env", "content": f"OPENAI_API_KEY={MARKED_KEY}\n"}),
+            ("edit", {"file_path": ".env", "old_string": "x", "new_string": MARKED_KEY}),
+            (shell, {"command": f"echo 'KEY={MARKED_KEY}' > .env"}),
+        ):
+            text, error = await call(server, name, **args)
+            assert error, name
+            assert text.startswith("Not executed: the arguments contain"), text
+        assert env_file.read_text() == original
+        text, error = await call(server, "grep", pattern="secret removed")  # read-only: fine
+        assert not error
+        init = await rpc(server, "initialize", {"protocolVersion": "2025-06-18"})
+        assert "[secret removed: ...]" in init["result"]["instructions"]
+        # Without a redactor (--no-redact) output and markers go through unchanged.
+        text, _ = await call(plain, "read", file_path=".env")
+        assert FAKE_KEY in text
+        init = await rpc(plain, "initialize", {"protocolVersion": "2025-06-18"})
+        assert "secret removed" not in init["result"]["instructions"]
+        text, error = await call(plain, "write", file_path="notes.txt", content=MARKED_KEY)
+        assert not error
+        await direct.shutdown()
+
+    asyncio.run(go())
+
+
+def test_cli_masks_its_own_secrets(tmp_path, monkeypatch, capsys):
+    """`karox mcp` masks the values of secret environment variables (taken before the key
+    and token variables leave the environment) and its own access token; --no-redact
+    turns masking off."""
+    from karox6.mcp import transport
+
+    servers = []
+
+    class StopAtStart:
+        def __init__(self, server, *, token, allowed_origins):
+            servers.append((server, token))
+
+        async def start(self, host, port):
+            raise OSError("stopped by the test")
+
+    monkeypatch.setattr(transport, "HttpMcp", StopAtStart)
+    monkeypatch.setenv("KAROX_HOME", str(tmp_path))
+    monkeypatch.delenv("KAROX_CONFIG", raising=False)
+    monkeypatch.delenv("KAROX_MCP_TOKEN", raising=False)
+    monkeypatch.setenv("KAROX_API_KEY", "Fake0api0key0value")
+    monkeypatch.setenv("SOME_DB_PASSWORD", "Fake0db0pass0value")
+    (tmp_path / "root").mkdir()
+    argv = ["mcp", "--direct", "--http", "0", "--root", str(tmp_path / "root"), "--no-mcp"]
+    assert main(argv) == 2
+    assert "stopped by the test" in capsys.readouterr().err
+    server, token = servers[-1]
+    masked = server.redactor(f"a Fake0api0key0value b Fake0db0pass0value c /mcp/{token}")
+    assert masked == (
+        "a [secret removed: $KAROX_API_KEY] b [secret removed: $SOME_DB_PASSWORD] "
+        "c /mcp/[secret removed: KaroX access token]"
+    )
+    monkeypatch.setenv("KAROX_API_KEY", "Fake0api0key0value")
+    assert main([*argv, "--no-redact"]) == 2
+    assert servers[-1][0].redactor is None

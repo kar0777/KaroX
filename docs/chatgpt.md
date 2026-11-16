@@ -22,7 +22,13 @@ server's memory but their changes are still on disk. `--new-token` makes a new t
 old URL stops working; do it if the URL leaked). To choose the token yourself, set
 `KAROX_MCP_TOKEN`: that token is neither saved nor printed. The server removes the token
 and the API key variable from its environment, so the agent's commands cannot read them.
-Runs may only work inside `--root` (add `--any-cwd` to lift that).
+Everything the server sends back (command output, file contents, the diff, the final
+answer) is checked for secrets first: private keys, API keys and tokens of common formats,
+`Authorization` headers, passwords in URLs and in `password=` / `token:` style settings,
+and the values of secret-looking environment variables show as `[secret removed: <kind>]`.
+The files keep the real values, direct mode refuses to write such a marker back, and
+`--no-redact` turns the masking off. Runs may only work inside `--root` (add `--any-cwd`
+to lift that).
 
 Dangerous commands (deletions, force pushes, ...) wait for approval by default: ChatGPT
 sees a pending approval in `karox_status` and answers with `karox_approve`. Approve only

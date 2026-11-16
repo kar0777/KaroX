@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 from karox6 import __version__
-from karox6.mcp.direct import DirectTools
+from karox6.mcp.direct import READ_ONLY, DirectTools
+from karox6.mcp.redact import MARK, redact, redact_json
 from karox6.mcp.runs import REPLY_CAP, RunError, RunManager, reply_text
 
 SUPPORTED_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
@@ -28,6 +30,15 @@ INSTRUCTIONS = (
     "karox_approve. Review the result with "
     "karox_diff. Give karox_run a unique request_id so a retried call never starts the "
     "same work twice."
+)
+SECRETS_NOTE = (
+    " Likely secrets in replies (keys, tokens, passwords) show as [secret removed: ...]; "
+    "the files keep the real values, so never write such a marker back."
+)
+MARKER_REFUSED = (
+    "Not executed: the arguments contain '[secret removed: ...]', a marker KaroX shows in "
+    "place of a secret. The file holds the real value and writing the marker would "
+    "destroy it: change the text around it, or ask the user to edit the secret."
 )
 
 _RUN_ID = {"type": "string", "description": "run id returned by karox_run"}
@@ -162,7 +173,10 @@ TOOLS: list[dict[str, Any]] = [
 
 class McpServer:
     """Serves either the KaroX agent (``runs``: karox_* tools) or, in direct mode, the
-    agent's own tools for the client's model (``direct``)."""
+    agent's own tools for the client's model (``direct``).
+
+    ``redactor`` masks secrets in every tool reply before it leaves (None: replies go
+    out as they are); the CLI passes one that also knows this process's secret values."""
 
     def __init__(
         self,
@@ -170,12 +184,14 @@ class McpServer:
         *,
         direct: DirectTools | None = None,
         name: str = "karox",
+        redactor: Callable[[str], str] | None = redact,
     ) -> None:
         if (runs is None) == (direct is None):
             raise ValueError("McpServer needs exactly one of runs and direct")
         self.runs = runs
         self.direct = direct
         self.name = name
+        self.redactor = redactor
         self._in_flight: dict[tuple[str, str], asyncio.Future[dict[str, Any]]] = {}
 
     async def handle(self, message: Any, *, peer: str = "") -> dict[str, Any] | None:
@@ -211,7 +227,8 @@ class McpServer:
         except _RpcError as exc:
             return _error(request_id, exc.code, exc.message)
         except Exception as exc:  # pragma: no cover - defensive
-            return _error(request_id, INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
+            text = self._mask(f"{type(exc).__name__}: {exc}")
+            return _error(request_id, INTERNAL_ERROR, text)
         finally:
             if self._in_flight.get(key) is work:
                 del self._in_flight[key]
@@ -227,11 +244,12 @@ class McpServer:
         if method == "initialize":
             asked = params.get("protocolVersion")
             version = asked if asked in SUPPORTED_VERSIONS else LATEST
+            instructions = self.direct.instructions if self.direct else INSTRUCTIONS
             return {
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": self.name, "title": "KaroX", "version": __version__},
-                "instructions": self.direct.instructions if self.direct else INSTRUCTIONS,
+                "instructions": instructions + (SECRETS_NOTE if self.redactor is not None else ""),
             }
         if method == "ping":
             return {}
@@ -246,7 +264,17 @@ class McpServer:
                 return await self._call(name, arguments)
             if name not in self.direct.tools:
                 raise _RpcError(INVALID_PARAMS, f"unknown tool {name!r}")
-            return await self.direct.call(name, arguments)
+            if (
+                self.redactor is not None
+                and name not in READ_ONLY
+                and MARK in json.dumps(arguments)
+            ):
+                return {"content": [{"type": "text", "text": MARKER_REFUSED}], "isError": True}
+            result = await self.direct.call(name, arguments)
+            for item in result["content"]:
+                if item.get("type") == "text":  # a screenshot also carries an image item
+                    item["text"] = self._mask(item["text"])
+            return result
         if method in ("resources/list", "resources/templates/list", "prompts/list"):
             key = {"resources/list": "resources", "prompts/list": "prompts"}.get(
                 method, "resourceTemplates"
@@ -261,10 +289,18 @@ class McpServer:
             raise
         except (RunError, KeyError, TypeError, ValueError, OverflowError) as exc:
             text = str(exc) if isinstance(exc, RunError) else f"bad arguments: {exc}"
+            text = self._mask(text)
             text = text if len(text) <= REPLY_CAP else text[: REPLY_CAP - 100] + " [cut]"
             return {"content": [{"type": "text", "text": text}], "isError": True}
+        if self.redactor is not None:
+            # Masked as one JSON text (a key beside its value) before fitting: a marker
+            # can be longer than the secret it replaces.
+            data = redact_json(data, self.redactor)
         data, text = fit_reply(data)
         return {"content": [{"type": "text", "text": text}], "structuredContent": data}
+
+    def _mask(self, text: str) -> str:
+        return self.redactor(text) if self.redactor is not None else text
 
     async def _tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         runs = self.runs
