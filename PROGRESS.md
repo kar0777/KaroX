@@ -571,3 +571,9 @@ git diff --check
   are not confined to the root (only the destructive-command rules apply). Live: stdio and
   HTTP smoke (initialize, tools/list, bash, a background job killed with the server).
   675 passed, 5 skipped on Windows (13 new).
+- 08:35 UTC: the queued dev-pool A/Bs (rules above) move to the OpenRouter upstream
+  (Synthetic is still 402); wheel dev8 for every arm (dev7 + process fixes, no prompt or
+  schema change). Budget ($4 key, ~$2.8 going to or1 + its OpenCode arm) covers about two
+  of the four arms now, so k6n2 (control) and k6r2 (V2, regression check) are dispatched
+  together, 11 dev tasks x 2 attempts each, so both see the same upstream at the same
+  time; k6v2 (V1) and k6c2 (code mode) wait for more budget. Rules unchanged.
