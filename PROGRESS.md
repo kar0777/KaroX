@@ -416,3 +416,14 @@ git diff --check
   mojibake. It is now read as UTF-8 (BOM allowed), falling back to the code page only for
   bytes that are not UTF-8. Live: a Cyrillic task piped from Git Bash reached the model
   intact. Child processes already get PYTHONIOENCODING=utf-8. 628 tests.
+- MCP stdio on Windows: `karox_diff` answered "not a git repository" for a real repo, and
+  the system prompt's git line said the same. Cause: helper processes (`git`, the python
+  probe, `taskkill`) inherited KaroX's stdin, which under `karox6 mcp` is the JSON-RPC
+  pipe a reader thread blocks on; on Windows such a child hangs in process creation until
+  its timeout (repro: 8.0 s timeout vs 0.03 s with stdin closed). Every child process now
+  gets an explicit stdin, and a test scans the source so a new spawn cannot forget it.
+  Live: stdio run in a Cyrillic repo, `"git": true`, diff with Cyrillic paths intact, 14 s.
+- Cancelling a run (Ctrl+C, `karox_cancel`) left the foreground shell command running: the
+  shell tool did not kill the process tree when its wait was cancelled (`run_code` did).
+  Found through an "unclosed transport" warning in the MCP tests, which a `sleep(0.2)` in
+  the test had been hiding; the sleep is gone and the warning with it. 631 tests.

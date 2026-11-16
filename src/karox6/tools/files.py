@@ -114,6 +114,7 @@ def _git_dirty(workspace: Path) -> set[str] | None:
         proc = subprocess.run(
             ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
             cwd=workspace,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=20,
             check=False,

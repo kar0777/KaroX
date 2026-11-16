@@ -195,6 +195,39 @@ def test_shutdown(ctx):
     asyncio.run(scenario())
 
 
+def test_cancelled_command_is_killed(ctx, monkeypatch):
+    """Cancelling the run (Ctrl+C, karox_cancel) must not leave the command running."""
+    from karox6.tools import shell as shell_module
+
+    started = []
+    real_start = shell_module.ProcessRun.start
+
+    async def spy(*args, **kwargs):
+        run = await real_start(*args, **kwargs)
+        started.append(run)
+        return run
+
+    monkeypatch.setattr(shell_module.ProcessRun, "start", spy)
+
+    async def scenario():
+        command = python("import time; print('ready', flush=True); time.sleep(30)")
+        task = asyncio.create_task(ShellTool(ctx.shell).run({"command": command}, ctx))
+        for _ in range(200):
+            if started and b"ready" in started[0].head:
+                break
+            await asyncio.sleep(0.05)
+        assert started
+        assert b"ready" in started[0].head
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return started[0]
+
+    run = asyncio.run(scenario())
+    assert run.killed
+    assert run.returncode is not None
+
+
 def test_list_empty(ctx):
     assert asyncio.run(JobListTool().run({}, ctx)).content == "No background jobs."
 

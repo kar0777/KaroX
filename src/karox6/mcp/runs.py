@@ -399,6 +399,7 @@ def git_diff(workspace: Path) -> tuple[str | None, list[str]]:
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", "-C", str(workspace), *args],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",

@@ -150,6 +150,7 @@ def kill_tree(pid: int) -> None:
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=15,
                 check=False,

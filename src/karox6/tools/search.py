@@ -123,6 +123,7 @@ def _git_ls_files(root: Path) -> list[str] | None:
         proc = subprocess.run(
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             cwd=root,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
             check=False,

@@ -90,7 +90,13 @@ def python_hint() -> str | None:
 
 def _answers_version(path: str) -> bool:
     try:
-        proc = subprocess.run([path, "--version"], capture_output=True, timeout=5, check=False)
+        proc = subprocess.run(
+            [path, "--version"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0 and b"Python 3" in proc.stdout + proc.stderr
@@ -100,7 +106,12 @@ def git_summary(workspace: Path) -> str:
     def git(*args: str) -> str | None:
         try:
             proc = subprocess.run(
-                ["git", *args], cwd=workspace, capture_output=True, timeout=10, check=False
+                ["git", *args],
+                cwd=workspace,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=10,
+                check=False,
             )
         except (OSError, subprocess.SubprocessError):
             return None
@@ -157,6 +168,7 @@ def _git_root(workspace: Path) -> Path | None:
         proc = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=workspace,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=10,
             check=False,

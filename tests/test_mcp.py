@@ -230,7 +230,6 @@ def test_cancel_and_diff(tmp_path):
         files = (await tool(server, "karox_files", run_id=run.run_id))["structuredContent"]
         assert files["files"] == []  # only files this session wrote count
         await manager.shutdown()
-        await asyncio.sleep(0.2)  # let the killed shell's pipes close before the loop does
 
     asyncio.run(go())
 
