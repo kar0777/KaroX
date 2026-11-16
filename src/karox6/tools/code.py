@@ -195,7 +195,7 @@ class RunCodeTool:
                 await run.kill()
         except BaseException:
             if run is not None:
-                await asyncio.shield(run.kill())
+                await run.kill_on_cancel()
             raise
         finally:
             await nested.stop()

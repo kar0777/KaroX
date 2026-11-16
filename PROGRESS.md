@@ -473,3 +473,14 @@ git diff --check
   Python's subprocess cannot resume) and `$0` being the script path (checked: exit codes,
   heredocs, set -e, pipefail, Cyrillic, syntax errors behave the same). 648 tests (Linux
   638 + 13 Windows-only).
+- Second independent review (opencode DeepSeek free, 677 s) of the same changes, fixed:
+  the stdin reader thread now always ends the stream (a missing stdin is a clear error,
+  not a hang); a second SIGTERM during cleanup exits at once (143); KaroX joins its Windows
+  kill-on-exit job before its first child, so a child that spawns and exits at once cannot
+  leave a grandchild outside the job (test "spawner"); a client's cancellation of
+  `karox_cancel` was swallowed by `suppress(CancelledError)` around the worker wait (now
+  `asyncio.wait`; test fails on the old code). Found while testing: a second cancel during
+  a command's kill (shutdown after karox_cancel, a second Ctrl+C) abandoned the kill; the
+  kill is now seen through and the cancel raised after. Not taken: bounded stdin queue
+  (local, trusted client), `_release` for unpolled background jobs (bounded by the
+  session). 651 tests on Windows, Linux green, warnings-as-errors clean twice.

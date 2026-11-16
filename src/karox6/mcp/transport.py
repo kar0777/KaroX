@@ -48,9 +48,13 @@ async def serve_stdio(server: McpServer) -> None:
     """
     loop = asyncio.get_running_loop()
     lock = asyncio.Lock()
+    try:
+        fd = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError) as exc:  # no stdin at all (pythonw, ...)
+        raise OSError(f"stdin is not readable: {exc}") from None
     incoming: asyncio.Queue[bytes | None] = asyncio.Queue()
     reader = threading.Thread(
-        target=_read_stdin, args=(loop, incoming), name="karox-mcp-stdin", daemon=True
+        target=_read_stdin, args=(loop, incoming, fd), name="karox-mcp-stdin", daemon=True
     )
     reader.start()
 
@@ -67,10 +71,13 @@ async def serve_stdio(server: McpServer) -> None:
     await serve_lines(server, lines(), write, grace_s=STDIN_EOF_GRACE_S)
 
 
-def _read_stdin(loop: asyncio.AbstractEventLoop, incoming: asyncio.Queue[bytes | None]) -> None:
-    """Raw reads of fd 0 in a daemon thread. A read blocked in an executor job would hold
+def _read_stdin(
+    loop: asyncio.AbstractEventLoop, incoming: asyncio.Queue[bytes | None], fd: int
+) -> None:
+    """Raw reads of stdin in a daemon thread. A read blocked in an executor job would hold
     up the exit after Ctrl+C or SIGTERM (asyncio.run waits for executor threads), and one
-    blocked inside sys.stdin.buffer holds its lock during interpreter shutdown."""
+    blocked inside sys.stdin.buffer holds its lock during interpreter shutdown. However
+    the thread ends, the stream ends with None: the server never waits for a dead reader."""
 
     def put(item: bytes | None) -> bool:
         try:
@@ -79,25 +86,26 @@ def _read_stdin(loop: asyncio.AbstractEventLoop, incoming: asyncio.Queue[bytes |
             return False
         return True
 
-    fd = sys.stdin.fileno()
     pending = bytearray()
-    while True:
-        try:
-            chunk = os.read(fd, 65536)
-        except OSError:
-            chunk = b""
-        if not chunk:
-            if pending:
-                put(bytes(pending))
-            put(None)
-            return
-        start = len(pending)
-        pending += chunk
-        while (end := pending.find(b"\n", start)) >= 0:
-            if not put(bytes(pending[:end])):
+    try:
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                if pending:
+                    put(bytes(pending))
                 return
-            del pending[: end + 1]
-            start = 0
+            start = len(pending)
+            pending += chunk
+            while (end := pending.find(b"\n", start)) >= 0:
+                if not put(bytes(pending[:end])):
+                    return
+                del pending[: end + 1]
+                start = 0
+    finally:
+        put(None)
 
 
 async def serve_lines(

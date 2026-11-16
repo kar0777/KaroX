@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from karox6.lifetime import bind_to_karox
+from karox6.lifetime import bind_to_karox, join_karox_job
 
 HEAD_CAP = 64 * 1024
 TAIL_CAP = 64 * 1024
@@ -51,6 +51,7 @@ class ProcessRun:
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
+        join_karox_job()  # Windows: the child is born in the kill-on-exit job
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
@@ -155,6 +156,21 @@ class ProcessRun:
     def _flush_log(self) -> None:
         with contextlib.suppress(OSError, ValueError):
             self._log.flush()
+
+    async def kill_on_cancel(self) -> None:
+        """kill() for a caller that is being cancelled: the kill (bounded by its own
+        timeouts) is seen through even if the caller is cancelled again meanwhile, so a
+        second Ctrl+C or a shutdown cannot leave the command running. A cancellation that
+        arrived during the kill is raised afterwards."""
+        kill = asyncio.ensure_future(self.kill())
+        interrupted = False
+        while not kill.done():
+            try:
+                await asyncio.shield(kill)
+            except asyncio.CancelledError:
+                interrupted = True
+        if interrupted:
+            raise asyncio.CancelledError
 
     async def kill(self) -> None:
         # A child the command left behind (`server &`) may still hold the output pipe

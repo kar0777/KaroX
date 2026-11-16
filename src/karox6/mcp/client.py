@@ -35,7 +35,7 @@ import httpx
 
 from karox6 import __version__
 from karox6.context.spill import limit_output
-from karox6.lifetime import bind_to_karox
+from karox6.lifetime import bind_to_karox, join_karox_job
 from karox6.tools.base import ToolContext, ToolResult
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -92,6 +92,7 @@ class StdioConnection:
 
     async def start(self) -> None:
         env = {**os.environ, **(self.env or {})}
+        join_karox_job()  # Windows: the server is born in the kill-on-exit job
         self.proc = await asyncio.create_subprocess_exec(
             *self.command,
             stdin=asyncio.subprocess.PIPE,

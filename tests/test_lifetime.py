@@ -36,9 +36,10 @@ def _alive(pid: int) -> bool:
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="job objects are Windows")
-@pytest.mark.parametrize("breakaway", [False, True])
-def test_hard_killed_karox_takes_its_commands_along(tmp_path: Path, breakaway: bool) -> None:
-    """A command dies with KaroX; a program that asks to detach (CREATE_BREAKAWAY_FROM_JOB,
+@pytest.mark.parametrize("mode", ["direct", "spawner", "breakaway"])
+def test_hard_killed_karox_takes_its_commands_along(tmp_path: Path, mode: str) -> None:
+    """A command dies with KaroX, also a child it starts at once and leaves behind (born in
+    the job, no assignment race); a program that asks to detach (CREATE_BREAKAWAY_FROM_JOB,
     like an editor launched by a libuv tool) may still start and stay."""
     pid_file = tmp_path / "pid.txt"
     code = textwrap.dedent(
@@ -51,15 +52,19 @@ def test_hard_killed_karox_takes_its_commands_along(tmp_path: Path, breakaway: b
             "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); "
             "time.sleep(300)"
         )
-        DETACH = (
+        SPAWN = (
             "import subprocess, sys; subprocess.Popen([sys.executable, '-c', sys.argv[1], "
-            "sys.argv[2]], creationflags=0x01000000 | 0x00000008)"  # breakaway | detached
+            "sys.argv[2]], creationflags=int(sys.argv[3]))"
         )
+        BREAKAWAY_DETACHED = str(0x01000000 | 0x00000008)
 
         async def main():
-            pid_file, log, breakaway = sys.argv[1], Path(sys.argv[2]), sys.argv[3] == "1"
-            argv = [sys.executable, "-c", DETACH, SLEEPER, pid_file] if breakaway else [
-                sys.executable, "-c", SLEEPER, pid_file]
+            pid_file, log, mode = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+            argv = {
+                "direct": [sys.executable, "-c", SLEEPER, pid_file],
+                "spawner": [sys.executable, "-c", SPAWN, SLEEPER, pid_file, "0"],
+                "breakaway": [sys.executable, "-c", SPAWN, SLEEPER, pid_file, BREAKAWAY_DETACHED],
+            }[mode]
             await ProcessRun.start(argv, cwd=log.parent, env=dict(os.environ), log_path=log,
                                    command="sleeper")
             await asyncio.sleep(300)
@@ -68,7 +73,7 @@ def test_hard_killed_karox_takes_its_commands_along(tmp_path: Path, breakaway: b
         """
     )
     karox = subprocess.Popen(
-        [sys.executable, "-c", code, str(pid_file), str(tmp_path / "cmd.log"), str(int(breakaway))],
+        [sys.executable, "-c", code, str(pid_file), str(tmp_path / "cmd.log"), mode],
         stdin=subprocess.DEVNULL,
     )
     child = 0
@@ -85,7 +90,7 @@ def test_hard_killed_karox_takes_its_commands_along(tmp_path: Path, breakaway: b
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and _alive(child):
             time.sleep(0.1)
-        if breakaway:
+        if mode == "breakaway":
             assert _alive(child), "a program that detached itself was killed"
         else:
             assert not _alive(child), "the command outlived a hard-killed KaroX"

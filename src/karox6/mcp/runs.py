@@ -265,8 +265,9 @@ class RunManager:
         run = self.get(run_id)
         if run.running and run.worker is not None:
             run.worker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await run.worker
+            # asyncio.wait, not `await worker` under suppress(CancelledError): that would
+            # also swallow the cancellation of this very request by its client.
+            await asyncio.wait({run.worker})
         return run.summary()
 
     async def files(self, run_id: str) -> dict[str, Any]:
@@ -311,13 +312,15 @@ class RunManager:
         return run
 
     async def shutdown(self) -> None:
+        workers = [run.worker for run in self.runs.values() if run.worker is not None]
         for run in list(self.runs.values()):
             if run.running and run.worker is not None:
                 run.worker.cancel()
-        for run in list(self.runs.values()):
-            if run.worker is not None:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await run.worker
+        if workers:
+            await asyncio.wait(workers)  # all at once; our own cancellation still propagates
+            for worker in workers:
+                if not worker.cancelled():
+                    worker.exception()  # retrieved: no "never retrieved" warning
 
     # -- internals ------------------------------------------------------------------
 

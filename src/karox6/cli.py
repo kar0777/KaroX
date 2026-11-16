@@ -38,8 +38,10 @@ def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
 
         def on_sigterm() -> None:
             nonlocal terminated
-            if not terminated and task is not None:  # a second SIGTERM must not
-                terminated = True  # interrupt the cleanup the first one started
+            if terminated:  # asked again while cleaning up: stop now (commands go first
+                os._exit(SIGTERM_EXIT)  # in the cleanup, so they are already stopped)
+            terminated = True
+            if task is not None:
                 task.cancel()
 
         installed = False

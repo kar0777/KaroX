@@ -9,7 +9,6 @@ Tool contract follows DSH's bash/pwsh tools (MIT, see THIRD_PARTY_NOTICES.md).
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import sys
@@ -235,7 +234,7 @@ class ShellTool:
         try:
             finished = await run.wait(timeout_ms / 1000)
         except BaseException:  # the run was cancelled: the command must not outlive it
-            await asyncio.shield(run.kill())
+            await run.kill_on_cancel()
             raise
         text, _complete = run.output_text()
         if finished:

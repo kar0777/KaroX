@@ -295,6 +295,40 @@ def test_client_cancels_a_long_poll(tmp_path):
     assert server._in_flight == {}
 
 
+def test_a_cancelled_karox_cancel_gets_no_answer(tmp_path):
+    """karox_cancel waits for the run to stop; that wait must not swallow the client's
+    cancellation of the karox_cancel request itself."""
+    manager, _ = make_manager(
+        tmp_path, [Turn(calls=[("bash", {"command": "sleep 30", "timeout": 60000})])]
+    )
+    server = McpServer(manager)
+
+    async def go():
+        run, _ = manager.start("long")
+        await asyncio.sleep(0.3)  # the command is running
+        params = {"name": "karox_cancel", "arguments": {"run_id": run.run_id}}
+        request = {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": params}
+        pending = asyncio.create_task(server.handle(request))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        cancel = {"jsonrpc": "2.0", "method": "notifications/cancelled"}
+        await server.handle({**cancel, "params": {"requestId": 9}})
+        reply = await asyncio.wait_for(pending, 10)
+        await manager.shutdown()
+        return reply
+
+    assert asyncio.run(go()) is None
+
+
+def test_stdio_without_stdin_fails_clearly(tmp_path, monkeypatch):
+    from karox6.mcp.transport import serve_stdio
+
+    manager, _ = make_manager(tmp_path, [])
+    monkeypatch.setattr("sys.stdin", None)
+    with pytest.raises(OSError, match="stdin is not readable"):
+        asyncio.run(serve_stdio(McpServer(manager)))
+
+
 def test_stdio_lines(tmp_path):
     manager, _ = make_manager(tmp_path, [])
     server = McpServer(manager)

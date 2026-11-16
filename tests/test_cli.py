@@ -102,6 +102,46 @@ def test_without_safe_streams_the_legacy_code_page_raises() -> None:
     assert b"UnicodeEncodeError" in out.stderr
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is POSIX")
+@pytest.mark.parametrize("signals", [1, 2])
+def test_sigterm_runs_the_cleanup_and_a_second_one_exits_at_once(signals: int) -> None:
+    import signal
+    import time
+
+    code = (
+        "import asyncio\n"
+        "from karox6.cli import run_async\n"
+        "async def main():\n"
+        "    try:\n"
+        "        print('ready', flush=True)\n"
+        "        await asyncio.sleep(60)\n"
+        "    finally:\n"
+        "        print('cleaning', flush=True)\n"
+        "        await asyncio.sleep(1 if CLEANUP_FAST else 60)\n"
+        "        print('cleaned', flush=True)\n"
+        "run_async(main())\n"
+    ).replace("CLEANUP_FAST", str(signals == 1))
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "ready"
+        proc.send_signal(signal.SIGTERM)
+        assert proc.stdout.readline().strip() == "cleaning"
+        if signals == 2:
+            proc.send_signal(signal.SIGTERM)
+        started = time.monotonic()
+        proc.wait(timeout=10)
+        assert time.monotonic() - started < 5
+        assert proc.returncode == 143
+        rest = proc.stdout.read()
+        assert ("cleaned" in rest) is (signals == 1)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [

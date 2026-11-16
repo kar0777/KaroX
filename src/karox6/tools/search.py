@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from karox6.context.spill import write_spill
-from karox6.lifetime import bind_to_karox
+from karox6.lifetime import bind_to_karox, join_karox_job
 from karox6.tools.base import ToolContext, ToolResult
 
 GLOB_MAX = 100
@@ -262,6 +262,7 @@ async def _grep_rg(
     cwd = root if root.is_dir() else root.parent
     if not root.is_dir():
         argv[-1] = root.name
+    join_karox_job()
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
