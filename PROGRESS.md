@@ -787,3 +787,12 @@ git diff --check
   = 20.9 min (-16%), 80 calls, $0.050. Smoke (dev9+t + V2): task 19 solved in 59 min on
   GLM (shared 2-concurrency key with the A/B runs), task 20 unsolved in 20 min.
   Consistent with T's aim; the held-out verdict still needs the same-model run.
+- 16:58 UTC, user: run the held-out V2 vs VT comparison on free FreeInference GLM-5.3-Flash
+  instead of OpenRouter (slow, free, no hurry). Pre-registered before dispatch: the 20
+  held-out tasks of the 09:50 entry (14, 15, 16, 17, 25, 26, 27, 29, 30, 33, 37, 38, 42,
+  43, 53, 55, 63, 64, 67, 72), 1 attempt, arm hv2 = wheel dev9 + the V2 sentence, arm hvt =
+  wheel dev9+t + the V2 sentence, parallel 1 per arm (key allows 2 concurrent). Same rule
+  as 09:50: VT adopted if solved >= V2 - 1, P2P-regression trials <= V2 + 1 and summed
+  agent wall <= 90% of V2's; upstream-failed trials excluded for both arms of that task.
+  The verdict holds for GLM; it is the decision basis for merging T into main (DeepSeek
+  confirmation only if budget returns). No control arm (concurrency).
