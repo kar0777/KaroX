@@ -577,3 +577,21 @@ git diff --check
   of the four arms now, so k6n2 (control) and k6r2 (V2, regression check) are dispatched
   together, 11 dev tasks x 2 attempts each, so both see the same upstream at the same
   time; k6v2 (V1) and k6c2 (code mode) wait for more budget. Rules unchanged.
+- `screenshot` tool for `karox mcp --direct` (new `tools/screen.py`), so the chat model can
+  see the user's screen: the whole virtual desktop, or one window by a case-insensitive
+  part of its title (exact title wins, else the topmost match), `list_windows: true` for
+  titles and sizes as text. Windows: ctypes GDI only, per-monitor DPI awareness on the
+  capturing thread (restored after), PrintWindow(PW_RENDERFULLCONTENT, then 0) so a
+  covered window is captured without being raised (a hung window or a refusal falls back
+  to a screen copy of its frame, said in the reply), cropped to the DWM frame; GDI scales
+  with StretchBlt/HALFTONE into a 32-bit DIB, so Python touches only the scaled pixels;
+  own PNG encoder (filter 0: compressed UI shots best against Sub/Up); the width drops
+  until the PNG is under 1.5 MB. Minimized windows are refused (never restored). macOS:
+  `screencapture` (+ `sips` to shrink), Linux: grim or ImageMagick `import` (+ `magick` to
+  shrink); window by title only on Windows. Reply: image + text content; annotations
+  read-only, not destructive, closed-world; `--no-screenshot` leaves it out; not in agent
+  mode. Live (this machine's desktop is 640x480, one monitor): desktop 31 KB PNG in 0.03 s
+  over stdio, a covered BitBrowser window at max_width 500 -> 500x339, 73 KB; 2560x1920
+  encode ~0.35 s. Gaps: no live multi-monitor or high-DPI check here; PrintWindow can
+  still return a black frame for some GPU/protected windows; macOS/Linux paths are tested
+  with a fake runner only. 700 passed, 5 skipped on Windows (11 new).

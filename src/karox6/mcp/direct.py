@@ -9,6 +9,7 @@ only as ``approval_mode`` allows ("ask": when the call repeats with ``confirmed:
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -21,9 +22,10 @@ from karox6.tools.base import ApprovalRequest, Tool, ToolArgsError, ToolContext,
 from karox6.tools.files import FileTracker
 from karox6.tools.jobs import JobManager
 from karox6.tools.registry import build_tools
+from karox6.tools.screen import ScreenshotTool
 from karox6.tools.shell import ShellInfo, detect_shell
 
-READ_ONLY = frozenset({"read", "grep", "glob", "job_output", "job_list"})
+READ_ONLY = frozenset({"read", "grep", "glob", "job_output", "job_list", "screenshot"})
 # Hosted clients give up on a tool call after about a minute: a command still running
 # after this goes on as a background job (the shell's own timeout behaviour) instead.
 CALL_WAIT_MS = 50_000
@@ -40,6 +42,7 @@ DIRECT_TOOLS = {
     "job_output": "Background job output",
     "job_list": "List background jobs",
     "job_kill": "Stop a background job",
+    "screenshot": "Screenshot of the screen or a window",
 }
 SHELL_TIMEOUT = {
     "type": "integer",
@@ -85,6 +88,7 @@ class DirectTools:
         any_path: bool = False,
         approval_mode: str = "ask",
         shell: ShellInfo | None = None,
+        screenshot: bool = True,
     ) -> None:
         self.root = root.resolve()
         self.any_path = any_path
@@ -93,6 +97,8 @@ class DirectTools:
         self.tools: dict[str, Tool] = {
             t.name: t for t in build_tools(shell) if t.name in DIRECT_TOOLS
         }
+        if screenshot:
+            self.tools["screenshot"] = ScreenshotTool()
         self.shell_name = "bash" if shell.kind == "bash" else "pwsh"
         self.ctx = ConfinedContext(
             workspace=self.root,
@@ -113,6 +119,12 @@ class DirectTools:
             "and confirmed: true.",
             "allow": "runs without asking, so check every delete or move target first.",
         }.get(self.approval_mode, "is refused; leave such steps to the user.")
+        see = (
+            " Call screenshot to see the user's screen or one window (list_windows: true "
+            "lists them)."
+            if "screenshot" in self.tools
+            else ""
+        )
         return (
             "KaroX gives you direct access to a project directory on the user's machine: "
             f"{self.root}. You do the work yourself with its tools: read, grep and glob to "
@@ -122,7 +134,7 @@ class DirectTools:
             f"A call returns within {CALL_WAIT_MS // 1000} s: a command still running then "
             "goes on as a background job; read it with job_output (wait: true waits for it), "
             "stop it with job_kill. A destructive command (recursive deletes "
-            f"outside the project, force pushes, ...) {danger}"
+            f"outside the project, force pushes, ...) {danger}{see}"
         )
 
     def specs(self) -> list[dict[str, Any]]:
@@ -193,7 +205,11 @@ class DirectTools:
         notes = self.ctx.jobs.drain_finished()
         if notes:
             text += "\n\n" + "\n".join(notes)
-        return {"content": [{"type": "text", "text": text}], "isError": is_error}
+        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        if png := meta.get("image_png"):
+            data = base64.b64encode(png).decode("ascii")
+            content.insert(0, {"type": "image", "data": data, "mimeType": "image/png"})
+        return {"content": content, "isError": is_error}
 
     async def shutdown(self) -> None:
         await self.ctx.jobs.shutdown()
