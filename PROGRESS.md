@@ -394,3 +394,13 @@ git diff --check
   rather than the test, unless the task asks for that behaviour to change."` Candidate for
   the next held-out run if its solved trials >= k6n2's and its LLM calls per trial <= 110%
   of k6n2's (it may add a check step); otherwise rejected.
+- Live end-to-end check of `karox6 mcp --http` driven like a remote client (bearer token by
+  environment, KaroX's own HTTP client): initialize + tools/list 0.05 s; with GLM-5.3-Flash
+  (FreeInference, free) `karox_run` with wait_seconds=20 came back after 16.5 s with the
+  task done (bug fixed, test passing), `karox_diff` returned the exact diff. With CrowLLM
+  (upstream down: Cloudflare 521/525, then 404) the run ended as `error` with the retries
+  and the reason in the brief log. No server-side issue found. The model's own bad first
+  `edit` (old_string ending mid-line) is a model error; on the dev pool DeepSeek never left
+  a .py file unparsable (0 of 225 edits), so a post-edit syntax check is not worth adding.
+- k6h3s vs k6h1s context: mean input per LLM call 91k (DSH 85k) after dev5, down from 116k
+  (DSH 70k); the cost gap to DSH is now mostly the number of calls (1.26x).
