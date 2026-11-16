@@ -362,3 +362,15 @@ git diff --check
 - dev7 wheel in the bench repo (next to dev6; branch karox6-adapter). Free replays in the
   real hard12 images, no model: `karox6_basics` (run 43800916266) and `karox6_code` (run
   43800923218) green on all three images.
+- Next queue, rules fixed before any of these runs (`karox6-bench-data/queue_next.sh`, one
+  command, ~4 h, stops itself if a run makes no successful LLM call). C1 showed that one
+  attempt per task swings 3-4 of 11 tasks, so every arm gets 2 attempts and a same-wheel
+  control:
+  - k6n2: dev7, no flags, 11 dev tasks x 2 attempts (22 trials), Synthetic, parallel 3.
+  - k6v2 (V1 prompt, rule revised before any V1 trial ran; the first V1 run died on 402):
+    candidate for the next held-out run if its solved trials >= k6n2's and its LLM calls
+    per trial <= 85% of k6n2's; otherwise rejected.
+  - k6c2 (`--code-mode` with the new paragraph): code mode on by default if solved trials
+    >= k6n2's, LLM calls per trial <= 85% of k6n2's, and `run_code` is called in at least
+    11 of the 22 trials; otherwise it stays opt-in.
+  - A winner becomes the default only after a held-out run.
