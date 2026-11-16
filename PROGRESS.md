@@ -383,7 +383,7 @@ git diff --check
   error can quote its stderr. 624 tests; live self-check unchanged.
 - Synthetic probe 05:53 UTC (run 43813130259, task 28): still HTTP 402. Benches stay blocked.
 - Dev-pool finding (E1/B1/C1/k6d1 trajectories only): the model calls failing tests
-  "pre-existing" or "unrelated" in 13 of 44 trials and never checks it (0 `git stash`
+  "pre-existing" or "unrelated" in 13 of 42 trials and never checks it (0 `git stash`
   calls). In 2 of them it had broken the test itself (B1 32, C1 59: it re-ran the suite
   with `--deselect` on the test it broke); in C1 40 it kept 3 broken tests as "expectations
   of the old behaviour". Dev-pool P2P regressions by KaroX: 0, 0, 1, 2 per run.
