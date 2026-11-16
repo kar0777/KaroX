@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from karox6 import __version__
+from karox6.mcp.direct import DirectTools
 from karox6.mcp.runs import RunError, RunManager
 
 SUPPORTED_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
@@ -160,8 +161,20 @@ TOOLS: list[dict[str, Any]] = [
 
 
 class McpServer:
-    def __init__(self, runs: RunManager, *, name: str = "karox") -> None:
+    """Serves either the KaroX agent (``runs``: karox_* tools) or, in direct mode, the
+    agent's own tools for the client's model (``direct``)."""
+
+    def __init__(
+        self,
+        runs: RunManager | None = None,
+        *,
+        direct: DirectTools | None = None,
+        name: str = "karox",
+    ) -> None:
+        if (runs is None) == (direct is None):
+            raise ValueError("McpServer needs exactly one of runs and direct")
         self.runs = runs
+        self.direct = direct
         self.name = name
         self._in_flight: dict[tuple[str, str], asyncio.Future[dict[str, Any]]] = {}
 
@@ -218,18 +231,22 @@ class McpServer:
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": self.name, "title": "KaroX", "version": __version__},
-                "instructions": INSTRUCTIONS,
+                "instructions": self.direct.instructions if self.direct else INSTRUCTIONS,
             }
         if method == "ping":
             return {}
         if method == "tools/list":
-            return {"tools": TOOLS}
+            return {"tools": self.direct.specs() if self.direct else TOOLS}
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments") or {}
             if not isinstance(name, str) or not isinstance(arguments, dict):
                 raise _RpcError(INVALID_PARAMS, "tools/call needs name and an arguments object")
-            return await self._call(name, arguments)
+            if self.direct is None:
+                return await self._call(name, arguments)
+            if name not in self.direct.tools:
+                raise _RpcError(INVALID_PARAMS, f"unknown tool {name!r}")
+            return await self.direct.call(name, arguments)
         if method in ("resources/list", "resources/templates/list", "prompts/list"):
             key = {"resources/list": "resources", "prompts/list": "prompts"}.get(
                 method, "resourceTemplates"
@@ -250,6 +267,8 @@ class McpServer:
 
     async def _tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         runs = self.runs
+        if runs is None:
+            raise _RpcError(INVALID_PARAMS, f"unknown tool {name!r}")
         if name == "karox_run":
             # Check every argument before starting: a run that starts and then fails on a
             # bad argument would keep the workspace busy without the client knowing its id.

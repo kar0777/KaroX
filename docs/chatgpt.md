@@ -3,7 +3,8 @@
 `karox mcp --http` serves KaroX as a remote MCP server (Streamable HTTP). ChatGPT, Claude
 and any other client that takes a remote MCP URL can use it as a connector: you describe
 the task in the chat, the assistant starts a KaroX run on your machine, follows its
-progress and shows the diff.
+progress and shows the diff. To let the chat's own model do the work instead, with no
+second model or API key, see [Direct mode](#direct-mode-no-second-model).
 
 ## 1. Start the server
 
@@ -66,7 +67,30 @@ The token in the URL is the secret, so choose no authentication wherever the cli
 Then ask, for example: "Use KaroX to fix the failing test in ~/projects/app and show me
 the diff".
 
-## Tools
+## Direct mode: no second model
+
+With `--direct` the assistant in the chat (ChatGPT's own model, Claude, ...) does the
+work itself through KaroX's tools: no `--model`, no provider, no API key.
+
+```bash
+karox mcp --direct --http 8765 --root ~/projects/app --tunnel tailscale
+```
+
+The connector then offers the agent's own tools instead of `karox_*`: `read`, `grep`,
+`glob`, `job_output`, `job_list` (marked read-only) and `write`, `edit`, `bash` (`pwsh` on
+Windows without Git Bash), `job_kill` (marked destructive, so ChatGPT asks before it uses
+them). Relative paths start at `--root`; paths outside it are refused unless `--any-cwd`.
+As for KaroX's agent, an existing file must be read before `write` replaces it. A call
+returns within 50 s: a longer command goes on as a background job (read it with
+`job_output`); jobs live until the server stops, which stops them.
+
+Destructive commands (the same rules as for the agent) follow `--approve-dangerous`: `ask`
+(default) refuses the call and tells the model to ask you in the chat; once you agree, it
+repeats the call with `confirmed: true`. That relies on the model asking honestly, so use
+`deny` to refuse them outright (or `allow` to run them). The URL, token and tunnel work as
+above; without `--http` the same tools are served over stdio to local clients.
+
+## Tools (agent mode)
 
 | Tool | What it does |
 |---|---|

@@ -112,10 +112,17 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
         help="serve Streamable HTTP instead of stdio (host defaults to 127.0.0.1)",
     )
     mcp.add_argument(
+        "--direct",
+        action="store_true",
+        help="serve KaroX's file and shell tools to the client's own model (no --model, no "
+        "second model; read, write, edit, grep, glob, the shell and background jobs)",
+    )
+    mcp.add_argument(
         "--root",
         type=Path,
         default=None,
-        help="project root: runs work here or below (default: current directory)",
+        help="project root: runs (or --direct tools) work here or below (default: current "
+        "directory)",
     )
     mcp.add_argument("--any-cwd", action="store_true", help="let clients run in any directory")
     mcp.add_argument(
@@ -133,7 +140,8 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
         "--approve-dangerous",
         choices=["ask", "deny", "allow"],
         default="ask",
-        help="destructive commands: ask the client (karox_approve), deny, or allow",
+        help="destructive commands: ask the client (karox_approve; with --direct the call is "
+        "refused until repeated with confirmed: true), deny, or allow",
     )
     mcp.add_argument("--approval-timeout", type=float, default=600.0, help="seconds, then deny")
     mcp.add_argument(
@@ -456,8 +464,8 @@ def _provider(args: argparse.Namespace) -> Any:
 def _mcp(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     from karox6.mcp.tunnel import TunnelError
 
-    if not args.model:
-        parser.error("--model is required (or set KAROX_MODEL)")
+    if not args.model and not args.direct:
+        parser.error("--model is required (or set KAROX_MODEL), unless --direct")
     try:
         run_async(_mcp_async(args))
     except KeyboardInterrupt:
@@ -473,6 +481,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
     import secrets
 
     from karox6.core.store import default_home
+    from karox6.mcp.direct import DirectTools
     from karox6.mcp.protocol import McpServer
     from karox6.mcp.runs import RunManager
     from karox6.mcp.transport import DEFAULT_ORIGINS, HttpMcp, serve_stdio
@@ -485,18 +494,31 @@ async def _mcp_async(args: argparse.Namespace) -> None:
     if args.tunnel and args.http is None:
         raise ValueError("--tunnel needs --http PORT (the tunnel forwards to it)")
     tunnel: Tunnel | None = None
-    mcp_tools, mcp_handles = await _mcp_tools(args, home)
-    provider = _provider(args)
-    runs = RunManager(
-        lambda ws: _session_config(args, ws, home, stream_deltas=False),
-        lambda: provider,
-        root=root,
-        any_workspace=args.any_cwd,
-        approval_mode=args.approve_dangerous,
-        approval_timeout_s=args.approval_timeout,
-        extra_tools=mcp_tools,
-    )
-    server = McpServer(runs)
+    provider: Any = None
+    mcp_handles: list[Any] = []
+    backend: RunManager | DirectTools
+    if args.direct:
+        # No model to call, but the key still leaves the environment: shell output goes
+        # back to the client.
+        if args.api_key_env:
+            os.environ.pop(args.api_key_env, None)
+        backend = DirectTools(
+            root, home=home, any_path=args.any_cwd, approval_mode=args.approve_dangerous
+        )
+        server = McpServer(direct=backend)
+    else:
+        mcp_tools, mcp_handles = await _mcp_tools(args, home)
+        provider = _provider(args)
+        backend = RunManager(
+            lambda ws: _session_config(args, ws, home, stream_deltas=False),
+            lambda: provider,
+            root=root,
+            any_workspace=args.any_cwd,
+            approval_mode=args.approve_dangerous,
+            approval_timeout_s=args.approval_timeout,
+            extra_tools=mcp_tools,
+        )
+        server = McpServer(backend)
     try:
         if args.http is None:
             await serve_stdio(server)
@@ -519,8 +541,9 @@ async def _mcp_async(args: argparse.Namespace) -> None:
                     open_tailscale, bound, public=args.tunnel == "tailscale"
                 )
             where = "public internet" if tunnel and tunnel.public else "your tailnet"
+            mode = "  direct tools" if args.direct else ""
             sys.stderr.write(
-                f"KaroX MCP (Streamable HTTP) on http://{shown}:{bound}/mcp  root={root}\n"
+                f"KaroX MCP (Streamable HTTP) on http://{shown}:{bound}/mcp  root={root}{mode}\n"
                 + (
                     f"  Connector URL ({where}, Tailscale): {tunnel.url}/mcp/{path_token}\n"
                     "  Paste it into ChatGPT (Settings > Connectors), Claude (Settings >\n"
@@ -536,8 +559,9 @@ async def _mcp_async(args: argparse.Namespace) -> None:
     finally:
         if tunnel is not None:
             await asyncio.to_thread(tunnel.stop)
-        await runs.shutdown()
-        await provider.aclose()
+        await backend.shutdown()
+        if provider is not None:
+            await provider.aclose()
         await _close_mcp(mcp_handles)
 
 

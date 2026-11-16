@@ -517,3 +517,22 @@ git diff --check
   credentials). The Origin check still refuses token-less requests from unknown pages
   (DNS rebinding). Docs: chatgpt.md/.ru.md cover Tailscale first, ngrok/cloudflared as
   alternatives, and ChatGPT, Claude and other clients. 663 tests on Windows.
+- `karox mcp --direct` (new `mcp/direct.py`), for the user who drives the PC from ChatGPT
+  on the web: the chat's own model does the work through KaroX's tools, like the KaroX 5
+  bridge did; no `--model`, provider or key (the key variable still leaves the
+  environment). Served instead of the karox_* tools: read, write, edit, grep, glob,
+  bash/pwsh, job_output/job_list/job_kill, with their agent implementations and output
+  caps; one ToolContext per server, so read-before-write state and background jobs carry
+  over between calls (jobs are killed on exit). Paths outside `--root` (also through a
+  symlink) are refused unless `--any-cwd`; KaroX's own log/spill directory stays readable.
+  Annotations: readOnlyHint for read/grep/glob/job_output/job_list, destructiveHint for
+  write/edit/shell/job_kill. Destructive commands: deny refuses, allow runs, ask refuses
+  with "ask the user in the chat, then repeat with confirmed: true" (the field is in the
+  shell schema only under ask). A shell call waits at most 50 s, then the command goes on
+  as a background job: hosted clients drop longer calls. Found on the way: parallel shell
+  calls counted the same log number, so a Git Bash call could run another call's script
+  (test fails on the old code); the log is now claimed before the first await. Known
+  gaps: `confirmed` is only as good as the client model asking; shell commands themselves
+  are not confined to the root (only the destructive-command rules apply). Live: stdio and
+  HTTP smoke (initialize, tools/list, bash, a background job killed with the server).
+  675 passed, 5 skipped on Windows (13 new).
