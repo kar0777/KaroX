@@ -484,3 +484,15 @@ git diff --check
   kill is now seen through and the cancel raised after. Not taken: bounded stdin queue
   (local, trusted client), `_release` for unpolled background jobs (bounded by the
   session). 651 tests on Windows, Linux green, warnings-as-errors clean twice.
+- 2026-11-16 07:30 UTC, user: benches on GLM only where needed (about 4 h left), Tailscale
+  preferred over ngrok for the ChatGPT tunnel, KaroX 5 and its bridge may be read freely,
+  the OpenRouter $3 may be used (no OpenRouter key is available to the agent; the exact
+  DeepSeek model costs $0.30/M input there, about 20 trials for $3).
+- dev8 = dev7 + today's fixes (no prompt or tool-schema change; one new marker text when a
+  command leaves a child running). Replays karox6_basics / karox6_code started on dev8.
+- GLM dev-pool three-arm run g53d1 (run 43824581914, freeinference, parallel 3, 1 attempt,
+  11 dev tasks, karox6 dev8 / opencode_v2 / deepseek_harness). Purpose: the first rival
+  numbers on GLM (D-026 needs rivals re-run on GLM) and KaroX's standing there. Reading
+  fixed before results: one attempt on 11 tasks swings 3-4 tasks, so only a gap of 4+
+  solved tasks counts as a difference in score; calls, tokens and minutes per trial are
+  compared on tasks every arm finished. Dev-pool trajectories may be read for causes.
