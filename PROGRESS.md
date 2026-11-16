@@ -359,3 +359,6 @@ git diff --check
 - 6.0.0.dev7 = dev6 + MCP client hardening + the code-mode paragraph (flag only). For
   bench runs without MCP servers or flags it behaves as dev6, so the V1 rule can be run on
   it unchanged. 624 tests; clean-venv wheel smoke OK.
+- dev7 wheel in the bench repo (next to dev6; branch karox6-adapter). Free replays in the
+  real hard12 images, no model: `karox6_basics` (run 43800916266) and `karox6_code` (run
+  43800923218) green on all three images.
