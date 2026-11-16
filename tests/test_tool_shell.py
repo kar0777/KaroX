@@ -332,3 +332,20 @@ def test_list_empty(ctx):
 
 def test_kill_unknown(ctx):
     assert asyncio.run(JobKillTool().run({"job_id": "999"}, ctx)).is_error
+
+
+def test_finished_reported_jobs_are_forgotten_beyond_a_limit():
+    from types import SimpleNamespace
+
+    from karox6.tools.jobs import KEEP_FINISHED, JobManager
+
+    jobs = JobManager()
+    done = SimpleNamespace(active=False, returncode=0, killed=False, command="true")
+    for _ in range(KEEP_FINISHED + 10):
+        jobs.register(done)  # type: ignore[arg-type]
+        jobs.drain_finished()
+    running = jobs.register(SimpleNamespace(active=True, returncode=None, command="sleep"))
+    assert len(jobs._jobs) == KEEP_FINISHED + 1
+    assert jobs.get("1") is None
+    assert jobs.get(str(KEEP_FINISHED + 10)) is not None
+    assert jobs.get(running.id) is running

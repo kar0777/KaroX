@@ -33,12 +33,18 @@ class Job:
         return f"exited with code {code}"
 
 
+KEEP_FINISHED = 50  # finished, reported jobs kept: a long-lived `karox mcp` server runs many
+
+
 @dataclass(slots=True)
 class JobManager:
     _jobs: dict[str, Job] = field(default_factory=dict)
     _next: int = 1
 
     def register(self, run: ProcessRun) -> Job:
+        done = [k for k, j in self._jobs.items() if j.notified and not j.run.active]
+        for key in done[: max(0, len(done) - KEEP_FINISHED)]:
+            del self._jobs[key]
         job = Job(id=str(self._next), run=run)
         self._next += 1
         self._jobs[job.id] = job
