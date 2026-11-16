@@ -526,3 +526,16 @@ git diff --check
   left; Ctrl+C while the tunnel was opening could leave a public route (now waited for and
   removed); the target followed 127.0.0.1 even when bound elsewhere. Origin/CORS logic:
   no hole found. Live again: two public relays 200, route removed, KaroX 5's untouched.
+- 08:00 UTC, user gave an OpenRouter key with a $4 limit (stored as the bench secret
+  OPENROUTER_API_KEY, never printed). Bench: new `openrouter` upstream, the same model
+  DeepSeek-V4.1-Flash-1017 pinned to fp8 providers with caching (deepinfra, stepfun,
+  novita; no fallbacks), enforced in the gateway for every arm; probe: tools,
+  reasoning_effort=max and caching work.
+- Held-out run or1 (runs 43828489989 karox6 dev8 + deepseek_harness, 43829985688
+  opencode_v2; 1 attempt, parallel 16). Tasks fixed before results: the 30 held-out tasks
+  any arm solved or passed at least half of in h3s/baseline (18-24, 31, 34-36, 41, 44, 45,
+  47-51, 54, 56, 58, 60-62, 65, 66, 69, 70, 73); the 20 never-reached tasks are left out
+  to save money. Reading: solved counts (1 attempt: a gap under 4 is a tie), cost from
+  tokens at one price list, minutes per trial on tasks all arms finished. GLM run g53d1
+  cancelled at 5/34 trials (a 2-concurrent key at parallel 3 made it ~25 min per trial;
+  the same-model lane is now cheap); its finished trials stay as artifacts.
