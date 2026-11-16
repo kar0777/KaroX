@@ -35,6 +35,7 @@ import httpx
 
 from karox6 import __version__
 from karox6.context.spill import limit_output
+from karox6.lifetime import bind_to_karox
 from karox6.tools.base import ToolContext, ToolResult
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -100,6 +101,7 @@ class StdioConnection:
             cwd=self.cwd,
             limit=16 * 1024 * 1024,
         )
+        bind_to_karox(self.proc.pid)
         self._stderr = asyncio.create_task(self._drain_stderr())
         self._reader = asyncio.create_task(self._read())
 

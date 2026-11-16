@@ -13,6 +13,8 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+from karox6.lifetime import bind_to_karox
+
 HEAD_CAP = 64 * 1024
 TAIL_CAP = 64 * 1024
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
@@ -58,6 +60,7 @@ class ProcessRun:
             stderr=asyncio.subprocess.STDOUT,
             **kwargs,  # type: ignore[arg-type]
         )
+        bind_to_karox(proc.pid)
         return cls(proc, log_path, command)
 
     async def _pump(self) -> None:

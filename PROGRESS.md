@@ -444,3 +444,11 @@ git diff --check
   daemon thread with raw reads, so a blocked read no longer holds up the exit. Child
   process transports are closed explicitly (the "unclosed transport" warning is gone from
   the suite, checked with warnings as errors). 636 tests (Linux 626 + 11 Windows-only).
+- Windows: a KaroX killed outright (an MCP client's TerminateProcess, the console window
+  closed, Task Manager) runs no cleanup, so its commands, background jobs and MCP servers
+  kept running. Every process KaroX starts now goes into a job object with
+  KILL_ON_JOB_CLOSE (and BREAKAWAY_OK, so a program that asks to detach, such as an editor
+  launched through libuv, still can; libuv does the same for Node's children). Test: hard
+  kill of a KaroX process -> its command is gone; a breakaway child survives; without the
+  binding the command outlived KaroX. 639 tests (Linux 628 + 13 Windows-only), startup
+  115 ms.
