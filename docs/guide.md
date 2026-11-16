@@ -119,7 +119,7 @@ List servers in `~/.karox6/mcp.json` (or pass `--mcp-config FILE`; `--no-mcp` sk
   "mcpServers": {
     "docs": {"command": "uvx", "args": ["some-mcp-server"], "env": {"LOG_LEVEL": "warn"}},
     "tracker": {"url": "https://example.com/mcp", "headers": {"X-Team": "core"},
-                "bearer_token_env": "TRACKER_TOKEN"}
+                "bearer_token_env": "TRACKER_TOKEN", "timeout": 120}
   }
 }
 ```
@@ -127,7 +127,11 @@ List servers in `~/.karox6/mcp.json` (or pass `--mcp-config FILE`; `--no-mcp` sk
 Tokens come from the environment variable named in `bearer_token_env`, never from the file.
 Their tools appear to the agent as `mcp__<server>__<tool>`. Tools marked read-only by the
 server run in parallel with other reads; large outputs are cut and the rest saved to a file the
-agent can read. A server that fails to start is skipped with a warning.
+agent can read. `timeout` (seconds, default 600) limits each call; a call that runs over it,
+or that you interrupt, is cancelled on the server too. A server that fails to start is skipped
+with a warning that quotes the end of its stderr. A local server that crashes mid-run is
+restarted on its next call (up to 3 times); when a remote server forgets the session (a
+restart, an idle expiry), KaroX opens a new one and repeats the call once.
 
 ## KaroX as an MCP server
 

@@ -171,3 +171,102 @@ def test_http_event_stream_replies_and_errors(ctx):
     assert seen[0] == ("POST", None)
     assert seen[1] == ("POST", "sess-1")
     assert seen[-1] == ("DELETE", "sess-1")
+
+
+def test_stdio_pings_cancels_and_restarts(tmp_path, ctx):
+    from karox6.mcp.client import McpTool
+
+    config = write_config(
+        tmp_path, {"fake": {"command": sys.executable, "args": [FAKE], "timeout": 0.5}}
+    )
+
+    async def go():
+        tools, handles = await load_mcp_tools(config)
+        handle = handles[0]
+        echo = next(t for t in tools if t.name == "mcp__fake__echo")
+
+        def hidden(name):
+            return McpTool(handle, {"name": name, "inputSchema": {"type": "object"}})
+
+        try:
+            assert handle.call_timeout == 0.5
+            pinged = await hidden("ping_me").run({}, ctx)
+            first, second = json.loads(pinged.content)
+            assert first == {"jsonrpc": "2.0", "id": "srv-1", "result": {}}
+            assert second["id"] == "srv-2"
+            assert second["error"]["code"] == -32601
+
+            slow = await hidden("slow").run({"seconds": 1.5}, ctx)
+            assert slow.is_error
+            assert "did not answer within 0.5s" in slow.content
+            handle.call_timeout = 10
+            cancelled = await hidden("cancelled").run({}, ctx)
+            assert len(json.loads(cancelled.content)) == 1  # the server heard the cancel
+
+            crashed = await hidden("crash").run({}, ctx)
+            assert crashed.is_error
+            assert "fake crashed on purpose" in crashed.content
+            echoed = await echo.run({"text": "back"}, ctx)  # restarted on demand
+            assert echoed.content == "echo: back"
+            assert handle.restarts == 1
+        finally:
+            await close_all(handles)
+
+    asyncio.run(go())
+
+
+def test_failed_server_warning_quotes_its_stderr(tmp_path, capsys):
+    code = "import sys; sys.stderr.write('boom: config file missing\\n'); sys.exit(3)"
+    config = write_config(tmp_path, {"bad": {"command": sys.executable, "args": ["-c", code]}})
+    tools, handles = asyncio.run(load_mcp_tools(config))
+    assert tools == []
+    assert handles == []
+    err = capsys.readouterr().err
+    assert "'bad' skipped" in err
+    assert "boom: config file missing" in err
+
+
+def test_http_starts_a_new_session_after_404(ctx):
+    import httpx
+
+    from karox6.mcp.client import HttpConnection, McpServerHandle, McpTool
+
+    seen = []
+    state = {"session": 0, "expire": False}
+
+    def handler(request):
+        sid = request.headers.get("mcp-session-id")
+        seen.append((request.method, sid, request.headers.get("mcp-protocol-version")))
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        message = json.loads(request.content)
+        if message["method"] == "initialize":
+            state["session"] += 1
+            reply = {"jsonrpc": "2.0", "id": message["id"], "result": {}}
+            headers = {"mcp-session-id": f"s{state['session']}"}
+            return httpx.Response(200, json=reply, headers=headers)
+        if "id" not in message:
+            return httpx.Response(202)
+        if state["expire"] or sid != f"s{state['session']}":
+            state["expire"] = False
+            return httpx.Response(404, text="unknown session")
+        text = f"ok {sid}"
+        result = {"content": [{"type": "text", "text": text}]}
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+    async def go():
+        conn = HttpConnection("http://mcp.test/mcp", transport=httpx.MockTransport(handler))
+        await conn.request("initialize", {"protocolVersion": "x"}, 10)
+        tool = McpTool(McpServerHandle("remote", conn, []), {"name": "t"})
+        assert (await tool.run({}, ctx)).content == "ok s1"
+        state["expire"] = True  # the server restarted and forgot s1
+        assert (await tool.run({}, ctx)).content == "ok s2"
+        assert conn.sessions_started == 2
+        await conn.close()
+
+    asyncio.run(go())
+    assert seen[0] == ("POST", None, None)  # the first initialize carries no session headers
+    versions = [version for _, _, version in seen]
+    assert versions.count(None) == 2  # only the two initialize requests go without it
+    assert set(versions) == {None, "2025-06-18"}
+    assert [s for m, s, _ in seen if m == "DELETE"] == ["s2"]

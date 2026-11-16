@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 
 TOOLS = [
     {
@@ -25,13 +26,42 @@ TOOLS = [
     },
 ]
 
+CANCELLED = []
+
+
+def hidden_tool(name, args):
+    """Unlisted tools that exercise the client's protocol handling."""
+    if name == "ping_me":  # the server asks the client something and waits for the answers
+        for sid, method in (("srv-1", "ping"), ("srv-2", "sampling/createMessage")):
+            print(json.dumps({"jsonrpc": "2.0", "id": sid, "method": method}), flush=True)
+        replies = [json.loads(sys.stdin.readline()) for _ in range(2)]
+        return {"content": [{"type": "text", "text": json.dumps(replies)}]}
+    if name == "slow":
+        time.sleep(float(args.get("seconds", 1)))
+        return {"content": [{"type": "text", "text": "slept"}]}
+    if name == "cancelled":
+        return {"content": [{"type": "text", "text": json.dumps(CANCELLED)}]}
+    if name == "crash":
+        sys.stderr.write("fake crashed on purpose\n")
+        sys.stderr.flush()
+        sys.exit(5)
+    return None
+
+
+sys.stderr.write("fake server stderr line\n")
 print("fake server starting (a log line that is not JSON)", flush=True)
 for line in sys.stdin:
     message = json.loads(line)
-    if "id" not in message:
+    if message.get("method") == "notifications/cancelled":
+        CANCELLED.append((message.get("params") or {}).get("requestId"))
+    if "id" not in message or "method" not in message:
         continue
     method, rid = message["method"], message["id"]
     params = message.get("params") or {}
+    hidden = hidden_tool(params.get("name"), params.get("arguments") or {})
+    if method == "tools/call" and hidden is not None:
+        print(json.dumps({"jsonrpc": "2.0", "id": rid, "result": hidden}), flush=True)
+        continue
     if method == "initialize":
         result = {
             "protocolVersion": "2025-06-18",

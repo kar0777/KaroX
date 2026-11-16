@@ -5,13 +5,17 @@ Config (the ``mcpServers`` shape other MCP clients use)::
     {"mcpServers": {
         "files": {"command": "npx", "args": ["-y", "some-server"], "env": {"X": "1"}},
         "remote": {"url": "https://host/mcp", "headers": {"X-Team": "a"},
-                   "bearer_token_env": "REMOTE_TOKEN"}
+                   "bearer_token_env": "REMOTE_TOKEN", "timeout": 120}
     }}
 
 stdio servers are spawned as child processes (newline-delimited JSON-RPC); HTTP
-servers use Streamable HTTP (JSON or SSE replies, ``Mcp-Session-Id`` kept). Secrets
-come from the environment (``bearer_token_env``), never from the config text.
-A server that fails to start is skipped with a warning; the run goes on without it.
+servers use Streamable HTTP (JSON or SSE replies, ``Mcp-Session-Id`` kept, a new
+session started when the server forgets the old one). Secrets come from the environment
+(``bearer_token_env``), never from the config text. ``timeout`` (seconds) limits each
+tool call. A server that fails to start is skipped with a warning that quotes the end of
+its stderr; the run goes on without it. A stdio server that dies mid-run is restarted
+on its next call (at most ``MAX_RESTARTS`` times). Calls that time out or are interrupted
+are cancelled on the server (``notifications/cancelled``), and server pings are answered.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -37,6 +41,8 @@ PROTOCOL_VERSION = "2025-06-18"
 CONNECT_TIMEOUT_S = 30.0
 CALL_TIMEOUT_S = 600.0
 INLINE_CHARS = 30_000
+STDERR_TAIL_CHARS = 2_000
+MAX_RESTARTS = 3
 _NAME_RX = re.compile(r"[^A-Za-z0-9_-]+")
 
 
@@ -58,10 +64,30 @@ class StdioConnection:
         self.env = env
         self.cwd = cwd
         self.proc: asyncio.subprocess.Process | None = None
+        self.stderr_tail = ""
         self._ids = itertools.count(1)
         self._waiting: dict[int, asyncio.Future[Any]] = {}
         self._reader: asyncio.Task[None] | None = None
+        self._stderr: asyncio.Task[None] | None = None
+        self._replies: set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
+
+    @property
+    def alive(self) -> bool:
+        """Running and still talking: a closed stdout counts as gone even before the
+        exit status arrives."""
+        return (
+            self.proc is not None
+            and self.proc.returncode is None
+            and self._reader is not None
+            and not self._reader.done()
+        )
+
+    async def _settle(self) -> None:
+        """Let the stderr reader catch the last words of a server that just died."""
+        if self._stderr is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(self._stderr), 0.5)
 
     async def start(self) -> None:
         env = {**os.environ, **(self.env or {})}
@@ -69,12 +95,28 @@ class StdioConnection:
             *self.command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=self.cwd,
             limit=16 * 1024 * 1024,
         )
+        self._stderr = asyncio.create_task(self._drain_stderr())
         self._reader = asyncio.create_task(self._read())
+
+    async def _drain_stderr(self) -> None:
+        """Keep the end of the server's stderr (quoted when it fails); never block it."""
+        assert self.proc is not None
+        assert self.proc.stderr is not None
+        with contextlib.suppress(Exception):
+            while chunk := await self.proc.stderr.read(4096):
+                text = self.stderr_tail + chunk.decode("utf-8", "replace")
+                self.stderr_tail = text[-STDERR_TAIL_CHARS:]
+
+    def gone(self, what: str) -> McpClientError:
+        tail = self.stderr_tail.strip()
+        if tail:
+            what += f"; its stderr ends with: {tail[-500:]}"
+        return McpClientError(what)
 
     async def _read(self) -> None:
         assert self.proc is not None
@@ -88,30 +130,71 @@ class StdioConnection:
                     message = json.loads(line)
                 except ValueError:
                     continue  # servers sometimes log to stdout; ignore non-JSON lines
-                if isinstance(message, dict) and "id" in message and "method" not in message:
+                if not isinstance(message, dict):
+                    continue
+                if "method" in message:
+                    if "id" in message:  # a request from the server: answer, never ignore
+                        task = asyncio.create_task(self._answer(message))
+                        self._replies.add(task)
+                        task.add_done_callback(self._replies.discard)
+                    continue
+                if "id" in message:
                     future = self._waiting.pop(message["id"], None)
                     if future is not None and not future.done():
                         future.set_result(message)
         finally:
+            await self._settle()
+            error = self.gone("server process exited")
             for future in self._waiting.values():
                 if not future.done():
-                    future.set_exception(McpClientError("server process exited"))
+                    future.set_exception(error)
             self._waiting.clear()
 
+    async def _answer(self, message: dict[str, Any]) -> None:
+        method = str(message.get("method"))
+        reply: dict[str, Any] = {"jsonrpc": "2.0", "id": message["id"]}
+        if method == "ping":
+            reply["result"] = {}
+        else:
+            reply["error"] = {"code": -32601, "message": f"KaroX does not support {method}"}
+        with contextlib.suppress(Exception):
+            await self._send(reply)
+
     async def _send(self, payload: dict[str, Any]) -> None:
-        if self.proc is None or self.proc.stdin is None or self.proc.returncode is not None:
-            raise McpClientError("server process is not running")
+        if not self.alive or self.proc is None or self.proc.stdin is None:
+            await self._settle()
+            raise self.gone("server process is not running")
         async with self._lock:
             self.proc.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
             await self.proc.stdin.drain()
+
+    def _cancel(self, rid: int, reason: str) -> None:
+        """Tell the server to drop a request (best effort, without waiting)."""
+        if not self.alive or self.proc is None or self.proc.stdin is None:
+            return
+        note = {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": rid, "reason": reason},
+        }
+        with contextlib.suppress(Exception):
+            self.proc.stdin.write((json.dumps(note) + "\n").encode("utf-8"))
 
     async def request(self, method: str, params: dict[str, Any], timeout: float) -> Any:
         rid = next(self._ids)
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._waiting[rid] = future
-        await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
         try:
+            await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
             reply = await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            if method != "initialize":
+                self._cancel(rid, f"timed out after {timeout:g}s")
+            raise
+        except asyncio.CancelledError:
+            if method != "initialize":
+                self._cancel(rid, "interrupted")
+            raise
         finally:
             self._waiting.pop(rid, None)
         return _result(reply)
@@ -131,10 +214,15 @@ class StdioConnection:
                     self.proc.kill()
                 with contextlib.suppress(Exception):
                     await self.proc.wait()
-        if self._reader is not None:
-            self._reader.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._reader
+        for task in (self._reader, self._stderr, *self._replies):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+
+class _SessionExpired(Exception):
+    pass
 
 
 class HttpConnection:
@@ -143,6 +231,7 @@ class HttpConnection:
         url: str,
         headers: dict[str, str] | None = None,
         *,
+        call_timeout: float = CALL_TIMEOUT_S,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.url = url
@@ -152,41 +241,102 @@ class HttpConnection:
             **(headers or {}),
         }
         self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(CALL_TIMEOUT_S, connect=20.0), transport=transport
+            timeout=httpx.Timeout(call_timeout + 5, connect=20.0), transport=transport
         )
         self.session_id: str | None = None
+        self.sessions_started = 0
+        self._initialized = False
+        self._init_params: dict[str, Any] | None = None
         self._ids = itertools.count(1)
+        self._background: set[asyncio.Task[Any]] = set()
 
     def _headers(self) -> dict[str, str]:
         headers = dict(self.headers)
+        if self._initialized:
+            headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
-            headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
         return headers
 
     async def request(self, method: str, params: dict[str, Any], timeout: float) -> Any:
+        if method == "initialize":
+            self._init_params = params
+            self._initialized = False
+            self.session_id = None
+        try:
+            return await self._request(method, params, timeout)
+        except _SessionExpired:
+            # The server forgot the session (restart, idle expiry): the spec says start a
+            # new one with a fresh initialize, then repeat the request once.
+            await self._start_session(timeout)
+            try:
+                return await self._request(method, params, timeout)
+            except _SessionExpired:
+                raise McpClientError("HTTP 404: the server dropped the new session too") from None
+
+    async def _start_session(self, timeout: float) -> None:
+        if self._init_params is None:
+            raise McpClientError("HTTP 404 before the session was initialized")
+        self.session_id = None
+        self._initialized = False
+        await self._request("initialize", self._init_params, timeout)
+        await self.notify("notifications/initialized", {})
+
+    async def _request(self, method: str, params: dict[str, Any], timeout: float) -> Any:
         rid = next(self._ids)
         payload = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
-        response = await asyncio.wait_for(
-            self.client.post(self.url, json=payload, headers=self._headers()), timeout
-        )
+        sent_session = self.session_id
+        try:
+            response = await asyncio.wait_for(
+                self.client.post(self.url, json=payload, headers=self._headers()), timeout
+            )
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            if method != "initialize":
+                reason = "interrupted" if isinstance(exc, asyncio.CancelledError) else "timed out"
+                self._cancel(rid, reason)
+            raise
+        if response.status_code == 404 and sent_session and method != "initialize":
+            raise _SessionExpired
         if response.status_code >= 400:
             raise McpClientError(f"HTTP {response.status_code}: {response.text[:300]}")
-        if method == "initialize" and response.headers.get("mcp-session-id"):
-            self.session_id = response.headers["mcp-session-id"]
         kind = response.headers.get("content-type", "")
+        reply: Any = None
         if "text/event-stream" in kind:
             for message in _sse_messages(response.text):
                 if isinstance(message, dict) and message.get("id") == rid:
-                    return _result(message)
-            raise McpClientError("no reply in the event stream")
-        return _result(response.json())
+                    reply = message
+                    break
+            else:
+                raise McpClientError("no reply in the event stream")
+        else:
+            reply = response.json()
+        result = _result(reply)
+        if method == "initialize":
+            self.session_id = response.headers.get("mcp-session-id") or None
+            self._initialized = True
+            self.sessions_started += 1
+        return result
+
+    def _cancel(self, rid: int, reason: str) -> None:
+        params = {"requestId": rid, "reason": reason}
+        task = asyncio.get_running_loop().create_task(
+            self._quiet_notify("notifications/cancelled", params)
+        )
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _quiet_notify(self, method: str, params: dict[str, Any]) -> None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self.notify(method, params), 10)
 
     async def notify(self, method: str, params: dict[str, Any]) -> None:
         payload = {"jsonrpc": "2.0", "method": method, "params": params}
         await self.client.post(self.url, json=payload, headers=self._headers())
 
     async def close(self) -> None:
+        for task in list(self._background):
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(task, 2)
         if self.session_id:
             with contextlib.suppress(Exception):
                 await self.client.delete(self.url, headers=self._headers())
@@ -198,6 +348,30 @@ class McpServerHandle:
     name: str
     connection: Connection
     tools: list[dict[str, Any]]
+    spec: dict[str, Any] = field(default_factory=dict)
+    call_timeout: float = CALL_TIMEOUT_S
+    restarts: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def ensure_running(self) -> None:
+        """Restart a stdio server that died since the last call (bounded)."""
+        connection = self.connection
+        if not isinstance(connection, StdioConnection) or connection.alive or not self.spec:
+            return
+        async with self.lock:
+            if self.connection is not connection:
+                return  # another call restarted it meanwhile
+            if self.restarts >= MAX_RESTARTS:
+                raise connection.gone(f"server exited and was restarted {MAX_RESTARTS} times")
+            self.restarts += 1
+            await connection.close()
+            fresh = await _open(self.spec)
+            try:
+                await _initialize(fresh)
+            except BaseException:
+                await fresh.close()
+                raise
+            self.connection = fresh
 
 
 class McpTool:
@@ -217,12 +391,20 @@ class McpTool:
         self.read_only = annotations.get("readOnlyHint") is True
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        server = self.server
         try:
-            result = await self.server.connection.request(
-                "tools/call", {"name": self.remote_name, "arguments": args}, CALL_TIMEOUT_S
+            await server.ensure_running()
+            result = await server.connection.request(
+                "tools/call", {"name": self.remote_name, "arguments": args}, server.call_timeout
             )
-        except (McpClientError, httpx.HTTPError, TimeoutError, OSError) as exc:
-            return ToolResult(f"MCP server {self.server.name} failed: {exc}", is_error=True)
+        except TimeoutError:
+            return ToolResult(
+                f"MCP server {server.name}: {self.remote_name} did not answer within "
+                f"{server.call_timeout:g}s; the call was cancelled.",
+                is_error=True,
+            )
+        except (McpClientError, httpx.HTTPError, OSError) as exc:
+            return ToolResult(f"MCP server {server.name} failed: {exc}", is_error=True)
         text = render_result(result)
         inline, _ = limit_output(
             text, spill_dir=ctx.spill_dir, name=self.name, max_chars=INLINE_CHARS
@@ -253,8 +435,15 @@ def render_result(result: dict[str, Any]) -> str:
     return "\n".join(parts) or "(no output)"
 
 
-async def connect(name: str, spec: dict[str, Any]) -> McpServerHandle:
-    connection: StdioConnection | HttpConnection
+def call_timeout(spec: dict[str, Any]) -> float:
+    """Per-call limit from the server's ``timeout`` (seconds), else the default."""
+    value = spec.get("timeout")
+    if isinstance(value, int | float) and not isinstance(value, bool) and value > 0:
+        return float(value)
+    return CALL_TIMEOUT_S
+
+
+async def _open(spec: dict[str, Any]) -> StdioConnection | HttpConnection:
     if spec.get("url"):
         headers = {str(k): str(v) for k, v in (spec.get("headers") or {}).items()}
         token_env = spec.get("bearer_token_env")
@@ -263,25 +452,33 @@ async def connect(name: str, spec: dict[str, Any]) -> McpServerHandle:
             if not token:
                 raise McpClientError(f"environment variable {token_env} is not set")
             headers["Authorization"] = f"Bearer {token}"
-        connection = HttpConnection(str(spec["url"]), headers)
-    elif spec.get("command"):
+        return HttpConnection(str(spec["url"]), headers, call_timeout=call_timeout(spec))
+    if spec.get("command"):
         command = [str(spec["command"]), *[str(a) for a in spec.get("args") or []]]
         env = {str(k): str(v) for k, v in (spec.get("env") or {}).items()}
         connection = StdioConnection(command, env, spec.get("cwd"))
         await connection.start()
-    else:
-        raise McpClientError("needs 'command' (stdio) or 'url' (HTTP)")
+        return connection
+    raise McpClientError("needs 'command' (stdio) or 'url' (HTTP)")
+
+
+async def _initialize(connection: Connection) -> None:
+    await connection.request(
+        "initialize",
+        {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "karox", "version": __version__},
+        },
+        CONNECT_TIMEOUT_S,
+    )
+    await connection.notify("notifications/initialized", {})
+
+
+async def connect(name: str, spec: dict[str, Any]) -> McpServerHandle:
+    connection = await _open(spec)
     try:
-        await connection.request(
-            "initialize",
-            {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "karox", "version": __version__},
-            },
-            CONNECT_TIMEOUT_S,
-        )
-        await connection.notify("notifications/initialized", {})
+        await _initialize(connection)
         tools: list[dict[str, Any]] = []
         cursor: str | None = None
         for _ in range(50):
@@ -294,7 +491,7 @@ async def connect(name: str, spec: dict[str, Any]) -> McpServerHandle:
     except BaseException:
         await connection.close()
         raise
-    return McpServerHandle(name, connection, tools)
+    return McpServerHandle(name, connection, tools, spec=spec, call_timeout=call_timeout(spec))
 
 
 async def load_mcp_tools(path: Path) -> tuple[list[McpTool], list[McpServerHandle]]:
@@ -310,7 +507,8 @@ async def load_mcp_tools(path: Path) -> tuple[list[McpTool], list[McpServerHandl
         try:
             return await asyncio.wait_for(connect(name, spec), CONNECT_TIMEOUT_S + 5)
         except Exception as exc:
-            sys.stderr.write(f"karox: MCP server {name!r} skipped: {exc}\n")
+            reason = str(exc) or f"{type(exc).__name__} (no answer in {CONNECT_TIMEOUT_S:g}s)"
+            sys.stderr.write(f"karox: MCP server {name!r} skipped: {reason}\n")
             return None
 
     handles = [h for h in await asyncio.gather(*(one(n, s) for n, s in servers.items())) if h]
