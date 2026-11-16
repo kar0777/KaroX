@@ -100,3 +100,20 @@ def test_without_safe_streams_the_legacy_code_page_raises() -> None:
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, env=env, check=False)
     assert out.returncode != 0
     assert b"UnicodeEncodeError" in out.stderr
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ("Исправь тест \U0001f44b".encode(), "Исправь тест \U0001f44b"),
+        ("﻿задача".encode(), "задача"),  # UTF-8 BOM (PowerShell)
+    ],
+)
+def test_task_on_stdin_is_read_as_utf8(payload: bytes, expected: str) -> None:
+    code = "from karox6.cli import read_piped_text; print(ascii(read_piped_text()))"
+    env = {**os.environ, "PYTHONIOENCODING": "cp1251"}  # a Windows pipe
+    env.pop("PYTHONUTF8", None)
+    out = subprocess.run(
+        [sys.executable, "-c", code], input=payload, capture_output=True, env=env, check=True
+    )
+    assert out.stdout.decode().strip() == ascii(expected)

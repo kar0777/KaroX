@@ -193,6 +193,21 @@ def safe_streams() -> None:
             pass
 
 
+def read_piped_text() -> str:
+    """A task piped on stdin: UTF-8 (BOM allowed) as other tools write it, else the
+    locale's code page. sys.stdin alone would decode UTF-8 as cp1251 on Windows."""
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is None:
+        return sys.stdin.read()
+    data: bytes = buffer.read()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        import locale
+
+        return data.decode(locale.getpreferredencoding(False), errors="replace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     from karox6.settings import SettingsError, load_settings, requested_profile
 
@@ -235,7 +250,7 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if task in ("", "-"):
         if sys.stdin.isatty() and task == "":
             parser.error("give a task, or pipe it on stdin")
-        task = sys.stdin.read().strip()
+        task = read_piped_text().strip()
     if not task:
         parser.error("empty task")
     if not args.model:

@@ -411,3 +411,8 @@ git diff --check
   piped stdout/stderr as UTF-8 and never raises on an unencodable character (terminals
   keep their encoding, errors replaced). Live rerun: exit 0, valid UTF-8, task solved, the
   model saw correct Cyrillic in tool output. Linux bench unaffected. 626 tests.
+- Same family: a task piped on stdin (`cat task.md | karox run -`) was decoded with the
+  locale code page (cp1251 on Windows), so UTF-8 text from Git Bash or PowerShell 7 became
+  mojibake. It is now read as UTF-8 (BOM allowed), falling back to the code page only for
+  bytes that are not UTF-8. Live: a Cyrillic task piped from Git Bash reached the model
+  intact. Child processes already get PYTHONIOENCODING=utf-8. 628 tests.
