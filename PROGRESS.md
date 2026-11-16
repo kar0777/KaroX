@@ -517,3 +517,12 @@ git diff --check
   credentials). The Origin check still refuses token-less requests from unknown pages
   (DNS rebinding). Docs: chatgpt.md/.ru.md cover Tailscale first, ngrok/cloudflared as
   alternatives, and ChatGPT, Claude and other clients. 663 tests on Windows.
+- Independent review of the tunnel (Claude subagent, read-only) found real ways to touch
+  another program's route, all fixed with tests: a `serve status` that failed or did not
+  parse was read as "all ports free" (now KaroX refuses and touches nothing); ports of a
+  foreground `tailscale funnel` (under "Foreground") were not seen; stop removed the port
+  even if someone replaced the route meanwhile (now it re-reads and removes only its own
+  exact "/" route, with --set-path=/); a publish that timed out after being applied was
+  left; Ctrl+C while the tunnel was opening could leave a public route (now waited for and
+  removed); the target followed 127.0.0.1 even when bound elsewhere. Origin/CORS logic:
+  no hole found. Live again: two public relays 200, route removed, KaroX 5's untouched.

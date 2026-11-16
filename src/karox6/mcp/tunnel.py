@@ -77,9 +77,14 @@ def find_tailscale() -> str | None:
 
 
 def open_tailscale(
-    local_port: int, *, public: bool = True, exe: str | None = None, run: Runner = run_cli
+    local_port: int,
+    *,
+    public: bool = True,
+    local_host: str = "127.0.0.1",
+    exe: str | None = None,
+    run: Runner = run_cli,
 ) -> Tunnel:
-    """Route ``https://<this machine>.ts.net[:port]/`` to ``http://127.0.0.1:<local_port>``."""
+    """Route ``https://<this machine>.ts.net[:port]/`` to ``http://<local_host>:<local_port>``."""
     exe = exe or find_tailscale()
     if not exe:
         raise TunnelError(
@@ -106,9 +111,12 @@ def open_tailscale(
             "this machine has no tailnet DNS name: turn on MagicDNS and HTTPS certificates "
             "on the DNS page of the Tailscale admin console"
         )
-    target = f"http://127.0.0.1:{local_port}"
-    code, out = run([exe, "serve", "status", "--json"], 20)
-    config = (_json_object(out) or {}) if code == 0 else {}
+    if local_host in ("", "0.0.0.0", "::", "localhost"):
+        local_host = "127.0.0.1"
+    shown = f"[{local_host}]" if ":" in local_host else local_host
+    target = f"http://{shown}:{local_port}"
+    # Never guess: a config we could not read may hold another program's routes.
+    config = _serve_config(exe, run)
     port = free_port(config, host, target, public=public)
     if port is None:
         raise TunnelError(
@@ -117,31 +125,73 @@ def open_tailscale(
             "`tailscale funnel --https=<port> off`"
         )
     kind = "funnel" if public else "serve"
-    code, out = run([exe, kind, "--bg", "--yes", f"--https={port}", target], 60)
-    if code != 0:
-        raise TunnelError(explain_failure(kind, code, out))
     url = f"https://{host}" if port == 443 else f"https://{host}:{port}"
 
     def stop() -> None:
-        with contextlib.suppress(TunnelError):
-            run([exe, kind, f"--https={port}", target, "off"], 30)
+        """Remove the route only while it is still exactly ours: another program may have
+        replaced it meanwhile, and `off` would remove whatever serves the port."""
+        try:
+            now = _serve_config(exe, run)
+        except TunnelError:
+            return
+        if _routes(now, host, port) == {"/": {"Proxy": target}}:
+            with contextlib.suppress(TunnelError):
+                run([exe, kind, f"--https={port}", "--set-path=/", target, "off"], 30)
 
+    code, out = run([exe, kind, "--bg", "--yes", f"--https={port}", target], 60)
+    if code != 0:
+        if code == TIMED_OUT:  # it may have been applied after all
+            stop()
+        raise TunnelError(explain_failure(kind, code, out))
     return Tunnel(url=url, public=public, stop=stop)
+
+
+def _serve_config(exe: str, run: Runner) -> dict[str, Any]:
+    code, out = run([exe, "serve", "status", "--json"], 20)
+    text = out.strip()
+    config = {} if code == 0 and text in ("", "null", "{}") else _json_object(text)
+    if code != 0 or config is None:
+        raise TunnelError(
+            "could not read the current Tailscale routes (`tailscale serve status --json`), "
+            "so KaroX does not touch them. " + _short(out)
+        )
+    return config
+
+
+def _routes(config: dict[str, Any], host: str, port: int) -> Any:
+    entry = _section(config, "Web").get(f"{host}:{port}")
+    return entry.get("Handlers") if isinstance(entry, dict) else None
 
 
 def free_port(config: dict[str, Any], host: str, target: str, *, public: bool) -> int | None:
     """The first Funnel-capable HTTPS port that is unused, or already routes only "/" to
     ``target`` with the same visibility (left over from a KaroX that was killed)."""
-    tcp, web, funnel = (_section(config, name) for name in ("TCP", "Web", "AllowFunnel"))
+    funnel = _section(config, "AllowFunnel")
+    # Routes of a foreground `tailscale funnel` (no --bg) live per session under
+    # "Foreground"; their ports are never free and never ours to reuse.
+    foreground: set[int] = set()
+    for session in _section(config, "Foreground").values():
+        if isinstance(session, dict):
+            foreground.update(_ports(session))
     for port in FUNNEL_PORTS:
-        key = f"{host}:{port}"
-        if str(port) not in tcp and not any(k.endswith(f":{port}") for k in web):
+        if port in foreground:
+            continue
+        if port not in _ports(config):
             return port
-        handlers = web.get(key, {}).get("Handlers") if isinstance(web.get(key), dict) else None
-        ours = handlers == {"/": {"Proxy": target}}
-        if ours and bool(funnel.get(key)) == public:
+        ours = _routes(config, host, port) == {"/": {"Proxy": target}}
+        if ours and bool(funnel.get(f"{host}:{port}")) == public:
             return port
     return None
+
+
+def _ports(config: dict[str, Any]) -> set[int]:
+    """HTTPS/TCP ports a serve config (or one foreground session of it) uses."""
+    used = {int(p) for p in _section(config, "TCP") if str(p).isdigit()}
+    for key in _section(config, "Web"):
+        tail = str(key).rsplit(":", 1)[-1]
+        if tail.isdigit():
+            used.add(int(tail))
+    return used
 
 
 def explain_failure(kind: str, code: int, output: str) -> str:

@@ -7,6 +7,7 @@ stack (startup budget 300 ms, checked in CI by scripts/perf_check.py).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -476,7 +477,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
     from karox6.mcp.protocol import McpServer
     from karox6.mcp.runs import RunManager
     from karox6.mcp.transport import DEFAULT_ORIGINS, HttpMcp, serve_stdio
-    from karox6.mcp.tunnel import Tunnel, open_tailscale
+    from karox6.mcp.tunnel import Tunnel
 
     home = (args.home or default_home()).expanduser().resolve()
     root = (args.root or Path.cwd()).expanduser().resolve()
@@ -515,9 +516,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         path_token = f"<${args.token_env}>" if given else token
         async with listener:
             if args.tunnel:
-                tunnel = await asyncio.to_thread(
-                    open_tailscale, bound, public=args.tunnel == "tailscale"
-                )
+                tunnel = await _open_tunnel(bound, host, public=args.tunnel == "tailscale")
             where = "public internet" if tunnel and tunnel.public else "your tailnet"
             sys.stderr.write(
                 f"KaroX MCP (Streamable HTTP) on http://{shown}:{bound}/mcp  root={root}\n"
@@ -539,6 +538,25 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         await runs.shutdown()
         await provider.aclose()
         await _close_mcp(mcp_handles)
+
+
+async def _open_tunnel(port: int, host: str, *, public: bool) -> Any:
+    """open_tailscale in a thread; a Ctrl+C meanwhile waits for it and removes the route
+    it may still have created, so no public route outlives KaroX."""
+    import asyncio
+
+    from karox6.mcp.tunnel import open_tailscale
+
+    opening = asyncio.ensure_future(
+        asyncio.to_thread(open_tailscale, port, public=public, local_host=host)
+    )
+    try:
+        return await asyncio.shield(opening)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            late = await asyncio.wait_for(asyncio.shield(opening), 90)
+            await asyncio.to_thread(late.stop)
+        raise
 
 
 async def _mcp_tools(args: argparse.Namespace, home: Path) -> tuple[list[Any], list[Any]]:

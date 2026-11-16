@@ -21,21 +21,33 @@ class FakeTailscale:
         dns: str = HOST + ".",
         serve: dict | None = None,
         publish: tuple[int, str] = (0, ""),
+        serve_status: tuple[int, str] | None = None,
+        applied: bool = True,
     ) -> None:
         self.state = state
         self.dns = dns
         self.serve = serve or {}
         self.publish = publish
+        self.serve_status = serve_status
+        self.applied = applied  # a publish that timed out may still have been applied
         self.calls: list[list[str]] = []
 
     def __call__(self, argv: list[str], timeout_s: float) -> tuple[int, str]:
-        self.calls.append(argv[1:])
-        if argv[1:] == ["status", "--json"]:
+        args = argv[1:]
+        self.calls.append(args)
+        if args == ["status", "--json"]:
             return 0, json.dumps({"BackendState": self.state, "Self": {"DNSName": self.dns}})
-        if argv[1:] == ["serve", "status", "--json"]:
-            return 0, json.dumps(self.serve)
-        if argv[-1] == "off":
+        if args == ["serve", "status", "--json"]:
+            return self.serve_status or (0, json.dumps(self.serve))
+        port = int(next(a for a in args if a.startswith("--https="))[8:])
+        if args[-1] == "off":
+            for part in ("TCP", "Web", "AllowFunnel"):
+                self.serve.get(part, {}).pop(str(port), None)
+                self.serve.get(part, {}).pop(f"{HOST}:{port}", None)
             return 0, ""
+        if self.applied:
+            route = busy(port, args[-1], funnel=args[0] == "funnel")
+            self.serve = merged(self.serve, route)
         return self.publish
 
 
@@ -63,7 +75,7 @@ def test_funnel_on_the_first_free_port_and_stop_removes_only_it() -> None:
     assert tunnel.public
     assert fake.calls[-1] == ["funnel", "--bg", "--yes", "--https=443", TARGET]
     tunnel.stop()
-    assert fake.calls[-1] == ["funnel", "--https=443", TARGET, "off"]
+    assert fake.calls[-1] == ["funnel", "--https=443", "--set-path=/", TARGET, "off"]
 
 
 def test_routes_of_other_programs_are_left_alone() -> None:
@@ -73,7 +85,7 @@ def test_routes_of_other_programs_are_left_alone() -> None:
     assert tunnel.url == f"https://{HOST}:10000"
     tunnel.stop()
     offs = [c for c in fake.calls if c[-1] == "off"]
-    assert offs == [["funnel", "--https=10000", TARGET, "off"]]
+    assert offs == [["funnel", "--https=10000", "--set-path=/", TARGET, "off"]]
 
 
 def test_a_route_left_by_a_killed_karox_is_reused() -> None:
@@ -128,3 +140,47 @@ def test_tunnel_needs_http(capsys: pytest.CaptureFixture[str]) -> None:
     code = main(["mcp", "--model", "m", "--tunnel", "tailscale", "--no-mcp"])
     assert code == 2
     assert "--tunnel needs --http" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("answer", [(1, "connection refused"), (TIMED_OUT, ""), (0, "not json")])
+def test_routes_that_cannot_be_read_are_not_touched(answer: tuple[int, str]) -> None:
+    """Another program's route on 443 must not be replaced because the read failed."""
+    fake = FakeTailscale(serve=busy(443, "http://127.0.0.1:9000"), serve_status=answer)
+    with pytest.raises(TunnelError, match="does not touch them"):
+        open_tailscale(8765, exe="ts", run=fake)
+    assert not any(c[0] in ("funnel", "serve") and c[1] != "status" for c in fake.calls)
+
+
+def test_an_empty_config_is_free() -> None:
+    fake = FakeTailscale(serve_status=(0, "{}"))
+    assert open_tailscale(8765, exe="ts", run=fake).url == f"https://{HOST}"
+
+
+def test_ports_of_a_foreground_funnel_are_skipped() -> None:
+    config = {"Foreground": {"sess1": busy(443, TARGET)}}  # even one routing to our target
+    assert free_port(config, HOST, TARGET, public=True) == 8443
+
+
+def test_stop_leaves_a_route_someone_replaced() -> None:
+    fake = FakeTailscale()
+    tunnel = open_tailscale(8765, exe="ts", run=fake)
+    fake.serve = busy(443, "http://127.0.0.1:3000")  # `tailscale funnel --bg 3000` meanwhile
+    tunnel.stop()
+    assert not [c for c in fake.calls if c[-1] == "off"]
+
+
+@pytest.mark.parametrize("applied", [True, False])
+def test_a_publish_that_timed_out_is_undone_if_it_was_applied(applied: bool) -> None:
+    fake = FakeTailscale(publish=(TIMED_OUT, ""), applied=applied)
+    with pytest.raises(TunnelError, match="did not finish"):
+        open_tailscale(8765, exe="ts", run=fake)
+    offs = [c for c in fake.calls if c[-1] == "off"]
+    assert offs == ([["funnel", "--https=443", "--set-path=/", TARGET, "off"]] if applied else [])
+
+
+def test_the_target_follows_the_bound_address() -> None:
+    fake = FakeTailscale()
+    open_tailscale(8765, local_host="100.64.0.7", exe="ts", run=fake)
+    assert fake.calls[-1][-1] == "http://100.64.0.7:8765"
+    open_tailscale(8766, local_host="0.0.0.0", exe="ts", run=fake)
+    assert fake.calls[-1][-1] == "http://127.0.0.1:8766"
