@@ -1,3 +1,3 @@
 """KaroX 6: a small, fast coding-agent CLI."""
 
-__version__ = "6.0.0.dev7"
+__version__ = "6.0.0.dev8"
