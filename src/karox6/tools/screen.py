@@ -151,7 +151,7 @@ def _chunk(kind: bytes, data: bytes) -> bytes:
 
 
 def png_size(png: bytes) -> tuple[int, int]:
-    if not png.startswith(PNG_SIGNATURE) or png[12:16] != b"IHDR":
+    if len(png) < 24 or not png.startswith(PNG_SIGNATURE) or png[12:16] != b"IHDR":
         raise ScreenError("the screenshot tool did not produce a PNG")
     width, height = struct.unpack(">II", png[16:24])
     return int(width), int(height)
@@ -380,8 +380,10 @@ def _window_png(api: Any, screen: int, window: Window, max_width: int) -> Shot:
     do not show and it is not brought to the front."""
     user32, gdi32 = api.user32, api.gdi32
     outer = api.w.RECT()
-    user32.GetWindowRect(window.hwnd, api.ctypes.byref(outer))
+    found = user32.GetWindowRect(window.hwnd, api.ctypes.byref(outer))
     full_w, full_h = outer.right - outer.left, outer.bottom - outer.top
+    if not found or full_w <= 0 or full_h <= 0:  # closed since it was listed
+        raise ScreenError(f"the window '{window.title}' is gone")
     memory = gdi32.CreateCompatibleDC(screen)
     bitmap = gdi32.CreateCompatibleBitmap(screen, full_w, full_h)
     if not memory or not bitmap:

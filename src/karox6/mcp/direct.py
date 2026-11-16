@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,19 @@ CONFIRMED = {
 }
 
 
+CONFIRM_TTL_S = 900.0  # a refused call can be confirmed for 15 minutes
+MAX_PENDING = 100
+
+
+def _wait_ms(raw: Any) -> int:
+    """A client's timeout (ms; a number or a numeric string) capped at CALL_WAIT_MS."""
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return CALL_WAIT_MS
+    return CALL_WAIT_MS if value <= 0 else min(value, CALL_WAIT_MS)
+
+
 class OutsideRoot(Exception):
     """A path outside the server root (the server runs without --any-cwd)."""
 
@@ -93,6 +107,10 @@ class DirectTools:
         self.root = root.resolve()
         self.any_path = any_path
         self.approval_mode = approval_mode
+        # Refused destructive calls awaiting the user's answer: (name, arguments) -> expiry.
+        # confirmed: true runs only a call refused before, once: a model cannot skip the
+        # refusal that tells it to ask, or confirm one command and run another.
+        self._pending: dict[str, float] = {}
         shell = shell or detect_shell()
         self.tools: dict[str, Tool] = {
             t.name: t for t in build_tools(shell) if t.name in DIRECT_TOOLS
@@ -165,14 +183,26 @@ class DirectTools:
         """Run one tool call; the result is text content (``isError`` on failure).
         ``name`` must be one of ``self.tools``."""
         tool = self.tools[name]
-        confirmed = str(arguments.get("confirmed")).strip().lower() == "true"
+        key = json.dumps(
+            [name, {k: v for k, v in arguments.items() if k != "confirmed"}],
+            sort_keys=True,
+            default=str,
+        )
+        now = time.monotonic()
+        self._pending = {k: t for k, t in self._pending.items() if t > now}
+        confirmed = (
+            str(arguments.get("confirmed")).strip().lower() == "true" and key in self._pending
+        )
         asked: list[ApprovalRequest] = []
 
         async def approve(request: ApprovalRequest) -> bool:
             asked.append(request)
             if self.approval_mode == "allow":
                 return True
-            return self.approval_mode == "ask" and confirmed
+            if self.approval_mode == "ask" and confirmed:
+                self._pending.pop(key, None)  # one confirmation runs one call
+                return True
+            return False
 
         # A context per call: concurrent calls must not see each other's approver. Files
         # and jobs are shared, so read-before-write and background jobs carry over.
@@ -181,9 +211,9 @@ class DirectTools:
             args = parse_arguments(json.dumps(arguments), tool.parameters)
             args.pop("confirmed", None)
             if name == self.shell_name:
-                args["timeout"] = min(args.get("timeout") or CALL_WAIT_MS, CALL_WAIT_MS)
+                args["timeout"] = _wait_ms(args.get("timeout"))
             elif name == "job_output" and args.get("timeout"):
-                args["timeout"] = min(args["timeout"], CALL_WAIT_MS)
+                args["timeout"] = _wait_ms(args["timeout"])
             result = await tool.run(args, ctx)
             text, is_error, meta = result.content, result.is_error, result.meta
         except (ToolArgsError, OutsideRoot) as exc:
@@ -192,6 +222,8 @@ class DirectTools:
             text, is_error, meta = f"Error: {name} failed: {type(exc).__name__}: {exc}", True, {}
         if meta.get("blocked_rule") and asked and self.approval_mode == "ask":
             request = asked[-1]
+            if len(self._pending) < MAX_PENDING:
+                self._pending[key] = now + CONFIRM_TTL_S
             text = (
                 f"Not executed: this command matches the destructive-command rule "
                 f"'{request.rule}' ({request.reason}). Ask the user in the chat whether to "

@@ -132,3 +132,8 @@ def test_list_windows_and_an_unknown_title(ctx):
     missing = asyncio.run(tool.run({"window": "no such window 0x5f3a"}, ctx))
     assert missing.is_error
     assert "no visible window title contains 'no such window 0x5f3a'" in missing.content
+
+
+def test_png_size_rejects_a_cut_png():
+    with pytest.raises(screen.ScreenError):
+        screen.png_size(screen.PNG_SIGNATURE + b"\0\0\0\rIHDR\0\0")

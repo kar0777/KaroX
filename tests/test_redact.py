@@ -317,3 +317,8 @@ def test_speed():
         started = time.perf_counter()
         redactor(text[:100_000])
         assert time.perf_counter() - started < 0.25, name
+
+
+def test_numeric_secret_env_values_are_masked_exactly():
+    redactor = Redactor.from_env({"DB_PASSWORD": "123456789012", "PORT_NUMBER_KEY": "123"})
+    assert redactor("pw=123456789012 port 123") == ("pw=[secret removed: $DB_PASSWORD] port 123")

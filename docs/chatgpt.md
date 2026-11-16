@@ -109,11 +109,14 @@ returns within 50 s: a longer command goes on as a background job (read it with
 `screenshot` (read-only) lets the model see your screen: the whole desktop, or on Windows
 one window by part of its title, even when other windows cover it and without bringing it
 to the front (`list_windows: true` lists the windows); it only captures, never clicks or
-types. Start the server with `--no-screenshot` to leave it out.
+types. Screenshots are sent as they are: secret masking covers text only, so keep
+secrets off the screen while the model looks, or start the server with `--no-screenshot`
+to leave the tool out.
 
 Destructive commands (the same rules as for the agent) follow `--approve-dangerous`: `ask`
 (default) refuses the call and tells the model to ask you in the chat; once you agree, it
-repeats the call with `confirmed: true`. That relies on the model asking honestly, so use
+repeats the call with `confirmed: true`. The confirmation runs only that refused call,
+once, within 15 minutes. It still relies on the model asking honestly, so use
 `deny` to refuse them outright (or `allow` to run them). The URL, token and tunnel work as
 above; without `--http` the same tools are served over stdio to local clients.
 

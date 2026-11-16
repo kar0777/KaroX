@@ -195,6 +195,40 @@ def test_destructive_command_needs_confirmation_when_asking(tmp_path):
     asyncio.run(go())
 
 
+def test_confirmation_runs_only_the_refused_call_once(tmp_path):
+    """confirmed: true cannot skip the refusal that tells the model to ask the user, nor
+    confirm one command and run another, nor run a confirmed command twice."""
+    server, direct = git_root(tmp_path, "ask")
+    shell = direct.shell_name
+    other = "git push --force origin other"
+
+    async def go():
+        text, _ = await call(server, shell, command=PUSH, confirmed=True)
+        assert text.startswith("Not executed")  # never refused before: ask first
+        text, _ = await call(server, shell, command=other, confirmed=True)
+        assert text.startswith("Not executed")  # PUSH was refused, not this one
+        text, _ = await call(server, shell, command=PUSH, confirmed=True)
+        assert "[exit code: " in text
+        text, _ = await call(server, shell, command=PUSH, confirmed=True)
+        assert text.startswith("Not executed")  # the confirmation was used up
+        await direct.shutdown()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("timeout", ["5000", -1, 10**9])
+def test_shell_timeout_from_the_client_is_coerced(tmp_path, timeout):
+    server, direct = make_server(tmp_path)
+
+    async def go():
+        text, error = await call(server, direct.shell_name, command="echo ok", timeout=timeout)
+        assert not error, text
+        assert "ok" in text
+        await direct.shutdown()
+
+    asyncio.run(go())
+
+
 @pytest.mark.parametrize(("mode", "runs"), [("allow", True), ("deny", False)])
 def test_destructive_command_under_allow_and_deny(tmp_path, mode, runs):
     server, direct = git_root(tmp_path, mode)

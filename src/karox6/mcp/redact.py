@@ -160,7 +160,9 @@ class Redactor:
         redactor = cls()
         for name, value in (os.environ if environ is None else environ).items():
             secret = secret_name(name) or name.upper().endswith("KEY")
-            if secret and not _plain(value) and not _path(value):
+            # A number counts here (DB_PASSWORD=123456789012): the name says it is secret.
+            plain = len(value) < MIN_LEN or _TEMPLATE.search(value) or _ENV_NAME.fullmatch(value)
+            if secret and not plain and not _path(value):
                 redactor.add(value, f"${name}")
         return redactor
 

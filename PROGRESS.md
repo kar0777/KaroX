@@ -753,3 +753,21 @@ git diff --check
   Reviews of dev8..dev9 delegated: codex gpt-6.1-terra and opencode deepseek-v4.1-flash-free
   (secret masking, grep, cut detection), agy Gemini 4 Hydrogen (screenshot, direct mode,
   supervisor).
+- 10:40 UTC, review fixes (codex gpt-6.1-terra on masking/grep/cut; agy Gemini 4 Hydrogen
+  on screenshot/direct/supervisor; each finding checked before acting):
+  - direct mode: `confirmed: true` now runs only a call that was refused before (same name
+    and arguments), once, within 15 minutes; a model can no longer skip the refusal that
+    tells it to ask, or confirm one command and run another (Gemini).
+  - direct mode: client timeouts given as numeric strings or out of range are coerced to
+    1..50 s (a non-numeric one already got a clean argument error; Gemini's TypeError
+    claim did not reproduce).
+  - screenshot: a window closed between listing and capture is an error instead of a copy
+    of the screen at its old place; png_size rejects a PNG shorter than its header.
+  - supervisor: a closed stderr no longer stops the restart loop.
+  - masking: secret-named environment values that are numbers (>= 8 digits) are masked
+    exactly (codex). Documented, not changed: screenshots are not masked; code literals
+    under secret-looking names are masked (edit around them; the write guard refuses the
+    marker). Not changed: values with escaped quotes inside JSON, the exact-cap case of
+    cut detection (a stop at exactly max_tokens is treated as a cut; harmless notice).
+  - Open (not done, logged): direct-mode jobs, file-tracker sets and spill files grow for
+    the server's lifetime (Gemini); the agent-mode marker guard (codex).

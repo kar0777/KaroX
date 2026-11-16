@@ -177,5 +177,7 @@ def _start(command: list[str]) -> subprocess.Popen[bytes]:
 
 
 def _stderr(text: str) -> None:
-    sys.stderr.write(text)
-    sys.stderr.flush()
+    # A closed stderr (a launcher's pipe gone) must not stop the restart loop.
+    with contextlib.suppress(OSError, ValueError):
+        sys.stderr.write(text)
+        sys.stderr.flush()
