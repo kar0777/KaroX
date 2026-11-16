@@ -743,3 +743,13 @@ git diff --check
   trials there are long and dear (~$0.05-0.10 each); two arms likely exceed the $1.78
   left. The held-out VT run waits for more budget or a different task choice, fixed here
   before it starts.
+- 10:16 UTC, user: OpenRouter is off limits now; work with the free/subscription models for
+  the remaining ~1.5 h. FreeInference GLM-5.3-Flash mini A/B dispatched (runs 43847138848
+  gv2 = dev9 + V2, 43847166118 gvt = dev9+t + V2; tasks 58 and 62, 1 attempt, parallel 1
+  each): directional only, not a verdict (different model, 2 trials per arm, tasks already
+  inspected); read: test-command minutes, agent wall, solved. Smoke 43841655368 (dev9+t +
+  V2, GLM) task 20: version and V2 flag live; it started the long directory run in the
+  background as told, then still waited 253 s on job_output (wait cap unchanged in T).
+  Reviews of dev8..dev9 delegated: codex gpt-6.1-terra and opencode deepseek-v4.1-flash-free
+  (secret masking, grep, cut detection), agy Gemini 4 Hydrogen (screenshot, direct mode,
+  supervisor).
