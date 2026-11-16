@@ -806,3 +806,52 @@ def test_brief_status_batches_until_the_run_ends(tmp_path):
         await manager.shutdown()
 
     asyncio.run(go())
+
+
+FAKE_KEY = "sk-proj-" + "FAKE0fake" * 5  # fake: masked as an API key
+
+
+def test_replies_mask_secrets(tmp_path):
+    """Everything a client reads goes through the redactor: events, final text, diff,
+    in both the text and structuredContent; a server without one sends it as it is."""
+    turns = [Turn(calls=[("read", {"file_path": ".env"})]), Turn(text=f"The key is {FAKE_KEY}")]
+    manager, _ = make_manager(tmp_path, turns)
+    root = manager.root
+    git = ["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (root / ".env").write_text("DB_PASSWORD=old0fake0pass\n")
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+    (root / ".env").write_text(f"DB_PASSWORD=fake0pass0\nOPENAI_API_KEY={FAKE_KEY}\n")
+    server = McpServer(manager)
+    plain = McpServer(manager, redactor=None)
+    leaks = (FAKE_KEY, "fake0pass0", "old0fake0pass")
+
+    async def go():
+        run, _ = manager.start("look at .env")
+        await finish(manager, run.run_id)
+        replies = [
+            await tool(server, "karox_status", run_id=run.run_id, detail="full"),
+            await tool(server, "karox_status", run_id=run.run_id),
+            await tool(server, "karox_diff", run_id=run.run_id),
+        ]
+        for result in replies:
+            text = result["content"][0]["text"]
+            assert json.loads(text) == result["structuredContent"]
+            assert "[secret removed: " in text
+            for leak in leaks:
+                assert leak not in text
+        status, _, diff = (r["structuredContent"] for r in replies)
+        assert status["final_text"] == "The key is [secret removed: API key]"
+        assert "+DB_PASSWORD=[secret removed: password]" in diff["diff"]
+        assert "-DB_PASSWORD=[secret removed: password]" in diff["diff"]
+        raw = await tool(plain, "karox_status", run_id=run.run_id, detail="full")
+        assert FAKE_KEY in raw["content"][0]["text"]
+        assert "DB_PASSWORD=fake0pass0" in raw["content"][0]["text"]  # the read's output
+        said = await call(server, "initialize", {"protocolVersion": LATEST})
+        assert "[secret removed: ...]" in said["result"]["instructions"]
+        said = await call(plain, "initialize", {"protocolVersion": LATEST})
+        assert "secret removed" not in said["result"]["instructions"]
+        await manager.shutdown()
+
+    asyncio.run(go())

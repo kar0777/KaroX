@@ -152,6 +152,12 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     )
     mcp.add_argument("--approval-timeout", type=float, default=600.0, help="seconds, then deny")
     mcp.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="send tool output as it is (by default likely secrets are masked: keys, tokens, "
+        "passwords, values of secret environment variables)",
+    )
+    mcp.add_argument(
         "--tunnel",
         choices=("tailscale", "tailnet"),
         default=None,
@@ -489,6 +495,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
     from karox6.core.store import default_home
     from karox6.mcp.direct import DirectTools
     from karox6.mcp.protocol import McpServer
+    from karox6.mcp.redact import Redactor
     from karox6.mcp.runs import RunManager
     from karox6.mcp.transport import DEFAULT_ORIGINS, HttpMcp, serve_stdio
     from karox6.mcp.tunnel import Tunnel
@@ -499,6 +506,11 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         raise ValueError(f"root {root} is not a directory")
     if args.tunnel and args.http is None:
         raise ValueError("--tunnel needs --http PORT (the tunnel forwards to it)")
+    # Taken now: the key and token variables leave the environment below, but their
+    # values can still turn up in files and command output.
+    redactor = None if args.no_redact else Redactor.from_env()
+    if redactor is not None and args.api_key_env and os.environ.get(args.api_key_env):
+        redactor.add(os.environ[args.api_key_env], f"${args.api_key_env}")
     tunnel: Tunnel | None = None
     provider: Any = None
     mcp_handles: list[Any] = []
@@ -511,7 +523,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         backend = DirectTools(
             root, home=home, any_path=args.any_cwd, approval_mode=args.approve_dangerous
         )
-        server = McpServer(direct=backend)
+        server = McpServer(direct=backend, redactor=redactor)
     else:
         mcp_tools, mcp_handles = await _mcp_tools(args, home)
         provider = _provider(args)
@@ -524,7 +536,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
             approval_timeout_s=args.approval_timeout,
             extra_tools=mcp_tools,
         )
-        server = McpServer(backend)
+        server = McpServer(backend, redactor=redactor)
     try:
         if args.http is None:
             await serve_stdio(server)
@@ -532,6 +544,8 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         host, _, port = args.http.rpartition(":")
         host = host or "127.0.0.1"
         token, kept = _http_token(args, home)
+        if redactor is not None:
+            redactor.add(token, "KaroX access token")
         origins = [*DEFAULT_ORIGINS, *args.allow_origin]
         http = HttpMcp(server, token=token, allowed_origins=origins)
         listener = await http.start(host, int(port))
