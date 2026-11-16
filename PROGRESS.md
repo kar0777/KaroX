@@ -571,3 +571,25 @@ git diff --check
   are not confined to the root (only the destructive-command rules apply). Live: stdio and
   HTTP smoke (initialize, tools/list, bash, a background job killed with the server).
   675 passed, 5 skipped on Windows (13 new).
+- Staying up unattended (what the KaroX 5 bridge had): `karox mcp --http ... --supervise`
+  (new `mcp/supervise.py`) runs the same command minus `--supervise` as a child (`python
+  -m karox6`; `--new-token` only on the first start; environment unchanged, so the child
+  reads or pops the token itself) and restarts it when it exits on its own: 1 s, doubling,
+  capped at 60 s, reset after 5 minutes of running; exit code 2 is not retried; one stderr
+  line per restart. The child has its own process group (Windows: CREATE_NEW_PROCESS_GROUP
+  and the kill-on-exit job, so a killed supervisor takes it along); Ctrl+C (exit 0) or
+  SIGTERM/CTRL_BREAK (143) on the supervisor sends SIGTERM/CTRL_BREAK, waits 10 s (a second
+  Ctrl+C: at once), then kills. Found on the way: on Windows CTRL_BREAK ended `karox mcp`
+  without running `finally`, so the tunnel route stayed; run_async now handles SIGBREAK like
+  SIGTERM (cancel, exit 143; the existing SIGTERM test now also runs on Windows with
+  CTRL_BREAK and fails on the old code). Tunnel health: `Tunnel.keep` reads `tailscale serve
+  status --json` and re-applies a vanished route with the same port and target only if the
+  port is free or still ours (`usable`, shared with free_port); `karox mcp --tunnel` calls it
+  every 30 s in the background, printing a line when it re-applies or cannot (once per
+  persisting problem); a lock keeps a re-apply in flight from outliving `stop`. Live smoke
+  (Windows, --direct): the server killed with TerminateProcess came back after 1 s on the
+  same URL (initialize 200), CTRL_BREAK on the supervisor exited 143 in 0.2 s with the
+  server gone, and killing the supervisor outright took the server along. Not done: a
+  tunnel failure at start (Tailscale not up yet) is exit 2 and so ends the supervisor; no
+  login autostart (docs name Task Scheduler / systemd user units). 713 passed, 3 skipped on
+  Windows (22 new, 2 newly run).

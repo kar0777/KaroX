@@ -27,7 +27,10 @@ def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
     """asyncio.run, where SIGTERM (POSIX) stops the program the way Ctrl+C does: the main
     task is cancelled, so `finally` blocks run, child process trees are killed and the
     session is recorded. MCP clients and process managers stop a server with SIGTERM;
-    left to Python's default the process just vanished and its commands kept running."""
+    left to Python's default the process just vanished and its commands kept running.
+    On Windows CTRL_BREAK (SIGBREAK) is handled the same way: it is how `karox mcp
+    --supervise` stops its server, and Python's default ends the process without cleanup
+    (a Tailscale route would outlive it)."""
     import asyncio
     import signal
 
@@ -46,17 +49,28 @@ def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
                 task.cancel()
 
         installed = False
+        previous: Any = None
         if sys.platform != "win32":
             try:
                 loop.add_signal_handler(signal.SIGTERM, on_sigterm)
                 installed = True
             except (NotImplementedError, RuntimeError, ValueError):
                 pass
+        else:
+
+            def on_sigbreak(_signum: int, _frame: Any) -> None:
+                on_sigterm()
+                loop.call_soon_threadsafe(lambda: None)  # wake a loop that waits for I/O
+
+            with contextlib.suppress(ValueError):  # not the main thread
+                previous = signal.signal(signal.SIGBREAK, on_sigbreak)
         try:
             return await main_coro
         finally:
             if installed:
                 loop.remove_signal_handler(signal.SIGTERM)
+            if sys.platform == "win32" and previous is not None:
+                signal.signal(signal.SIGBREAK, previous)
 
     try:
         result = asyncio.run(guarded())
@@ -157,6 +171,12 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
         default=None,
         help="with --http: an HTTPS address through Tailscale; 'tailscale' is public (Funnel: "
         "ChatGPT, Claude and other hosted connectors), 'tailnet' only your devices (Serve)",
+    )
+    mcp.add_argument(
+        "--supervise",
+        action="store_true",
+        help="with --http: run the server as a child process and start it again when it "
+        "exits unexpectedly (waits 1 s, doubling up to 60 s); Ctrl+C stops both",
     )
 
     debug = sub.add_parser("debug", help="diagnostics for developers")
@@ -296,7 +316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "chat":
         return _chat(args, parser)
     if args.command == "mcp":
-        return _mcp(args, parser)
+        return _mcp(args, parser, argv)
     if args.command == "debug" and args.debug_command == "rss":
         return _debug_rss()
     parser.print_help()
@@ -468,11 +488,19 @@ def _provider(args: argparse.Namespace) -> Any:
     )
 
 
-def _mcp(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+def _mcp(args: argparse.Namespace, parser: argparse.ArgumentParser, argv: list[str]) -> int:
     from karox6.mcp.tunnel import TunnelError
 
     if not args.model and not args.direct:
         parser.error("--model is required (or set KAROX_MODEL), unless --direct")
+    if args.supervise:
+        if args.http is None:
+            parser.error("--supervise needs --http PORT")
+        try:
+            return _supervise(argv)
+        except OSError as exc:
+            sys.stderr.write(f"karox mcp: {exc}\n")
+            return 2
     try:
         run_async(_mcp_async(args))
     except KeyboardInterrupt:
@@ -481,6 +509,17 @@ def _mcp(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         sys.stderr.write(f"karox mcp: {exc}\n")
         return 2
     return 0
+
+
+def _supervise(argv: list[str]) -> int:
+    """Run `karox mcp` with these arguments as a child and restart it when it dies. The
+    environment passes through unchanged: the child reads (and drops) the token itself."""
+    from karox6.mcp.supervise import Supervisor, without_flag
+
+    first = [sys.executable, "-m", "karox6", *without_flag(argv, "--supervise")]
+    # A restart keeps the token the first start made instead of replacing it again.
+    again = without_flag(first, "--new-token")
+    return Supervisor(first, restart_command=again).run()
 
 
 async def _mcp_async(args: argparse.Namespace) -> None:
@@ -500,6 +539,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
     if args.tunnel and args.http is None:
         raise ValueError("--tunnel needs --http PORT (the tunnel forwards to it)")
     tunnel: Tunnel | None = None
+    keeper: asyncio.Task[None] | None = None
     provider: Any = None
     mcp_handles: list[Any] = []
     backend: RunManager | DirectTools
@@ -542,6 +582,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         async with listener:
             if args.tunnel:
                 tunnel = await _open_tunnel(bound, host, public=args.tunnel == "tailscale")
+                keeper = asyncio.ensure_future(_keep_tunnel(tunnel))
             where = "public internet" if tunnel and tunnel.public else "your tailnet"
             mode = "  direct tools" if args.direct else ""
             sys.stderr.write(
@@ -565,7 +606,10 @@ async def _mcp_async(args: argparse.Namespace) -> None:
             sys.stderr.flush()
             await asyncio.Event().wait()
     finally:
-        if tunnel is not None:
+        if keeper is not None:
+            keeper.cancel()
+            await asyncio.wait([keeper])
+        if tunnel is not None:  # waits for a keep still running in its thread
             await asyncio.to_thread(tunnel.stop)
         await backend.shutdown()
         if provider is not None:
@@ -590,6 +634,21 @@ async def _open_tunnel(port: int, host: str, *, public: bool) -> Any:
             late = await asyncio.wait_for(asyncio.shield(opening), 90)
             await asyncio.to_thread(late.stop)
         raise
+
+
+async def _keep_tunnel(tunnel: Any, interval: float = 30.0) -> None:
+    """Put the tunnel route back whenever it vanished (checked every ``interval`` s). A
+    message is printed once, not every round, while the same problem persists."""
+    import asyncio
+
+    last: str | None = None
+    while True:
+        await asyncio.sleep(interval)
+        line = await asyncio.to_thread(tunnel.keep)
+        if line and line != last:
+            sys.stderr.write(f"karox mcp: {line}\n")
+            sys.stderr.flush()
+        last = line
 
 
 def _http_token(args: argparse.Namespace, home: Path) -> tuple[str, Path | None]:
