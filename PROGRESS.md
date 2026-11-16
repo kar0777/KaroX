@@ -343,3 +343,10 @@ git diff --check
   Synthetic, right after V1. Purpose: a same-wheel, same-night reference for V1 and a second
   noise sample; no adoption decision rides on it. V1 is still judged by its rule above;
   V1 vs k6n1 is reported alongside.
+- V1 (run 43798764208, tag k6v1) did not run: from ~03:35 UTC every request to Synthetic
+  fails with HTTP 402 "Insufficient credits and no active subscription"; all 11 trials
+  stopped at the first model call (0 tokens). C1 had finished at 03:32 with no 402 in any
+  trial. The k6n1 control (run 43800330980) was cancelled at once for the same reason. The
+  V1 rule stays as fixed above and waits for a working upstream; ReformBoss is paid and
+  limited to one runner at a time (2.5 h for 6 jobs last time), GLM is a different model.
+  Bench runs are blocked until the Synthetic subscription is renewed (the user's call).
