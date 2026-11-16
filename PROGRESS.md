@@ -404,3 +404,10 @@ git diff --check
   a .py file unparsable (0 of 225 edits), so a post-edit syntax check is not worth adding.
 - k6h3s vs k6h1s context: mean input per LLM call 91k (DSH 85k) after dev5, down from 116k
   (DSH 70k); the cost gap to DSH is now mostly the number of calls (1.26x).
+- Windows fix found by a live headless run in a Cyrillic path (GLM-5.3-Flash, free): with
+  stdout redirected, Python used the ANSI code page (cp1251), so `--json` events were not
+  UTF-8 (a Cyrillic workspace path broke every JSON reader), and one emoji in the model's
+  reply raised `UnicodeEncodeError` and ended the run with exit code 2. `karox` now writes
+  piped stdout/stderr as UTF-8 and never raises on an unencodable character (terminals
+  keep their encoding, errors replaced). Live rerun: exit 0, valid UTF-8, task solved, the
+  model saw correct Cyrillic in tool output. Linux bench unaffected. 626 tests.

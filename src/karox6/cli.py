@@ -176,9 +176,27 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
         p.set_defaults(**settings)
 
 
+def safe_streams() -> None:
+    """Piped output is UTF-8 (JSON Lines are UTF-8 by definition; on Windows a redirected
+    stream would otherwise use the ANSI code page, e.g. cp1251), and no stream ever raises
+    on a character its encoding lacks: one emoji from the model used to end a run."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if stream.isatty():
+                reconfigure(errors="replace")
+            else:
+                reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     from karox6.settings import SettingsError, load_settings, requested_profile
 
+    safe_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
         settings = load_settings(requested_profile(argv))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
@@ -75,3 +76,27 @@ def test_python_hint_for_windows_store_placeholder(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(prompt.platform, "system", lambda: "Linux")
     monkeypatch.setattr(prompt.shutil, "which", which({"python3": stub}))
     assert prompt.python_hint() is None
+
+
+def test_piped_output_is_utf8_and_never_raises() -> None:
+    """A redirected stream in a legacy code page (Windows: cp1251) used to raise on an
+    emoji from the model and end the run with exit code 2."""
+    code = (
+        "import sys; from karox6.cli import safe_streams; safe_streams(); "
+        "print('\\U0001f44b привет'); print('\\U0001f44b ошибка', file=sys.stderr)"
+    )
+    env = {**os.environ, "PYTHONIOENCODING": "cp1251"}
+    env.pop("PYTHONUTF8", None)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, env=env, check=True)
+    assert out.stdout.decode("utf-8").strip() == "\U0001f44b привет"
+    assert out.stderr.decode("utf-8").strip() == "\U0001f44b ошибка"
+
+
+def test_without_safe_streams_the_legacy_code_page_raises() -> None:
+    """Guards the test above: the failure it prevents is real."""
+    code = "print('\\U0001f44b')"
+    env = {**os.environ, "PYTHONIOENCODING": "cp1251"}
+    env.pop("PYTHONUTF8", None)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, env=env, check=False)
+    assert out.returncode != 0
+    assert b"UnicodeEncodeError" in out.stderr
