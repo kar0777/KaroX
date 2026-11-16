@@ -8,16 +8,20 @@ progress and shows the diff.
 ## 1. Start the server
 
 ```bash
-export KAROX_MCP_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 karox mcp --http 8765 --root ~/projects --model MODEL [provider flags]
 ```
 
 The server listens on `127.0.0.1:8765`; its endpoint is
 `http://127.0.0.1:8765/mcp/<token>`. The token in the path is the only credential: keep
-the URL private. Without `KAROX_MCP_TOKEN` the server makes up a random token and prints
-the full URL; a token you set is not printed. The server removes the token and the API
-key variable from its environment, so the agent's commands cannot read them. Runs may
-only work inside `--root` (add `--any-cwd` to lift that).
+the URL private. On the first start the server makes up a random token, keeps it in
+`~/.karox6/mcp/http-token` (under `--home`; readable by you only) and prints the full URL.
+Later starts reuse it, so a connector you added once keeps working after a restart: the
+client's session carries on, and runs started before the restart are gone from the
+server's memory but their changes are still on disk. `--new-token` makes a new token (the
+old URL stops working; do it if the URL leaked). To choose the token yourself, set
+`KAROX_MCP_TOKEN`: that token is neither saved nor printed. The server removes the token
+and the API key variable from its environment, so the agent's commands cannot read them.
+Runs may only work inside `--root` (add `--any-cwd` to lift that).
 
 Dangerous commands (deletions, force pushes, ...) wait for approval by default: ChatGPT
 sees a pending approval in `karox_status` and answers with `karox_approve`. Approve only
@@ -76,3 +80,7 @@ the diff".
 | `karox_cancel` | stop a run |
 | `karox_diff` / `karox_files` | the workspace diff / files the run changed |
 | `karox_runs` | runs of this server process |
+
+One reply holds at most 100,000 characters: `karox_status` sends longer event lists in
+pages (ask again with `since` = `next`), and a longer diff or final answer is cut with a
+note saying how much was left out.

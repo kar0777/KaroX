@@ -122,7 +122,13 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     mcp.add_argument(
         "--token-env",
         default="KAROX_MCP_TOKEN",
-        help="environment variable with the HTTP access token (random if unset)",
+        help="environment variable with the HTTP access token (if unset: a random token "
+        "kept in <home>/mcp/http-token, so the connector URL survives restarts)",
+    )
+    mcp.add_argument(
+        "--new-token",
+        action="store_true",
+        help="replace the kept HTTP access token (the old connector URL stops working)",
     )
     mcp.add_argument(
         "--allow-origin",
@@ -471,7 +477,6 @@ def _mcp(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
 async def _mcp_async(args: argparse.Namespace) -> None:
     import asyncio
-    import secrets
 
     from karox6.core.store import default_home
     from karox6.mcp.protocol import McpServer
@@ -504,16 +509,14 @@ async def _mcp_async(args: argparse.Namespace) -> None:
             return
         host, _, port = args.http.rpartition(":")
         host = host or "127.0.0.1"
-        # Taken out of the environment, so the agent's commands cannot read it.
-        given = os.environ.pop(args.token_env, None) if args.token_env else None
-        token = given or secrets.token_urlsafe(24)
+        token, kept = _http_token(args, home)
         origins = [*DEFAULT_ORIGINS, *args.allow_origin]
         http = HttpMcp(server, token=token, allowed_origins=origins)
         listener = await http.start(host, int(port))
         bound = listener.sockets[0].getsockname()[1]
         shown = host if host not in ("0.0.0.0", "::") else "127.0.0.1"
         # A token the user chose is not echoed (stderr often ends up in logs).
-        path_token = f"<${args.token_env}>" if given else token
+        path_token = token if kept else f"<${args.token_env}>"
         async with listener:
             if args.tunnel:
                 tunnel = await _open_tunnel(bound, host, public=args.tunnel == "tailscale")
@@ -529,6 +532,12 @@ async def _mcp_async(args: argparse.Namespace) -> None:
                     f"  HTTPS tunnel): http://{shown}:{bound}/mcp/{path_token}\n"
                 )
                 + "  or send 'Authorization: Bearer <token>' to /mcp. Keep the token secret.\n"
+                + (
+                    f"  The token is kept in {kept} and stays the same across restarts;\n"
+                    "  --new-token replaces it (the old URL then stops working).\n"
+                    if kept
+                    else ""
+                )
             )
             sys.stderr.flush()
             await asyncio.Event().wait()
@@ -557,6 +566,19 @@ async def _open_tunnel(port: int, host: str, *, public: bool) -> Any:
             late = await asyncio.wait_for(asyncio.shield(opening), 90)
             await asyncio.to_thread(late.stop)
         raise
+
+
+def _http_token(args: argparse.Namespace, home: Path) -> tuple[str, Path | None]:
+    """The HTTP access token, and the file it is kept in (None: it came from the
+    environment and is neither saved nor printed)."""
+    from karox6.mcp.transport import saved_token
+
+    # Taken out of the environment, so the agent's commands cannot read it.
+    given = os.environ.pop(args.token_env, None) if args.token_env else None
+    if given:
+        return given, None
+    path = home / "mcp" / "http-token"
+    return saved_token(path, renew=args.new_token), path
 
 
 async def _mcp_tools(args: argparse.Namespace, home: Path) -> tuple[list[Any], list[Any]]:

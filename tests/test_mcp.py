@@ -6,8 +6,8 @@ import httpx
 import pytest
 
 from karox6.core.session import SessionConfig
-from karox6.mcp.protocol import TOOLS, McpServer
-from karox6.mcp.runs import RunManager
+from karox6.mcp.protocol import LATEST, TOOLS, McpServer, fit_reply
+from karox6.mcp.runs import REPLY_CAP, RunManager, reply_text
 from karox6.mcp.transport import HttpMcp, serve_lines
 from karox6.providers.scripted import ScriptedProvider, Turn
 from karox6.tools.base import ApprovalRequest, ToolResult
@@ -196,6 +196,16 @@ def test_errors_and_workspace_guard(tmp_path):
         assert "outside the server root" in bad["content"][0]["text"]
         unknown = await tool(server, "karox_status", run_id="run-404")
         assert unknown["isError"] is True
+        # After a restart every old run id is unknown: the model is told why and what to do.
+        text = unknown["content"][0]["text"]
+        for hint in ("restarted", "on disk", "karox_run", "karox_diff", "session_id"):
+            assert hint in text
+        for name in ("karox_diff", "karox_cancel", "karox_approve", "karox_files"):
+            args = {"run_id": "run-404", "approval_id": "a", "approve": True}
+            reply = await tool(server, name, **args)
+            assert "restarted" in reply["content"][0]["text"], name
+        huge = await tool(server, "karox_status", run_id="r" * 1_000_000)
+        assert len(huge["content"][0]["text"]) < 1000
         missing_arg = await tool(server, "karox_status")
         assert missing_arg["isError"] is True
         reply = await call(server, "tools/call", {"name": "karox_nope", "arguments": {}})
@@ -376,7 +386,14 @@ def test_http_transport(tmp_path):
             sid = r.headers["mcp-session-id"]
             assert r.json()["result"]["serverInfo"]["name"] == "karox"
             assert (await client.post(f"/mcp/{TOKEN}", json=ping)).status_code == 400
-            bad = await client.post(f"/mcp/{TOKEN}", json=ping, headers={"Mcp-Session-Id": "x"})
+            # A session id this process never issued (one from before a restart) is
+            # carried on; a malformed one is not.
+            old = await client.post(f"/mcp/{TOKEN}", json=ping, headers={"Mcp-Session-Id": "x"})
+            assert old.status_code == 200
+            assert http.sessions["x"] == LATEST
+            bad = await client.post(
+                f"/mcp/{TOKEN}", json=ping, headers={"Mcp-Session-Id": "x" * 129}
+            )
             assert bad.status_code == 404
             ok = await client.post(f"/mcp/{TOKEN}", json=ping, headers={"Mcp-Session-Id": sid})
             assert ok.status_code == 200
@@ -421,7 +438,7 @@ def test_http_transport(tmp_path):
                 await client.request("DELETE", f"/mcp/{TOKEN}", headers={"Mcp-Session-Id": sid})
             ).status_code == 200
             gone = await client.post(f"/mcp/{TOKEN}", json=ping, headers={"Mcp-Session-Id": sid})
-            assert gone.status_code == 404
+            assert gone.status_code == 404  # ended by the client: not carried on
             garbage = await client.post(
                 f"/mcp/{TOKEN}", content=b"{oops", headers={"Mcp-Session-Id": sid}
             )
@@ -513,6 +530,41 @@ def test_http_body_limits_and_session_cap(tmp_path, monkeypatch):
             assert status == 200
             sids.append(headers["Mcp-Session-Id"])
         assert list(http.sessions) == sids[1:]
+        for sid in sids:
+            assert (await http.respond("DELETE", target, {"mcp-session-id": sid}, b""))[0] == 200
+        assert list(http.ended) == sids[1:]  # ended ids are remembered up to the cap too
+
+    asyncio.run(go())
+
+
+def test_http_session_survives_a_restart(tmp_path):
+    """A hosted client keeps its Mcp-Session-Id across a server restart and may never
+    initialize again: the restarted server carries the session on (token required)."""
+    manager, _ = make_manager(tmp_path, [])
+    target = f"/mcp/{TOKEN}"
+    init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode()
+    ping = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}).encode()
+
+    async def go():
+        before = HttpMcp(McpServer(manager), token=TOKEN)
+        sid = (await before.respond("POST", target, {}, init))[1]["Mcp-Session-Id"]
+        after = HttpMcp(McpServer(manager), token=TOKEN)  # a new process: no sessions
+        status, _, body = await after.respond("POST", target, {"mcp-session-id": sid}, ping)
+        assert status == 200
+        assert json.loads(body)["result"] == {}
+        assert after.sessions == {sid: LATEST}
+        wrong = "/mcp/wrong-token-xxxxxxxx"
+        assert (await after.respond("POST", wrong, {"mcp-session-id": "s2"}, ping))[0] == 401
+        assert "s2" not in after.sessions
+        # A session the client ended stays ended, also one from before the restart.
+        for ended in (sid, "from-the-old-process"):
+            headers = {"mcp-session-id": ended}
+            assert (await after.respond("DELETE", target, headers, b""))[0] == 200
+            assert (await after.respond("POST", target, headers, ping))[0] == 404
+            assert (await after.respond("DELETE", target, headers, b""))[0] == 404
+        assert after.sessions == {}
+        bad = {"mcp-session-id": "has space"}
+        assert (await after.respond("POST", target, bad, ping))[0] == 404
 
     asyncio.run(go())
 
@@ -559,6 +611,127 @@ def test_run_guards(tmp_path, monkeypatch):
         await manager.shutdown()
 
     asyncio.run(go())
+
+
+async def finish(manager, run_id):
+    since = 0
+    for _ in range(50):
+        view = await manager.status(run_id, since=since, wait_s=1)
+        since = view["next"]
+        if view["status"] != "running":
+            return view
+    raise AssertionError("run did not finish")
+
+
+def test_status_pages_big_replies(tmp_path):
+    """No reply over REPLY_CAP: karox_status pages the events (the rest with since=next)
+    and cuts final_text, saying how much was left out."""
+    manager, _ = make_manager(tmp_path, [Turn(text="done")])
+    server = McpServer(manager)
+
+    async def go():
+        run, _ = manager.start("t")
+        await finish(manager, run.run_id)
+        for _ in range(100):  # events as big as FIELD_CAP lets them be; newlines escape
+            event = {"type": "notice", "i": manager._next(run), "text": "x\n" * 999}
+            run.events.append({**event, "line": "y" * 400})
+        run.final_text = "z" * 200_000
+        total = manager._next(run)
+        since, seen, pages = 0, [], 0
+        while since < total and pages < 30:
+            pages += 1
+            result = await tool(
+                server, "karox_status", run_id=run.run_id, since=since, detail="full"
+            )
+            assert len(result["content"][0]["text"]) <= REPLY_CAP
+            view = result["structuredContent"]
+            assert "cut" not in view  # paged, not cut by the last-resort guard
+            seen += [e["i"] for e in view["events"]]
+            if view["next"] < total:
+                assert f"since={view['next']}" in view["more"]
+            since = view["next"]
+        assert seen == list(range(total))  # nothing skipped, nothing twice
+        assert pages > 2
+        assert view["final_text"].endswith("chars cut]")
+        brief = await tool(server, "karox_status", run_id=run.run_id)
+        assert len(brief["content"][0]["text"]) <= REPLY_CAP
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_big_diff_is_cut_to_fit(tmp_path):
+    manager, _ = make_manager(tmp_path, [Turn(text="done")])
+    server = McpServer(manager)
+    root = manager.root
+    git = ["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (root / "a.txt").write_text("one\n")
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+    (root / "a.txt").write_text('\t"quoted"\n' * 30_000)  # each escape doubles a character
+
+    async def go():
+        run, _ = manager.start("t")
+        await finish(manager, run.run_id)
+        result = await tool(server, "karox_diff", run_id=run.run_id, max_chars=200_000)
+        assert len(result["content"][0]["text"]) <= REPLY_CAP
+        diff = result["structuredContent"]
+        assert diff["truncated"] is True
+        assert "cut" not in diff
+        left = diff["total_chars"] - len(diff["diff"])
+        assert f"diff cut: {left} of" in diff["note"]
+        assert "max_chars" not in diff["note"]  # more max_chars would not help
+        small = (await tool(server, "karox_diff", run_id=run.run_id))["structuredContent"]
+        assert len(small["diff"]) == 40_000
+        assert "larger max_chars" in small["note"]
+        await manager.shutdown()
+
+    asyncio.run(go())
+
+
+def test_fit_reply_cuts_the_largest_field():
+    runs = [{"run_id": f"run-{i}", "task": "t" * 1000} for i in range(300)]
+    fitted, text = fit_reply({"runs": runs, "note": "kept"})
+    assert len(text) <= REPLY_CAP
+    assert json.loads(text) == fitted
+    assert fitted["runs"][-1]["run_id"] == "run-299"  # the oldest runs go first
+    assert fitted["note"] == "kept"
+    assert "runs: its first" in fitted["cut"]
+    fitted, text = fit_reply({"final_text": "\x01" * 200_000})  # six characters each in JSON
+    assert len(text) <= REPLY_CAP
+    assert "final_text: its last" in fitted["cut"]
+    small = {"a": 1}
+    assert fit_reply(small) == (small, reply_text(small))
+
+
+def test_http_token_is_kept_across_restarts(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    from karox6 import cli
+
+    monkeypatch.delenv("KAROX_MCP_TOKEN", raising=False)
+    args = cli._parser().parse_args(["mcp", "--model", "m", "--http", "0"])
+    renew = cli._parser().parse_args(["mcp", "--model", "m", "--http", "0", "--new-token"])
+    token, kept = cli._http_token(args, tmp_path)
+    assert kept == tmp_path / "mcp" / "http-token"
+    assert cli._http_token(args, tmp_path) == (token, kept)  # the next start: same URL
+    if os.name == "posix":
+        assert stat.S_IMODE(kept.stat().st_mode) == 0o600
+    renewed, _ = cli._http_token(renew, tmp_path)
+    assert renewed != token
+    assert cli._http_token(args, tmp_path)[0] == renewed
+    kept.write_text("short\n")  # a damaged file gets a new token
+    fresh, _ = cli._http_token(args, tmp_path)
+    assert len(fresh) >= 16
+    assert fresh not in (token, renewed)
+    assert sorted(p.name for p in kept.parent.iterdir()) == ["http-token"]
+    # A token from the environment wins, leaves it, and is never saved.
+    monkeypatch.setenv("KAROX_MCP_TOKEN", "e" * 32)
+    assert cli._http_token(renew, tmp_path) == ("e" * 32, None)
+    assert "KAROX_MCP_TOKEN" not in os.environ
+    assert kept.read_text().strip() == fresh
 
 
 def test_cli_drops_api_key_from_environment(monkeypatch):

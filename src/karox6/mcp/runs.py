@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import math
 import secrets
 import subprocess
@@ -31,8 +32,15 @@ MAX_EVENTS = 4000
 MAX_RUNS = 200
 FIELD_CAP = 2000
 DIFF_CAP = 40_000
+FINAL_CAP = 50_000
+REPLY_CAP = 100_000  # characters of one tool reply's JSON text, as reply_text prints it
 WAIT_CAP_S = 50.0
 SKIPPED_EVENTS = frozenset({"text_delta", "reasoning_delta", "usage"})
+
+
+def reply_text(data: Any) -> str:
+    """A tool reply as the client reads it (the text content of the MCP result)."""
+    return json.dumps(data, ensure_ascii=False, indent=1)
 
 
 class RunError(Exception):
@@ -49,7 +57,7 @@ class PendingApproval:
         return {
             "approval_id": self.approval_id,
             "tool": self.request.tool,
-            "command": self.request.summary,
+            "command": _cap(self.request.summary, FIELD_CAP),
             "rule": self.request.rule,
             "reason": self.request.reason,
         }
@@ -223,16 +231,18 @@ class RunManager:
             tick = run.tick
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(tick.wait(), timeout=wait_s)
-        first = max(since - run.dropped, 0)
-        events = run.events[first:]
-        view = run.summary()
+        events = run.events[max(since - run.dropped, 0) :]
+        items: list[tuple[int, Any]]  # (event index, what the client gets for it)
         if detail == "brief":
-            view["log"] = [e["line"] for e in events if e.get("line")]
+            key, items = "log", [(e["i"], e["line"]) for e in events if e.get("line")]
         else:
-            view["events"] = [{k: v for k, v in e.items() if k != "line"} for e in events]
+            key = "events"
+            items = [(e["i"], {k: v for k, v in e.items() if k != "line"}) for e in events]
+        view = run.summary()
+        view[key] = []
         view.update(
             next=self._next(run),
-            final_text=run.final_text if not run.running else "",
+            final_text=_cap(run.final_text, FINAL_CAP) if not run.running else "",
             reason=run.reason,
             usage=run.session.usage.to_dict(),
             cost_usd=round(run.session.cost_usd, 6),
@@ -240,6 +250,22 @@ class RunManager:
         )
         if run.dropped and since < run.dropped:
             view["note"] = f"{run.dropped} oldest events were dropped from memory"
+        # Page by size so the reply stays under REPLY_CAP: the rest comes with since=next.
+        # At least one entry goes out, or a client could ask for the same page forever.
+        room = REPLY_CAP - len(reply_text(view)) - 300
+        shown: list[Any] = []
+        for index, item in items:
+            text = reply_text(item)
+            room -= len(text) + 2 * text.count("\n") + 4  # as printed two levels deep
+            if room < 0 and shown:
+                view["next"] = index
+                view["more"] = (
+                    f"{len(items) - len(shown)} more {key} entries did not fit in this reply: "
+                    f"call karox_status with since={index} for the rest"
+                )
+                break
+            shown.append(item)
+        view[key] = shown
         return view
 
     def approve(self, run_id: str, approval_id: str, approved: bool) -> dict[str, Any]:
@@ -289,15 +315,28 @@ class RunManager:
                 "note": "workspace is not a git repository: files only",
             }
         cap = min(max(int(max_chars), 1000), 200_000)
-        truncated = len(text) > cap
-        return {
+        reply: dict[str, Any] = {
             "run_id": run_id,
             "git": True,
             "diff": text[:cap],
-            "truncated": truncated,
+            "truncated": len(text) > cap,
             "total_chars": len(text),
             "untracked": untracked,
         }
+        # JSON escapes (newlines, quotes, tabs) make the reply longer than the diff: cut
+        # until it fits. Each character cut shortens the JSON by at least one.
+        while (excess := len(reply_text(reply)) + 400 - REPLY_CAP) > 0 and reply["diff"]:
+            reply["diff"] = reply["diff"][: max(len(reply["diff"]) - excess, 0)]
+            reply["truncated"] = True
+        if reply["truncated"]:
+            shown = len(reply["diff"])
+            larger = "a larger max_chars, or " if shown == cap else ""
+            reply["note"] = (
+                f"diff cut: {len(text) - shown} of {len(text)} characters left out (one reply "
+                f"holds at most {REPLY_CAP}). For the rest use {larger}a karox_run in this "
+                "directory that shows `git diff HEAD -- <path>` for the files you need."
+            )
+        return reply
 
     def list(self) -> list[dict[str, Any]]:
         return [r.summary() for r in sorted(self.runs.values(), key=lambda r: r.started)]
@@ -305,9 +344,15 @@ class RunManager:
     def get(self, run_id: str) -> Run:
         run = self.runs.get(run_id)
         if run is None:
+            # Runs live in memory only, so after a restart every old id lands here. Say so
+            # plainly: a model told only "unknown run_id" tends to retry it or give up.
             raise RunError(
-                f"unknown run_id {run_id!r} (runs live in this server process only; "
-                "continue an old session with karox_run session_id)"
+                f"unknown run_id {_cap(run_id, 100)!r}: this KaroX server does not know it, "
+                "most likely because the server was restarted (runs are kept in memory "
+                "only). The run's work is still on disk in its workspace: start a new "
+                "karox_run there and check the changes with karox_diff on that run (or with "
+                "git). To continue the same conversation, pass the run's session_id to "
+                "karox_run. karox_runs lists the runs this server knows."
             )
         return run
 
