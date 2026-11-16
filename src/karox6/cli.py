@@ -10,7 +10,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Coroutine, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +19,51 @@ if TYPE_CHECKING:
     from karox6.tools.base import ApprovalRequest
 
 EXIT_CODES = {"completed": 0, "error": 1, "limit": 3, "loop": 4, "cancelled": 130}
+SIGTERM_EXIT = 143  # 128 + SIGTERM
+
+
+def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
+    """asyncio.run, where SIGTERM (POSIX) stops the program the way Ctrl+C does: the main
+    task is cancelled, so `finally` blocks run, child process trees are killed and the
+    session is recorded. MCP clients and process managers stop a server with SIGTERM;
+    left to Python's default the process just vanished and its commands kept running."""
+    import asyncio
+    import signal
+
+    terminated = False
+
+    async def guarded() -> T:
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+
+        def on_sigterm() -> None:
+            nonlocal terminated
+            if not terminated and task is not None:  # a second SIGTERM must not
+                terminated = True  # interrupt the cleanup the first one started
+                task.cancel()
+
+        installed = False
+        if sys.platform != "win32":
+            try:
+                loop.add_signal_handler(signal.SIGTERM, on_sigterm)
+                installed = True
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
+        try:
+            return await main_coro
+        finally:
+            if installed:
+                loop.remove_signal_handler(signal.SIGTERM)
+
+    try:
+        result = asyncio.run(guarded())
+    except asyncio.CancelledError:
+        if terminated:
+            raise SystemExit(SIGTERM_EXIT) from None
+        raise
+    if terminated:
+        raise SystemExit(SIGTERM_EXIT)
+    return result
 
 
 def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
@@ -244,7 +289,6 @@ def _debug_rss() -> int:
 
 
 def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    import asyncio
 
     task = " ".join(args.task).strip()
     if task in ("", "-"):
@@ -256,7 +300,7 @@ def _run(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if not args.model:
         parser.error("--model is required (or set KAROX_MODEL)")
     try:
-        return asyncio.run(_run_async(args, task))
+        return run_async(_run_async(args, task))
     except KeyboardInterrupt:
         return EXIT_CODES["cancelled"]
     except (ValueError, FileNotFoundError) as exc:
@@ -292,12 +336,11 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
 
 
 def _chat(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    import asyncio
 
     if not args.model:
         parser.error("--model is required (or set KAROX_MODEL)")
     try:
-        return asyncio.run(_chat_async(args))
+        return run_async(_chat_async(args))
     except KeyboardInterrupt:
         return 0
     except (ValueError, FileNotFoundError) as exc:
@@ -402,12 +445,11 @@ def _provider(args: argparse.Namespace) -> Any:
 
 
 def _mcp(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    import asyncio
 
     if not args.model:
         parser.error("--model is required (or set KAROX_MODEL)")
     try:
-        asyncio.run(_mcp_async(args))
+        run_async(_mcp_async(args))
     except KeyboardInterrupt:
         pass
     except (ValueError, OSError) as exc:

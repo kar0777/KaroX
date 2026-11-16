@@ -427,3 +427,20 @@ git diff --check
   shell tool did not kill the process tree when its wait was cancelled (`run_code` did).
   Found through an "unclosed transport" warning in the MCP tests, which a `sleep(0.2)` in
   the test had been hiding; the sleep is gone and the warning with it. 631 tests.
+- Windows `bash` (Git Bash) lost backslashes: its runtime parses the Windows command line
+  itself and halves every run of backslashes inside quotes, so a model's `grep -E '\.'`,
+  `'C:\Users'` or `printf 'a\nb'` reached bash broken (probe: 2 sent, 1 received; 4 -> 2),
+  and commands over 32767 characters could not start at all. Git Bash now gets the command
+  as a script file next to the command log (`cmd-NNNN.sh`); POSIX keeps `bash -c`. Tests:
+  1/2/4 backslashes in single quotes, and a 40 000-character command.
+- `karox6 mcp` shutdown, checked as a real process with a fake model running a long command:
+  (1) stdin closed while a `karox_status` long-poll was in flight: the server waited for the
+  long-poll (up to 50 s) before stopping runs, while clients kill it ~2 s after closing
+  stdin, so the command was left running; in-flight requests now get 1 s, then are
+  cancelled (exit < 3 s, command gone). (2) SIGTERM, how Claude Code/Codex stop servers on
+  Linux/macOS: Python died without running `finally`, the command (own session) kept
+  running; `karox run/chat/mcp` now treat SIGTERM like Ctrl+C and exit 143 after cleanup
+  (WSL: old CLI -> "the command outlived the server", new -> pass). stdin is read by a
+  daemon thread with raw reads, so a blocked read no longer holds up the exit. Child
+  process transports are closed explicitly (the "unclosed transport" warning is gone from
+  the suite, checked with warnings as errors). 636 tests (Linux 626 + 11 Windows-only).

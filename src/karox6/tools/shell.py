@@ -43,8 +43,16 @@ class ShellInfo:
     executable: str
     flavor: str  # bash | git-bash | sh | pwsh | powershell
 
-    def argv(self, command: str) -> list[str]:
+    def argv(self, command: str, script: Path | None = None) -> list[str]:
+        """``script``: where Git Bash on Windows gets the command as a file. Its runtime
+        parses the Windows command line itself and halves every run of backslashes inside
+        quotes (a regex, a Windows path, a printf format arrived broken), and a command
+        line is capped at 32767 characters; a script file has neither problem."""
         if self.kind == "bash":
+            if script is not None and self.flavor == "git-bash":
+                script.parent.mkdir(parents=True, exist_ok=True)
+                script.write_bytes(command.encode("utf-8", "replace"))
+                return [self.executable, script.as_posix()]
             return [self.executable, "-c", command]
         return [self.executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
 
@@ -192,7 +200,7 @@ class ShellTool:
         log_path = log_dir / f"cmd-{index:04d}.log"
         try:
             run = await ProcessRun.start(
-                self.shell.argv(command),
+                self.shell.argv(command, script=log_path.with_suffix(".sh")),
                 cwd=cwd,
                 env=shell_env(ctx.env),
                 log_path=log_path,

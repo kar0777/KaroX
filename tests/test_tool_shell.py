@@ -195,6 +195,26 @@ def test_shutdown(ctx):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("count", [1, 2, 4])
+def test_backslashes_reach_the_shell_unchanged(ctx, count):
+    """Git Bash on Windows halved backslash runs taken from its command line."""
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash quoting")
+    backslash = chr(92)
+    for literal in (f"'a{backslash * count}x'", f"'C:{backslash * count}Users'"):
+        result = shell(ctx, command=f"printf '%s|' {literal}")
+        assert result.meta["exit_code"] == 0, result.content
+        assert result.content.count(backslash) == count, result.content
+
+
+def test_command_longer_than_a_windows_command_line(ctx):
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash syntax")
+    result = shell(ctx, command=f"printf '%s' '{'x' * 40_000}' | wc -c")
+    assert result.meta["exit_code"] == 0, result.content[-300:]
+    assert "40000" in result.content
+
+
 def test_cancelled_command_is_killed(ctx, monkeypatch):
     """Cancelling the run (Ctrl+C, karox_cancel) must not leave the command running."""
     from karox6.tools import shell as shell_module

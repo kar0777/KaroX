@@ -14,9 +14,11 @@ import asyncio
 import contextlib
 import hmac
 import json
+import os
 import re
 import secrets
 import sys
+import threading
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 from urllib.parse import urlsplit
@@ -32,15 +34,25 @@ MAX_BATCH = 100
 HEAD_TIMEOUT_S = 30.0  # also how long an idle keep-alive connection stays open
 BODY_TIMEOUT_S = 60.0
 DEFAULT_ORIGINS = ("https://chatgpt.com", "https://chat.openai.com")
+STDIN_EOF_GRACE_S = 1.0  # clients kill a server ~2 s after closing its stdin
 
 
 # -- stdio ------------------------------------------------------------------------------
 
 
 async def serve_stdio(server: McpServer) -> None:
-    """Serve one client on stdin/stdout until stdin closes."""
+    """Serve one client on stdin/stdout until stdin closes.
+
+    A closed stdin means the client is leaving (and will kill the server within a few
+    seconds), so requests still in flight, such as a long-poll, get only a short grace.
+    """
     loop = asyncio.get_running_loop()
     lock = asyncio.Lock()
+    incoming: asyncio.Queue[bytes | None] = asyncio.Queue()
+    reader = threading.Thread(
+        target=_read_stdin, args=(loop, incoming), name="karox-mcp-stdin", daemon=True
+    )
+    reader.start()
 
     async def write(payload: Any) -> None:
         data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
@@ -49,21 +61,56 @@ async def serve_stdio(server: McpServer) -> None:
             sys.stdout.buffer.flush()
 
     async def lines() -> Any:
-        while True:
-            line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
-            if not line:
-                return
+        while (line := await incoming.get()) is not None:
             yield line
 
-    await serve_lines(server, lines(), write)
+    await serve_lines(server, lines(), write, grace_s=STDIN_EOF_GRACE_S)
+
+
+def _read_stdin(loop: asyncio.AbstractEventLoop, incoming: asyncio.Queue[bytes | None]) -> None:
+    """Raw reads of fd 0 in a daemon thread. A read blocked in an executor job would hold
+    up the exit after Ctrl+C or SIGTERM (asyncio.run waits for executor threads), and one
+    blocked inside sys.stdin.buffer holds its lock during interpreter shutdown."""
+
+    def put(item: bytes | None) -> bool:
+        try:
+            loop.call_soon_threadsafe(incoming.put_nowait, item)
+        except RuntimeError:  # the loop is closed: nobody is listening any more
+            return False
+        return True
+
+    fd = sys.stdin.fileno()
+    pending = bytearray()
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            if pending:
+                put(bytes(pending))
+            put(None)
+            return
+        start = len(pending)
+        pending += chunk
+        while (end := pending.find(b"\n", start)) >= 0:
+            if not put(bytes(pending[:end])):
+                return
+            del pending[: end + 1]
+            start = 0
 
 
 async def serve_lines(
     server: McpServer,
     lines: Any,
     write: Callable[[Any], Awaitable[None]],
+    *,
+    grace_s: float | None = None,
 ) -> None:
-    """Handle each JSON-RPC line concurrently (a long-poll must not block other calls)."""
+    """Handle each JSON-RPC line concurrently (a long-poll must not block other calls).
+
+    When the lines end, requests still running get ``grace_s`` (None: all the time they
+    need) and are then cancelled."""
     tasks: set[asyncio.Task[None]] = set()
 
     async def one(raw: bytes) -> None:
@@ -88,7 +135,11 @@ async def serve_lines(
         tasks.add(task)
         task.add_done_callback(tasks.discard)
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        _done, late = await asyncio.wait(list(tasks), timeout=grace_s)
+        for task in late:
+            task.cancel()
+        if late:
+            await asyncio.gather(*late, return_exceptions=True)
 
 
 # -- Streamable HTTP ------------------------------------------------------------------------

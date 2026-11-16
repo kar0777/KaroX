@@ -107,7 +107,16 @@ class ProcessRun:
             return False
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(asyncio.shield(self.reader), 2.0)
+        self._release()
         return True
+
+    def _release(self) -> None:
+        """Close the pipe transport once the process and its reader are done. asyncio
+        closes it from a later callback; a loop that stops first (the end of asyncio.run)
+        leaves it to the garbage collector, which warns about an unclosed transport."""
+        transport = getattr(self.proc, "_transport", None)
+        if transport is not None and self.proc.returncode is not None and self.reader.done():
+            transport.close()
 
     def output_text(self) -> tuple[str, bool]:
         """(text, complete). When output exceeded the buffers, text is head + tail only."""
@@ -142,6 +151,7 @@ class ProcessRun:
             self.reader.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self.reader
+        self._release()
 
 
 def kill_tree(pid: int) -> None:
