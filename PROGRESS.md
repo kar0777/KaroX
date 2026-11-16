@@ -651,7 +651,7 @@ git diff --check
     reasoning cites "smallest" (expected near 0), non-test source files per diff.
   Trials an upstream error stopped (no successful call, or HTTP 402/429/5xx ending the
   run) are excluded from all arms' counts for that task-attempt.
-- 10:05 UTC, grep anchor fix (found by CI on f602eed: `test_mcp_direct` grep `^one$` red on
+- 09:05 UTC, grep anchor fix (found by CI on f602eed: `test_mcp_direct` grep `^one$` red on
   every OS). The Python fallback (no `rg` on PATH, or `KAROX_NO_RG=1`) prefiltered each
   whole file without MULTILINE, so `^`/`$` matched only at the file's start/end and an
   anchored pattern missed every later line; `karox run` was affected wherever rg is
@@ -678,7 +678,16 @@ git diff --check
   letters-only values in code style (`password=letmeinplease`), numeric-only secrets, secrets
   with quotes/backslashes for exact matching, XML `<password>`, `.netrc`, tokens glued to
   ANSI colour codes. 784 passed, 5 skipped on Windows (95 new).
-- 10:15 UTC, merged wt/secrets. Integration fix: the masking loop read `item["text"]` on
+- 09:08 UTC, merged wt/secrets. Integration fix: the masking loop read `item["text"]` on
   every content item, and the screenshot reply (merged in parallel) carries an image item:
   KeyError -> internal error on every screenshot; now only text items are masked (the
   existing screenshot reply test catches it).
+- 09:35 UTC, or1 speed analysis (23 paired tasks, report in
+  karox6-bench-data/reports/or1-speed.md): K6 163 min vs DSH 123 / OC 140 with 11 / 8 / 10
+  solved. Extra time: tests (+19.6 min vs DSH: broad re-runs after passing narrower ones,
+  600 s timeouts on 42% of test commands, waiting on promoted jobs), reasoning per call
+  (+20%), and two runaway replies of 32,768 output tokens that OpenRouter reported as
+  `tool_calls` (4.3 min). Bug fix: openai_chat now treats a reply whose output tokens reach
+  max_tokens as a cut (`length`) whatever finish reason the server sends, so the
+  truncation notice fires and the step is logged as cut. Test scoping, promotion hint and
+  the economy bullet are candidates for a pre-registered A/B on held-out tasks.

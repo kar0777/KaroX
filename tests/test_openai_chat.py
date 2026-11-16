@@ -152,6 +152,17 @@ def test_finish_reason(finish):
     assert result.finish_reason == finish
 
 
+@pytest.mark.parametrize(("output", "finish"), [(100, "length"), (99, "tool_calls")])
+def test_reply_at_the_token_cap_is_a_cut(output, finish):
+    """A router reported tool_calls for 32768-token replies whose arguments were cut."""
+    req = request()
+    req.max_output_tokens = 100
+    call = {"index": 0, "id": "c1", "function": {"name": "bash", "arguments": '{"comm'}}
+    usage = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": output}}
+    result, _ = run_response(sse(chunk({"tool_calls": [call]}, "tool_calls"), usage), req=req)
+    assert result.finish_reason == finish
+
+
 def test_missing_call_id():
     result, _ = run_response(
         sse(chunk({"tool_calls": [{"index": 0, "function": {"name": "read"}}]}, "tool_calls"))
