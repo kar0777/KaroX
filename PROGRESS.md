@@ -599,3 +599,18 @@ git diff --check
   tunnel failure at start (Tailscale not up yet) is exit 2 and so ends the supervisor; no
   login autostart (docs name Task Scheduler / systemd user units). 713 passed, 3 skipped on
   Windows (22 new, 2 newly run).
+- 08:50 UTC: k6n2/k6r2 cancelled before any trial ran: at ~$0.03 per trial the $4 key
+  cannot cover or1 + its OpenCode arm (~$3) and 44 more trials; they go again together
+  with a third arm once the budget allows, so all arms share the upstream and the hour.
+- Dev-pool analysis (Claude subagent, dev tasks only, 41 KaroX + 11 OpenCode trials):
+  of 14 genuine KaroX failures, 7 are "fix too narrow" (a sibling implementation, another
+  entry path or input form of the same bug left unfixed, usually after seeing it), 2 own
+  regressions dismissed as pre-existing (V2's target), 1 deleted behaviour, 3 a hidden
+  edge case OpenCode also misses; none wrong diagnosis or out of steps. OpenCode's process
+  numbers match KaroX's (first edit at call 33 both, 9.7 vs 9.6 files read, 7.1 vs 6.8 test
+  runs); the difference is the scope of the fix. KaroX quotes BASE_PROMPT's "Make the
+  smallest change that fully solves the task" in 26 of 42 trials (checked by hand: e.g.
+  "Should we fix confluent too? 'Make smallest change fully solves task' -> no."), OpenCode
+  and DSH never. Candidate S1 for the next A/B: replace that line with a root-cause-wide
+  scope rule (fix the faulty logic in sibling implementations and other entry points,
+  preferably at the shared point; keep the diff focused).
