@@ -796,3 +796,7 @@ git diff --check
   agent wall <= 90% of V2's; upstream-failed trials excluded for both arms of that task.
   The verdict holds for GLM; it is the decision basis for merging T into main (DeepSeek
   confirmation only if budget returns). No control arm (concurrency).
+- 19:09 UTC, user stopped the held-out GLM run (43913446007 hv2, 43913476747 hvt) after 2 of
+  20 tasks per arm (14: 25 vs 26 min, 15: 60 vs 57 min): no verdict under the 16:58 rule;
+  T is not adopted and stays on wt/speed. Main keeps dev9 behaviour (600 s cap, old verify
+  bullet). FreeInference concurrency (2) is per account; a second key shares it.
