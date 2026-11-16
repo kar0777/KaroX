@@ -707,3 +707,26 @@ git diff --check
   (stash-and-rerun checks); the speed candidates target that. Evaluator:
   scratchpad ab.py (F2P/P2P from data/val_new.jsonl, env failures = P2P failing in every
   attempt of the task across arms).
+- 09:50 UTC, speed bundle T, pre-registered before any run (branch wt/speed, wheel
+  6.0.0.dev9+t = main + three changes):
+  1. BASE_PROMPT "Verify your work..." bullet -> "Verify your work with the narrowest tests
+     that exercise your change (test ids, -k, the test file of the module you changed) or a
+     short reproduction script, and check the [exit code: N] marker of every command.
+     After a fix, re-run what failed before widening. Run a broader selection (a test
+     directory or the whole suite) at most once, at the end, and only if it should finish
+     within about two minutes; start a longer one in the background and keep working. Do
+     not re-run a slow selection, or a wider one that contains it, unless code it covers
+     changed since. Fix failures your change caused before you finish."
+  2. bash foreground cap 600 s -> 300 s (the command keeps running as a background job).
+  3. The promotion marker adds "If it runs more than you need (a whole suite or
+     directory), job_kill it and run a narrower command; otherwise ...".
+  Rule for the next held-out OpenRouter run (the 20 held-out tasks or1 did not use: 14,
+  15, 16, 17, 25, 26, 27, 29, 30, 33, 37, 38, 42, 43, 53, 55, 63, 64, 67, 72; 1 attempt;
+  arm V2 = dev9 + the V2 sentence, arm VT = dev9+t + the V2 sentence, plus a dev9 control
+  if the budget allows): VT is adopted if its solved trials >= V2's - 1, its
+  P2P-regression trials <= V2's + 1 and its summed agent wall time <= 90% of V2's;
+  otherwise rejected. With a control arm, V2 is adopted if solved >= control's and LLM
+  calls <= 110% of control's. Upstream-failed trials are excluded for all arms of that
+  task. A FreeInference GLM smoke (tasks 19 and 20, 1 attempt, VT only) comes first and is
+  not a verdict: it only checks that the prompt and the marker are live and counts test
+  commands and their time.
