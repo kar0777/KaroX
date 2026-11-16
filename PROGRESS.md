@@ -296,3 +296,19 @@ git diff --check
   $4.57, 1.21x") compared KaroX's 50 held-out tasks with the rivals' whole baseline run
   (all 61 tasks). On the same 50 held-out tasks (`uncached.py --heldout`, flag added) the
   k6h1s numbers are KaroX $2.91, DSH $2.04, OpenCode $4.10: KaroX 1.43x DSH, not 1.21x.
+- k6h3s partial (49 of 50 trials, task 70 still running at 02:35 UTC): KaroX 15/49, DSH
+  17/50, OpenCode 15/50; raw usage $3.11 vs $2.30 vs $4.80; 10.9 vs 4.7 vs 7.9 min per
+  trial. Against k6h1s the only change in solved tasks is 35 (3 of 4 F2P tests, model
+  variance). Agent time split on the 48 finished runs: 472 min total, 189 min inside tools
+  (mostly broad test runs and long background checks), 284 min in model calls.
+- V1 decision rule (proportional verification), fixed before the run: dev6 with
+  `--append-system-prompt "Keep verification proportional to the change: run the tests
+  that cover the code you changed and a short reproduction, and a wider test run at most
+  once. Do not write extra test tooling or wait on long background runs. Once the relevant
+  tests pass, stop and report."` on the 11 dev tasks, 1 attempt, Synthetic, after C1.
+  Same reference as B1/C1 (9 solved; 55 LLM calls per task on E1's 9 clean tasks). V1
+  becomes the candidate for the next held-out run if it solves >= 9 with <= 47 calls per
+  task (-15%) on those 9; otherwise it is rejected. BASE_PROMPT does not change tonight
+  either way. Provenance: the wording is generic; the motivation is the dev-pool phase
+  analysis (E1/B1: 2-20 steps after the last edit) plus the aggregate held-out time split
+  above, looked at after the held-out run was scored (no task content used).
