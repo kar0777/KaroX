@@ -331,3 +331,15 @@ git diff --check
   cancel notice for an unsent request, httpx timeout below the connect timeout). Live check
   against `karox6 mcp` over stdio: 7 tools in 0.23 s; killed server restarted in 0.2 s.
   624 tests.
+- C1 verdict (run 43794614606, tag k6c1, dev6 + `--code-mode`; report
+  `karox6-bench-data/reports/dev-k6c1`): 6/11 solved (DSH 7, OpenCode 9), 4 of E1's 9 clean
+  tasks, 40 LLM calls per task on them. Rejected by the rule (needs >= 9): code mode stays
+  opt-in. But the model never called `run_code` (0 calls in 11 trials, although the tool
+  was offered: 11 tools instead of 10), so C1 measured dev6 with one unused tool, not code
+  mode. What it does show is the noise of one attempt per task: against E1 the same base
+  prompt lost 13, 39, 46, 59 and won 52. Code mode needs a prompt nudge to be used at all;
+  that is a separate A/B (not tonight).
+- k6n1 control, fixed before its run: dev6 without flags on the 11 dev tasks, 1 attempt,
+  Synthetic, right after V1. Purpose: a same-wheel, same-night reference for V1 and a second
+  noise sample; no adoption decision rides on it. V1 is still judged by its rule above;
+  V1 vs k6n1 is reported alongside.
