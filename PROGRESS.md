@@ -753,7 +753,7 @@ git diff --check
   Reviews of dev8..dev9 delegated: codex gpt-6.1-terra and opencode deepseek-v4.1-flash-free
   (secret masking, grep, cut detection), agy Gemini 4 Hydrogen (screenshot, direct mode,
   supervisor).
-- 10:40 UTC, review fixes (codex gpt-6.1-terra on masking/grep/cut; agy Gemini 4 Hydrogen
+- 10:20 UTC, review fixes (codex gpt-6.1-terra on masking/grep/cut; agy Gemini 4 Hydrogen
   on screenshot/direct/supervisor; each finding checked before acting):
   - direct mode: `confirmed: true` now runs only a call that was refused before (same name
     and arguments), once, within 15 minutes; a model can no longer skip the refusal that
