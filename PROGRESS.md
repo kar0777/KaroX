@@ -771,7 +771,7 @@ git diff --check
     cut detection (a stop at exactly max_tokens is treated as a cut; harmless notice).
   - Open (not done, logged): direct-mode jobs, file-tracker sets and spill files grow for
     the server's lifetime (Gemini); the agent-mode marker guard (codex).
-- 10:30 UTC, jobs: finished jobs whose end was already reported are forgotten beyond the
+- 10:24 UTC, jobs: finished jobs whose end was already reported are forgotten beyond the
   newest 50, so a long-lived `karox mcp --direct` server does not keep every job (Gemini's
   growth finding; agent runs never reach 50 finished jobs, so bench behaviour is unchanged).
   File-tracker sets and spill files still grow with use (small; logged).
