@@ -147,6 +147,21 @@ Example for a client that starts servers itself (Claude Desktop, Cursor and simi
 {"mcpServers": {"karox": {"command": "karox", "args": ["mcp", "--root", "/path/to/project"]}}}
 ```
 
+Claude Code: `claude mcp add karox -- karox mcp --root /path/to/project`. Codex CLI, in
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.karox]
+command = "karox"
+args = ["mcp", "--root", "/path/to/project"]
+```
+
+The model, provider and key come from your KaroX settings and environment as usual (or add
+`--model ...` to the arguments). When the client goes away (it closes the connection, stops
+the server with SIGTERM, or kills it outright on Windows), running tasks are cancelled and
+their commands stopped; a request the client cancels gets no answer, while its run goes on
+until `karox_cancel`.
+
 Using KaroX from ChatGPT on the web: [chatgpt.md](chatgpt.md).
 
 ## Experimental options

@@ -152,6 +152,21 @@ karox run --resume last "теперь обнови changelog"
 {"mcpServers": {"karox": {"command": "karox", "args": ["mcp", "--root", "/path/to/project"]}}}
 ```
 
+Claude Code: `claude mcp add karox -- karox mcp --root /path/to/project`. Codex CLI, в
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.karox]
+command = "karox"
+args = ["mcp", "--root", "/path/to/project"]
+```
+
+Модель, провайдер и ключ берутся из настроек и окружения KaroX как обычно (или добавьте
+`--model ...` в аргументы). Когда клиент уходит (закрывает соединение, останавливает сервер
+через SIGTERM или просто убивает его на Windows), запущенные задачи отменяются, а их команды
+останавливаются; запрос, который клиент отменил, остаётся без ответа, а сама задача идёт
+дальше до `karox_cancel`.
+
 KaroX из ChatGPT в браузере: [chatgpt.ru.md](chatgpt.ru.md).
 
 ## Экспериментальные опции
