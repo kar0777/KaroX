@@ -133,3 +133,15 @@ def test_grep_cap(ctx, backend):
 def test_grep_empty(ctx, backend):
     (ctx.workspace / "a").write_text("nothing")
     assert call(GrepTool(), ctx, pattern="missing").content == "No matches found."
+
+
+def test_grep_anchors_match_every_line(ctx, backend):
+    """^ and $ hold per line in both backends; the Python one used to prefilter the whole
+    file without MULTILINE, so "^two$" found nothing on line 2."""
+    for name, newline in (("lf.txt", b"\n"), ("crlf.txt", b"\r\n")):
+        (ctx.workspace / name).write_bytes(newline.join([b"one", b"two", b"three two", b""]))
+    result = call(GrepTool(), ctx, pattern="^two$")
+    assert "lf.txt\nLine 2: two" in result.content
+    assert "crlf.txt\nLine 2: two" in result.content
+    assert "three" not in result.content
+    assert call(GrepTool(), ctx, pattern="two$").content.count("Line 3: three two") == 2

@@ -255,7 +255,8 @@ class GrepTool:
 async def _grep_rg(
     rg: str, root: Path, pattern: str, include: str | None, ctx: ToolContext
 ) -> ToolResult | None:
-    argv = [rg, "--no-config", "--json", "--regexp", pattern]
+    # --crlf: $ also matches before CRLF, so anchors work in Windows-style files.
+    argv = [rg, "--no-config", "--json", "--crlf", "--regexp", pattern]
     if include:
         argv += ["--glob", include]
     argv.append(".")
@@ -317,6 +318,9 @@ def _grep_py(root: Path, regex: re.Pattern[str], include: str | None) -> list[tu
     else:
         files, base = _list_files(root, include_ignored=False), root
     inc = glob_regex(include) if include else None
+    # The whole-file prefilter must read ^ and $ per line, as the line search (and rg) do:
+    # without MULTILINE, "^def x" matched only on a file's first line.
+    whole = re.compile(regex.pattern, regex.flags | re.MULTILINE)
     hits: list[tuple[str, int, str]] = []
     for rel in files:
         if inc is not None and not inc.match(rel):
@@ -331,7 +335,7 @@ def _grep_py(root: Path, regex: re.Pattern[str], include: str | None) -> list[tu
         if b"\0" in data[:8000]:
             continue
         text = data.decode("utf-8", "replace")
-        if not regex.search(text):
+        if not whole.search(text.replace("\r\n", "\n")):
             continue
         for number, line in enumerate(text.splitlines(), 1):
             if regex.search(line):

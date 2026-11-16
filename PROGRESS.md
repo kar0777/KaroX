@@ -651,3 +651,11 @@ git diff --check
     reasoning cites "smallest" (expected near 0), non-test source files per diff.
   Trials an upstream error stopped (no successful call, or HTTP 402/429/5xx ending the
   run) are excluded from all arms' counts for that task-attempt.
+- 10:05 UTC, grep anchor fix (found by CI on f602eed: `test_mcp_direct` grep `^one$` red on
+  every OS). The Python fallback (no `rg` on PATH, or `KAROX_NO_RG=1`) prefiltered each
+  whole file without MULTILINE, so `^`/`$` matched only at the file's start/end and an
+  anchored pattern missed every later line; `karox run` was affected wherever rg is
+  missing (rg is present in the bench images, so bench numbers are unaffected). CRLF files
+  also broke `$` in both backends: rg now gets `--crlf`, the prefilter reads `\r\n` as
+  `\n`. Tool-contract bug fix, no prompt or behaviour choice involved: no A/B. New test
+  fails on the old code in both backends, passes now; full suite green on Windows.
