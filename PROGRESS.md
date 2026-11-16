@@ -374,3 +374,10 @@ git diff --check
     >= k6n2's, LLM calls per trial <= 85% of k6n2's, and `run_code` is called in at least
     11 of the 22 trials; otherwise it stays opt-in.
   - A winner becomes the default only after a held-out run.
+- Second review of the MCP client fixes (opencode DeepSeek-V4.1-Flash free, high, 449 s,
+  ~$0.06 API-equivalent): 5 of 7 fixes confirmed, 2 partial, 2 new small defects; fixed:
+  a stdio request now has one time limit covering the send as well (a stuck pipe times
+  out), session renewal waits on its lock within the call's limit and initializes within
+  the connect limit, a stalled cancel notice is cancelled when the HTTP client closes.
+  Kept on purpose: when a server dies, pending calls fail up to 0.5 s later so that the
+  error can quote its stderr. 624 tests; live self-check unchanged.

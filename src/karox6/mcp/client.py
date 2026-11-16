@@ -191,9 +191,10 @@ class StdioConnection:
         self._waiting[rid] = future
         sent = False
         try:
-            await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
-            sent = True
-            reply = await asyncio.wait_for(future, timeout)
+            async with asyncio.timeout(timeout):  # sending counts too: a stuck pipe times out
+                await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+                sent = True
+                reply = await future
         except (TimeoutError, asyncio.CancelledError) as exc:
             if sent and method != "initialize":  # only requests the server has seen
                 timed_out = isinstance(exc, TimeoutError)
@@ -290,10 +291,10 @@ class HttpConnection:
     async def _renew(self, stale: str | None, timeout: float) -> None:
         if self._init_params is None:
             raise McpClientError("HTTP 404 before the session was initialized")
-        async with self._session_lock:
+        async with asyncio.timeout(timeout), self._session_lock:  # waiting counts too
             if self.session_id != stale:
                 return  # a concurrent call already started the new session
-            await self._request("initialize", self._init_params, timeout)
+            await self._request("initialize", self._init_params, min(timeout, CONNECT_TIMEOUT_S))
             await self.notify("notifications/initialized", {})
 
     async def _request(self, method: str, params: dict[str, Any], timeout: float) -> Any:
@@ -355,7 +356,11 @@ class HttpConnection:
 
     async def close(self) -> None:
         if self._background:  # pending cancel notices; asyncio.wait never raises for them
-            await asyncio.wait(set(self._background), timeout=2)
+            _, pending = await asyncio.wait(set(self._background), timeout=2)
+            for task in pending:  # a stalled notice must not outlive the client
+                task.cancel()
+            if pending:
+                await asyncio.wait(pending, timeout=1)
         if self.session_id:
             with contextlib.suppress(Exception):
                 await self.client.delete(self.url, headers=self._headers())
