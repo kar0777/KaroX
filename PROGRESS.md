@@ -836,3 +836,14 @@ git diff --check
   Reading: B adopted into the base prompt only if solved(B) >= solved(A) + 3 with
   upstream-failed tasks (definition above) dropped for both arms; otherwise not adopted
   (1-attempt noise is 3-4 tasks). Wall minutes reported, not a gate.
+- 05:20 UTC, dsg1 result (run 43944899185, 18 DeepSWE tasks, GLM-5.3-Flash, 1 attempt):
+  all tasks: karox6 12, deepseek_harness 10, opencode_v2 7. Pre-registered reading, with
+  upstream-failed tasks (22:40 definition; checked by scratch dsw_upstream.py) dropped for
+  every arm: 9 tasks dropped, all for deepseek_harness ending on a 429 or an empty reply
+  (karox6 and opencode_v2: none); on the other 9: karox6 6, deepseek_harness 8, opencode_v2 4.
+  Both readings are ties under the "gap under 4" rule: KaroX 6 is not shown better than
+  DSH on DeepSWE. KaroX's lead in the raw count comes from surviving the 2-slot 429s that
+  stopped DSH. KaroX misses in the kept set: cattrs (2 of 69, spec sentence misread),
+  kysely (type-level tests: its types accepted calls the tests expect to be type errors),
+  opa (Go build with the hidden tests failed). Four KaroX trials hit the 3600 s cap and
+  still solved 3 of them (collect hook).
