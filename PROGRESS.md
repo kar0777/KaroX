@@ -893,3 +893,30 @@ git diff --check
   done. Tokens on the 4 tasks: input karox6 93M, opencode_v2 55M, deepseek_harness 42M;
   output 0.49M / 0.11M / 0.32M. On 20 shared tasks (dsg1 + v2c) karox6 uses ~1.6x the
   input of the rivals overall, about equal on tasks both arms solved.
+- 2026-11-17 evening, user direction: no 3-4 h comparison runs for small changes, verify
+  without the model where possible, no benchmark gaming (no remaining-time hints), user
+  context limit with a 400k default, data runs only on tasks that are solvable but were
+  not solved on our model, no rival CLIs in those runs.
+  Design review as an argument: Codex (gpt-6.1-sol) and agy (Gemini 4 Argon) each answered
+  a candidate list, then attacked each other's answer and the lead's position; the lead
+  accepted points only on code/data evidence (rejected: remaining-time hints, "reasoning
+  high everywhere", per-edit tsc/go build, read de-duplication, a windowed loop guard with a
+  hard stop, refusing complete calls of a cut-off reply, dropping prune-before-summary).
+  Implemented, tested with scripted providers only (dev12, commits 8e88ad8..4fdce88):
+  context_limit 400k (model window unknown by default, learned per session from a context
+  error), overflow recovery (prune, bounded summary, model-free drop keeping every user
+  message), run deadline bounds compaction and shell/job waits, grep context/literal/
+  ignore_case/files/count, edit returns the changed region with line numbers, finished-job
+  notice carries unread output, read file_paths (20 files / 50 KB), environment lists
+  declared project facts, cancellation keeps finished tool results, three accounting bugs
+  (double-counted replies, non-consecutive truncation limit, tool-call reply to the
+  summary request). Diff reviewed by Codex (terra) and OpenCode (DeepSeek free): 11 real
+  defects, all fixed with tests.
+- Pre-registered data run dsz1: DeepSWE set deepswe0 = 4 tasks GLM-5.3-Flash failed 0/4 on
+  the public leaderboard (mini-swe-agent, max effort) but 19-25 other models solve:
+  claude-code-by-agents-recursive-delegation, httpx-streaming-json-iteration,
+  koota-deferred-mutation-buffer, csstree-shorthand-expansion-compression; oracle 4/4 in
+  our plumbing (run 44134776910). karox6 dev12 only, FreeInference GLM, 1 attempt,
+  parallel 2. Reading: solved count against the leaderboard's 0/16 for this model; any
+  solve is data, not proof (one attempt). Trajectories of failures are read for causes;
+  these 4 tasks then join the tuning pool and stop being evidence.
