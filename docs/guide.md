@@ -52,6 +52,10 @@ Other useful settings: `reasoning_effort`, `temperature`, `context_window`,
 `max_output_tokens`, prices (`price_input`, `price_output`, `price_cached`, USD per 1M
 tokens; they enable cost display and `--max-cost`).
 
+`context_window` is what the model accepts; `context_limit` (default 400000) is your
+working budget. History is compacted near the smaller of the two, so a 1M-token model
+still works in 400k unless you raise the limit.
+
 ## Chat
 
 `karox chat` (or plain `karox` in a terminal) opens a chat in the normal scrollback: the

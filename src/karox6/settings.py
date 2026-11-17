@@ -28,6 +28,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "base_url": (str,),
     "api_key_env": (str,),
     "context_window": (int,),
+    "context_limit": (int,),
     "max_output_tokens": (int,),
     "max_steps": (int,),
     "wrap_up_steps": (int,),

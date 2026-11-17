@@ -89,8 +89,9 @@ class SessionConfig:
     max_seconds: float | None = None
     max_cost_usd: float | None = None
     max_output_tokens: int | None = None
-    context_window: int = 128_000
-    compact_at_tokens: int | None = None  # default: derived from the context window
+    context_window: int = 128_000  # what the served model accepts
+    context_limit: int = 400_000  # the user's working budget; the smaller of the two counts
+    compact_at_tokens: int | None = None  # default: derived from the effective window
     temperature: float | None = None
     reasoning_effort: str | None = None
     price: Price | None = None
@@ -108,11 +109,20 @@ class SessionConfig:
     wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
+    def effective_window(self) -> int:
+        """Tokens the conversation may use: the model's window, capped by the user's limit."""
+        return (
+            min(self.context_window, self.context_limit)
+            if self.context_limit
+            else (self.context_window)
+        )
+
     def compaction_threshold(self) -> int:
         if self.compact_at_tokens:
             return self.compact_at_tokens
+        window = self.effective_window()
         reserve = (self.max_output_tokens or 32_000) + 16_000
-        return max(int(min(self.context_window * 0.8, self.context_window - reserve)), 8_000)
+        return max(int(min(window * 0.8, window - reserve)), 8_000)
 
 
 class Session:
@@ -250,7 +260,15 @@ class Session:
                     break
                 await self._maybe_compact(emit)
                 steps += 1
-                response = await self._call_model(steps, started, emit)
+                try:
+                    response = await self._call_model(steps, started, emit)
+                except ProviderError as exc:
+                    # The conversation outgrew what the provider accepts (our estimate was
+                    # low, or the route's real window is smaller than configured): shrink
+                    # it once and retry instead of losing the run.
+                    if exc.code != "context_window" or not await self._recover_overflow(emit):
+                        raise
+                    response = await self._call_model(steps, started, emit)
                 if response is None:
                     status, reason = "limit", f"time limit {self.config.max_seconds:.0f}s"
                     break
@@ -677,12 +695,51 @@ class Session:
             before = after
         await self._summarize(before, emit)
 
-    async def _summarize(self, before: int, emit: Callable[[ev.Event], None]) -> None:
+    async def _recover_overflow(self, emit: Callable[[ev.Event], None]) -> bool:
+        """After a context-window error: prune every big tool result, then summarize.
+
+        Returns True when the conversation got smaller (the caller retries once).
+        """
+        before = estimate_tokens(self.messages, self.system_prompt)
+        removed = prune_tool_results(self.messages, keep_last=0)
+        if removed:
+            self.store.reset(self.messages)
+            emit(
+                ev.Compacted(
+                    mode="prune", tokens_before=before, tokens_after=before - int(removed / 3.5)
+                )
+            )
+        try:
+            # The head itself may not fit in one request: summarize at most half the window.
+            await self._summarize(
+                estimate_tokens(self.messages, self.system_prompt),
+                emit,
+                head_budget=self.config.effective_window() // 2,
+            )
+        except ProviderError as exc:
+            if exc.code != "context_window":
+                raise
+        after = estimate_tokens(self.messages, self.system_prompt)
+        self._last_input_tokens, self._chars_since_measure = after, 0
+        return after < before
+
+    async def _summarize(
+        self, before: int, emit: Callable[[ev.Event], None], head_budget: int | None = None
+    ) -> None:
         retain = int(self.config.compaction_threshold() * 0.2)
         first_user = next((m for m in self.messages if m.role == "user"), None)
         head, tail = split_for_summary(self.messages, retain)
         if not head:
             return
+        if head_budget is not None:
+            # Keep the newest part of the head that fits; older detail is lost, but the
+            # task message is re-added below and the checkpoint lists the changed files.
+            while len(head) > 1 and estimate_tokens(head, self.system_prompt) > head_budget:
+                head = head[max(len(head) // 4, 1) :]
+                while head and head[0].role == "tool":
+                    head = head[1:]
+            if not head:
+                return
         request = self._request()
         request.messages = self._replay_view([*head, Message("user", COMPACTION_INSTRUCTION)])
         response = await complete_with_retry(self.provider, request, None, self.config.retry)

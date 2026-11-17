@@ -457,3 +457,45 @@ def test_step_limits_by_command(tmp_path):
     assert built("run", "t", "--wrap-up-steps", "0").wrap_up_steps is None
     assert built("run", "t", "--max-steps", "-1").max_steps is None
     assert built("run", "t", "--wrap-up-steps", "-5").wrap_up_steps is None
+
+
+def test_context_limit_caps_the_model_window(tmp_path):
+    cfg = config(tmp_path, context_window=1_048_576)
+    assert cfg.effective_window() == 400_000
+    assert cfg.compaction_threshold() == 320_000
+    assert config(tmp_path, context_window=1_048_576, context_limit=200_000).effective_window() == (
+        200_000
+    )
+    assert config(tmp_path, context_window=64_000).effective_window() == 64_000
+
+
+def test_context_overflow_compacts_and_retries_once(tmp_path):
+    call = ToolCall("id", "read", "{}")
+    messages = [
+        Message("user", "original"),
+        Message("assistant", tool_calls=[call]),
+        Message("tool", "x" * 20000, tool_call_id="id"),
+    ] + [Message("assistant", "tail" * 100) for _ in range(7)]
+    overflow = ProviderError("context_window", "maximum context length exceeded", status=400)
+    provider = ScriptedProvider([Turn(error=overflow), Turn(text="checkpoint"), Turn(text="done")])
+    session = Session(config(tmp_path), provider, messages=messages)
+    events = run(session, "continue")
+    finished = next(e for e in events if isinstance(e, RunFinished))
+    assert finished.status == "completed"
+    assert finished.final_text == "done"
+    assert "prune" in [e.mode for e in events if e.type == "compacted"]
+    assert provider.requests[1].messages[-1].content == COMPACTION_INSTRUCTION
+    assert any(m.meta.get("kind") == "compaction" for m in session.messages)
+
+
+def test_context_overflow_twice_ends_the_run(tmp_path):
+    overflow = ProviderError("context_window", "too long", status=400)
+    messages = [Message("user", "original"), Message("tool", "y" * 20000, tool_call_id="z")]
+    provider = ScriptedProvider(
+        [Turn(error=overflow), Turn(text="checkpoint"), Turn(error=overflow)]
+    )
+    session = Session(config(tmp_path), provider, messages=messages)
+    events = run(session, "continue")
+    finished = next(e for e in events if isinstance(e, RunFinished))
+    assert finished.status == "error"
+    assert "context_window" in finished.reason
