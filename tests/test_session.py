@@ -517,3 +517,43 @@ def test_compaction_respects_the_run_time_limit(tmp_path):
     finished = next(e for e in events if isinstance(e, RunFinished))
     assert finished.elapsed_s < 10
     assert not any(m.meta.get("kind") == "compaction" for m in session.messages)
+
+
+def test_truncation_limit_counts_consecutive_replies(tmp_path):
+    cut = Turn(text="partial", finish_reason="length")
+    ok = Turn(calls=[("glob", {"pattern": "*.none"})])
+    provider = ScriptedProvider([cut, cut, ok, cut, cut, ok, Turn(text="done")])
+    events = run(Session(config(tmp_path), provider))
+    finished = next(e for e in events if isinstance(e, RunFinished))
+    assert finished.status == "completed"
+    assert finished.final_text == "done"
+
+
+def test_compaction_retries_without_tools_after_a_tool_call(tmp_path):
+    messages = [Message("user", "original")] + [Message("assistant", "x" * 400) for _ in range(9)]
+    provider = ScriptedProvider(
+        [Turn(calls=[("glob", {"pattern": "*"})]), Turn(text="checkpoint"), Turn(text="done")]
+    )
+    session = Session(config(tmp_path, compact_at_tokens=100), provider, messages=messages)
+    run(session, "continue")
+    assert provider.requests[0].tools
+    assert provider.requests[1].tools == []
+    assert any(m.meta.get("kind") == "compaction" for m in session.messages)
+
+
+def test_context_estimate_counts_a_reply_once(tmp_path):
+    reply = Turn(text="a" * 35, calls=[("glob", {"pattern": "*.none"})])
+    provider = ScriptedProvider([reply, Turn(text="done")])
+    session = Session(config(tmp_path), provider)
+    seen = []
+    original = session._maybe_compact
+
+    async def spy(emit):
+        seen.append((session._last_input_tokens, session._chars_since_measure))
+        await original(emit)
+
+    session._maybe_compact = spy
+    run(session)
+    args = len(json.dumps({"pattern": "*.none"}))
+    result = next(m for m in session.messages if m.role == "tool")
+    assert seen[1][1] == 35 + args + len(result.content)

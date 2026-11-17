@@ -297,6 +297,7 @@ class Session:
                         await self._run_calls(message.tool_calls, ctx, emit)
                     self._notice("truncated", TRUNCATION_NOTICE, emit)
                     continue
+                truncations = 0  # the limit is on consecutive cut-off replies
                 if not message.tool_calls:
                     final_text = message.content
                     break
@@ -401,9 +402,8 @@ class Session:
         if cost is not None:
             self.cost_usd += cost
         self._last_input_tokens = usage.input_tokens
-        self._chars_since_measure = len(response.message.content) + sum(
-            len(c.arguments) for c in response.message.tool_calls
-        )
+        # The reply itself is counted when it is appended to the history.
+        self._chars_since_measure = 0
         self.store.append("usage", step=step, usage=usage.to_dict(), cost_usd=cost)
         emit(
             ev.UsageUpdate(
@@ -671,7 +671,11 @@ class Session:
 
     def _append(self, message: Message) -> None:
         self.messages.append(message)
-        self._chars_since_measure += len(message.content) + len(message.reasoning or "")
+        self._chars_since_measure += (
+            len(message.content)
+            + len(message.reasoning or "")
+            + sum(len(c.arguments) for c in message.tool_calls)
+        )
         self.store.message(message)
 
     def _notice(self, kind: str, text: str, emit: Callable[[ev.Event], None]) -> None:
@@ -727,6 +731,24 @@ class Session:
         self._last_input_tokens, self._chars_since_measure = after, 0
         return after < before
 
+    async def _summary_call(
+        self, request: ModelRequest, emit: Callable[[ev.Event], None]
+    ) -> str | None:
+        """The checkpoint text ("" when the model gave none); None when out of time."""
+        call = complete_with_retry(self.provider, request, None, self.config.retry)
+        if self._deadline is None:
+            response = await call
+        else:
+            # The run's time limit bounds compaction too (its retries included); on
+            # timeout the history stays as it is and the main loop reports the limit.
+            try:
+                remaining = max(self._deadline - time.monotonic(), 1.0)
+                response = await asyncio.wait_for(call, remaining)
+            except TimeoutError:
+                return None
+        self._account(0, response, emit)
+        return response.message.content.strip()
+
     async def _summarize(
         self, before: int, emit: Callable[[ev.Event], None], head_budget: int | None = None
     ) -> None:
@@ -746,21 +768,15 @@ class Session:
                 return
         request = self._request()
         request.messages = self._replay_view([*head, Message("user", COMPACTION_INSTRUCTION)])
-        call = complete_with_retry(self.provider, request, None, self.config.retry)
-        deadline = self._deadline
-        if deadline is None:
-            response = await call
-        else:
-            # The run's time limit bounds compaction too (its retries included); on
-            # timeout the history stays as it is and the main loop reports the limit.
-            try:
-                response = await asyncio.wait_for(call, max(deadline - time.monotonic(), 1.0))
-            except TimeoutError:
-                return
-        self._account(0, response, emit)
-        summary = response.message.content.strip()
-        if not summary:
+        # Tool schemas stay in the first try so the cached prefix is reused; a model that
+        # answers with a tool call instead of text gets one retry without tools.
+        summary = await self._summary_call(request, emit)
+        if summary is None:
             return
+        if not summary:
+            summary = await self._summary_call(replace(request, tools=[]), emit)
+            if not summary:
+                return
         files = await asyncio.to_thread(self.files.changed_files)
         rebuilt: list[Message] = []
         if first_user is not None and first_user not in tail:
