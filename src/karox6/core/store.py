@@ -87,8 +87,9 @@ class SessionStore:
                 loaded.usage.add(Usage.from_dict(record.get("usage") or {}))
                 loaded.cost_usd += float(record.get("cost_usd") or 0.0)
         # A crash between an assistant tool call and its results leaves dangling calls:
-        # drop the incomplete tail so providers accept the history.
-        loaded.messages = drop_dangling_calls(loaded.messages)
+        # answer them as cancelled so providers accept the history. The results that did
+        # arrive stay: their effects (edited files) are on disk either way.
+        loaded.messages = close_dangling_calls(loaded.messages)
         return loaded
 
     @staticmethod
@@ -119,19 +120,28 @@ def active_sessions(home: Path, exclude: str | None = None) -> list[str]:
     return [name for _, name in sorted(found, reverse=True)]
 
 
-def drop_dangling_calls(messages: list[Message]) -> list[Message]:
+CANCELLED_RESULT = "[cancelled by the user before this call finished]"
+
+
+def close_dangling_calls(messages: list[Message]) -> list[Message]:
+    """``messages`` with the last assistant turn's unanswered tool calls answered as
+    cancelled (results that did arrive are kept)."""
     out = list(messages)
-    while out:
-        last_assistant = max(
-            (i for i, m in enumerate(out) if m.role == "assistant" and m.tool_calls), default=-1
-        )
-        if last_assistant < 0:
-            break
-        wanted = {c.id for c in out[last_assistant].tool_calls}
-        have = {m.tool_call_id for m in out[last_assistant + 1 :] if m.role == "tool"}
-        if wanted <= have:
-            break
-        out = out[:last_assistant]
+    last = max((i for i, m in enumerate(out) if m.role == "assistant"), default=-1)
+    if last < 0 or not out[last].tool_calls:
+        return out
+    answered = {m.tool_call_id for m in out[last + 1 :] if m.role == "tool"}
+    for call in out[last].tool_calls:
+        if call.id not in answered:
+            out.append(
+                Message(
+                    "tool",
+                    CANCELLED_RESULT,
+                    tool_call_id=call.id,
+                    name=call.name,
+                    is_error=True,
+                )
+            )
     return out
 
 

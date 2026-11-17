@@ -33,7 +33,12 @@ from karox6.core.loopguard import LoopGuard
 from karox6.core.messages import Message, Price, ToolCall, Usage
 from karox6.core.prompt import build_system_prompt
 from karox6.core.snapshot import write_snapshot
-from karox6.core.store import SessionStore, default_home, new_session_id
+from karox6.core.store import (
+    CANCELLED_RESULT,
+    SessionStore,
+    default_home,
+    new_session_id,
+)
 from karox6.providers.base import (
     Delta,
     ModelRequest,
@@ -60,7 +65,6 @@ from karox6.tools.shell import ShellInfo, detect_shell
 GENERIC_TOOL_CAP = 60_000
 SUBAGENT_MAX_STEPS = 40
 SUBAGENT_MAX_SECONDS = 900.0
-CANCELLED_RESULT = "[cancelled by the user before this call finished]"
 TRUNCATION_NOTICE = (
     "Your previous response was cut off at the output token limit before it was complete. "
     "Continue from where it stopped. Keep each response shorter: split large file contents "
@@ -460,20 +464,28 @@ class Session:
             async with sem:
                 results[i] = await self._run_one(calls[i], ctx, emit)
 
-        while index < len(calls):
-            tool = self._lookup(calls[index].name)
-            if tool is not None and tool.read_only:
-                batch = [index]
-                while index + len(batch) < len(calls):
-                    nxt = self._lookup(calls[index + len(batch)].name)
-                    if nxt is None or not nxt.read_only:
-                        break
-                    batch.append(index + len(batch))
-                await asyncio.gather(*(one(i) for i in batch))
-                index += len(batch)
-            else:
-                await one(index)
-                index += 1
+        try:
+            while index < len(calls):
+                tool = self._lookup(calls[index].name)
+                if tool is not None and tool.read_only:
+                    batch = [index]
+                    while index + len(batch) < len(calls):
+                        nxt = self._lookup(calls[index + len(batch)].name)
+                        if nxt is None or not nxt.read_only:
+                            break
+                        batch.append(index + len(batch))
+                    await asyncio.gather(*(one(i) for i in batch))
+                    index += len(batch)
+                else:
+                    await one(index)
+                    index += 1
+        except BaseException:
+            # Cancelled (or a bug) mid-batch: keep the results of the calls that finished,
+            # so the history - and a resumed session - shows what was already done.
+            for result in results:
+                if result is not None:
+                    self._append(result)
+            raise
 
         stop: str | None = None
         for call, result in zip(calls, results, strict=True):

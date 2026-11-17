@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import shlex
 import shutil
@@ -11,7 +12,7 @@ from karox6.context.compaction import COMPACTION_INSTRUCTION, split_for_summary
 from karox6.core.events import RunFinished
 from karox6.core.messages import Message, Price, ToolCall, Usage
 from karox6.core.session import Session, SessionConfig
-from karox6.core.store import SessionStore, drop_dangling_calls
+from karox6.core.store import CANCELLED_RESULT, SessionStore, close_dangling_calls
 from karox6.providers.base import ProviderError, RetryPolicy
 from karox6.providers.scripted import ScriptedProvider, Turn
 from karox6.tools.base import ToolResult
@@ -225,12 +226,17 @@ def test_persistence_resume(tmp_path):
     ]
 
 
-def test_dangling_calls():
+def test_dangling_calls_are_answered_and_finished_results_kept():
     messages = [
         Message("user", "task"),
-        Message("assistant", tool_calls=[ToolCall("id", "read", "{}")]),
+        Message("assistant", tool_calls=[ToolCall("a", "edit", "{}"), ToolCall("b", "read", "{}")]),
+        Message("tool", "Edited x.py", tool_call_id="a"),
     ]
-    assert drop_dangling_calls(messages) == messages[:1]
+    closed = close_dangling_calls(messages)
+    assert closed[:3] == messages
+    assert closed[3].tool_call_id == "b"
+    assert closed[3].content == CANCELLED_RESULT
+    assert close_dangling_calls(closed) == closed
 
 
 @pytest.mark.parametrize(
@@ -623,3 +629,42 @@ def test_background_finish_notice_tail_keeps_the_full_log(tmp_path):
     assert "line 1999" in notice
     assert "job_output returns all of them" in notice
     assert "line 0\n" in results(session)[2].content
+
+
+def test_cancel_mid_batch_keeps_finished_results(tmp_path):
+    python = shlex.quote(sys.executable.replace("\\", "/"))
+    slow = python + " -c " + shlex.quote("import time; time.sleep(30)")
+    provider = ScriptedProvider(
+        [
+            Turn(
+                calls=[
+                    ("write", {"file_path": "done.txt", "content": "x"}),
+                    ("bash", {"command": slow}),
+                ]
+            )
+        ]
+    )
+    session = Session(config(tmp_path), provider)
+
+    async def scenario():
+        async def consume():
+            async for _ in session.run("go"):
+                pass
+
+        task = asyncio.create_task(consume())
+        for _ in range(100):
+            await asyncio.sleep(0.1)
+            if (tmp_path / "done.txt").exists():
+                break
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    tool_messages = [m for m in session.messages if m.role == "tool"]
+    assert tool_messages[0].content.startswith("Created done.txt")
+    loaded = SessionStore.load(session.store.home, session.session_id)
+    loaded_tools = [m for m in loaded.messages if m.role == "tool"]
+    assert loaded_tools[0].content.startswith("Created done.txt")
+    assert loaded_tools[1].content == CANCELLED_RESULT
