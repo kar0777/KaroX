@@ -236,7 +236,10 @@ class ShellTool:
             )
 
         try:
-            finished = await run.wait(timeout_ms / 1000)
+            # A wait never outlasts the run's time limit; the command keeps running as a
+            # background job, as on any timeout.
+            waited_s = ctx.wait_cap_s(timeout_ms / 1000)
+            finished = await run.wait(waited_s)
         except BaseException:  # the run was cancelled: the command must not outlive it
             await run.kill_on_cancel()
             raise
@@ -257,7 +260,8 @@ class ShellTool:
             job = ctx.jobs.register(run)
             job.read_offset = run.total_bytes
             marker = (
-                f"[still running after {timeout_ms} ms; moved to background job {job.id}. "
+                f"[still running after {int(waited_s * 1000)} ms; moved to background job "
+                f"{job.id}. "
                 "Use job_output to read more output or wait for it, job_kill to stop it.]"
             )
             meta = {"job_id": job.id, "timed_out": True}

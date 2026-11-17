@@ -236,6 +236,7 @@ class Session:
             shell=self.shell,
             approve=self._make_approver(emit),
             emit=emit,
+            deadline=self._deadline,
         )
         emit(
             ev.RunStarted(

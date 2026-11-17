@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,13 @@ class ToolContext:
     approve: Approver = deny_all
     emit: Callable[[Event], None] = lambda _event: None
     env: dict[str, str] = field(default_factory=dict)
+    deadline: float | None = None  # time.monotonic() at which the run's time limit ends
+
+    def wait_cap_s(self, wanted_s: float) -> float:
+        """``wanted_s`` cut to the time left in the run (at least one second)."""
+        if self.deadline is None:
+            return wanted_s
+        return max(min(wanted_s, self.deadline - time.monotonic()), 1.0)
 
     @property
     def spill_dir(self) -> Path:

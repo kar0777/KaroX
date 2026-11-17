@@ -349,3 +349,17 @@ def test_finished_reported_jobs_are_forgotten_beyond_a_limit():
     assert jobs.get("1") is None
     assert jobs.get(str(KEEP_FINISHED + 10)) is not None
     assert jobs.get(running.id) is running
+
+
+def test_shell_wait_stops_at_the_run_deadline(ctx):
+    async def scenario():
+        ctx.deadline = time.monotonic() + 1.0
+        started = time.monotonic()
+        result = await ShellTool(ctx.shell).run(
+            {"command": python("import time; time.sleep(4)"), "timeout": 60_000}, ctx
+        )
+        assert result.meta["timed_out"]
+        assert time.monotonic() - started < 3.5
+        await JobKillTool().run({"job_id": result.meta["job_id"]}, ctx)
+
+    asyncio.run(scenario())

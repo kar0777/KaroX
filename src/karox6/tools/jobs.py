@@ -132,7 +132,7 @@ class JobOutputTool:
         wants_wait = args.get("wait") is not False and bool(args.get("wait") or args.get("timeout"))
         if wants_wait and job.run.returncode is None:
             timeout_ms = min(max(int(args.get("timeout") or 30_000), 1), 600_000)
-            await job.run.wait(timeout_ms / 1000)
+            await job.run.wait(ctx.wait_cap_s(timeout_ms / 1000))
         text = await ctx.jobs.read_new(job, ctx.spill_dir)
         if job.run.returncode is not None:
             job.notified = True
