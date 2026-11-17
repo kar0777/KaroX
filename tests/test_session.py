@@ -582,3 +582,44 @@ def test_context_overflow_without_summary_drops_the_head(tmp_path):
     assert "No summary" in session.messages[1].content
     assert session.config.context_window is not None
     assert session.config.context_window < before
+
+
+def test_background_finish_notice_carries_the_unread_output(tmp_path):
+    python = shlex.quote(sys.executable.replace("\\", "/"))
+    short = python + " -c " + shlex.quote("import time; time.sleep(0.3); print('FAILED x')")
+    wait = python + " -c " + shlex.quote("import time; time.sleep(0.8)")
+    provider = ScriptedProvider(
+        [
+            Turn(calls=[("bash", {"command": short, "run_in_background": True})]),
+            Turn(calls=[("bash", {"command": wait})]),
+            Turn(calls=[("job_output", {"job_id": "1"})]),
+            Turn(text="done"),
+        ]
+    )
+    session = Session(config(tmp_path), provider)
+    assert finish(run(session)).status == "completed"
+    notice = results(session)[1].content
+    assert "exited with code 0" in notice
+    assert "Unread output:\nFAILED x" in notice
+    assert "FAILED x" not in results(session)[2].content  # already shown, not repeated
+
+
+def test_background_finish_notice_tail_keeps_the_full_log(tmp_path):
+    python = shlex.quote(sys.executable.replace("\\", "/"))
+    code = "import time; time.sleep(0.3); [print('line', i) for i in range(2000)]"
+    loud = python + " -c " + shlex.quote(code)
+    wait = python + " -c " + shlex.quote("import time; time.sleep(1.0)")
+    provider = ScriptedProvider(
+        [
+            Turn(calls=[("bash", {"command": loud, "run_in_background": True})]),
+            Turn(calls=[("bash", {"command": wait})]),
+            Turn(calls=[("job_output", {"job_id": "1"})]),
+            Turn(text="done"),
+        ]
+    )
+    session = Session(config(tmp_path), provider)
+    assert finish(run(session)).status == "completed"
+    notice = results(session)[1].content
+    assert "line 1999" in notice
+    assert "job_output returns all of them" in notice
+    assert "line 0\n" in results(session)[2].content

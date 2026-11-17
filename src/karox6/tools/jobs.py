@@ -66,8 +66,8 @@ class JobManager:
             if job.killed_by_model:
                 continue
             notes.append(
-                f"[background job {job.id} finished ({job.status}): {_short(job.run.command)}. "
-                "Read its output with job_output.]"
+                f"[background job {job.id} finished ({job.status}): {_short(job.run.command)}."
+                f"{_unread_tail(job)}]"
             )
         return notes
 
@@ -94,6 +94,34 @@ class JobManager:
         for job in self._jobs.values():
             with contextlib.suppress(Exception):
                 await job.run.kill()
+
+
+NOTICE_TAIL_CHARS = 2_000
+
+
+def _unread_tail(job: Job) -> str:
+    """The output the model has not read yet, when short; else its last lines. Only a
+    complete read moves the job's read offset, so job_output still returns everything."""
+    with contextlib.suppress(Exception):
+        job.run._flush_log()
+    try:
+        with job.run.log_path.open("rb") as fh:
+            fh.seek(job.read_offset)
+            data = fh.read()
+    except Exception:  # a notice must never break the step that carries it
+        return " Read its output with job_output."
+    text = clean_text(data).rstrip()
+    if not text:
+        job.read_offset += len(data)
+        return " No unread output."
+    if len(text) <= NOTICE_TAIL_CHARS:
+        job.read_offset += len(data)
+        return f" Unread output:\n{text}\n"
+    tail = text[-NOTICE_TAIL_CHARS:]
+    tail = tail[tail.find("\n") + 1 :] if "\n" in tail else tail
+    return (
+        f" Last lines of {len(text)} unread characters (job_output returns all of them):\n{tail}\n"
+    )
 
 
 def _short(command: str, limit: int = 80) -> str:
