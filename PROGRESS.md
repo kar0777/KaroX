@@ -881,3 +881,15 @@ git diff --check
   ends. Reading: solved per arm, upstream-failed trials (22:40 definition) dropped for every
   arm of that task. Four tasks at one attempt cannot prove KaroX better (noise is 3-4 tasks
   on 11); the result is data. opa's miss (test name collision) shaped one v2 sentence.
+- 16:00 UTC, v2f final: kysely solved too (55 min), so dev11 solved all 3 dsg1 KaroX misses
+  (tasks that shaped v2; sanity data only).
+- 16:00 UTC, v2c result (run 44070073090, dev11, 1 attempt, parallel 2): all 4 tasks:
+  opencode_v2 3, karox6 2, deepseek_harness 1. Pre-registered reading: koota-pair dropped
+  (deepseek_harness ended on an empty reply after 1.6 min; dsw_upstream.py missed it, found
+  by hand in dsh.jsonl); on opa, scriggo, textual: karox6 2, opencode_v2 2,
+  deepseek_harness 1. A tie. KaroX solved opa and textual (dsg1 misses) and lost scriggo
+  (dsg1 solved): 48/48 F2P but 3 P2P TestIssue967 cases broken, ran to the 3550 s limit;
+  koota-pair 37/38 F2P. Both losses are near misses where the final broad test run was not
+  done. Tokens on the 4 tasks: input karox6 93M, opencode_v2 55M, deepseek_harness 42M;
+  output 0.49M / 0.11M / 0.32M. On 20 shared tasks (dsg1 + v2c) karox6 uses ~1.6x the
+  input of the rivals overall, about equal on tasks both arms solved.
