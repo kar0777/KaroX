@@ -7,6 +7,7 @@ details live in the tool descriptions, as in DSH.
 from __future__ import annotations
 
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -73,7 +74,80 @@ def environment_block(workspace: Path, shell: ShellInfo) -> str:
     hint = python_hint()
     if hint:
         lines.append(f"- {hint}")
+    lines.extend(f"- {item}" for item in project_inventory(workspace))
     return "\n".join(lines)
+
+
+_MAKE_TARGET = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?![:=])", re.M)
+_LOCKFILES = (
+    ("pnpm-lock.yaml", "pnpm"),
+    ("yarn.lock", "yarn"),
+    ("bun.lockb", "bun"),
+    ("bun.lock", "bun"),
+    ("package-lock.json", "npm"),
+)
+
+
+def project_inventory(workspace: Path, max_items: int = 12) -> list[str]:
+    """What the project declares at its top level: build files, script names, make
+    targets and a local virtualenv. Files are only read, nothing is run, and no command is
+    presented as "the" test command - the model still decides what to run."""
+    out: list[str] = []
+
+    def text(name: str) -> str | None:
+        path = workspace / name
+        try:
+            if path.is_file() and path.stat().st_size < 512 * 1024:
+                return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        return None
+
+    def names(items: list[str]) -> str:
+        shown = ", ".join(items[:max_items])
+        return shown + (f" (+{len(items) - max_items} more)" if len(items) > max_items else "")
+
+    py = [
+        n for n in ("pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "pytest.ini") if text(n)
+    ]
+    if py:
+        pyproject = text("pyproject.toml") or ""
+        pytest_cfg = "[tool.pytest" in pyproject or text("pytest.ini") is not None
+        note = "; pytest configured" if pytest_cfg else ""
+        out.append(f"Python project files: {', '.join(py)}{note}")
+    for venv in (".venv", "venv"):
+        for exe in ("bin/python", "Scripts/python.exe"):
+            if (workspace / venv / exe).is_file():
+                out.append(f"Project virtualenv: {venv}/{exe}")
+                break
+        else:
+            continue
+        break
+    package = text("package.json")
+    if package is not None:
+        import json
+
+        try:
+            scripts = list((json.loads(package).get("scripts") or {}).keys())
+        except (ValueError, AttributeError):
+            scripts = []
+        manager = next((m for f, m in _LOCKFILES if (workspace / f).is_file()), None)
+        via = f" (lockfile: {manager})" if manager else ""
+        listed = f"; scripts: {names(scripts)}" if scripts else ""
+        out.append(f"package.json{via}{listed}")
+    go_mod = text("go.mod")
+    if go_mod is not None:
+        module = re.search(r"^module\s+(\S+)", go_mod, re.M)
+        out.append(f"Go module: {module.group(1) if module else 'go.mod'}")
+    if text("Cargo.toml") is not None:
+        out.append("Rust crate: Cargo.toml")
+    for name in ("Makefile", "makefile", "justfile"):
+        body = text(name)
+        if body is not None:
+            targets = [t for t in dict.fromkeys(_MAKE_TARGET.findall(body)) if t != "PHONY"]
+            out.append(f"{name} targets: {names(targets)}" if targets else name)
+            break
+    return out
 
 
 def python_hint() -> str | None:
