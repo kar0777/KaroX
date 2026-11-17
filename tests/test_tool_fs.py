@@ -282,3 +282,35 @@ def test_edit_replace_all_has_no_snippet(ctx):
         EditTool(), ctx, file_path="file", old_string="x", new_string="z", replace_all=True
     )
     assert "edited region" not in result.content
+
+
+def test_read_several_files_in_one_call(ctx):
+    (ctx.workspace / "a.txt").write_text("alpha\n")
+    (ctx.workspace / "b.txt").write_text("beta\n")
+    result = call(ReadTool(), ctx, file_paths=["a.txt", "missing.txt", "b.txt"])
+    assert not result.is_error
+    text = result.content
+    assert text.index("<path>a.txt</path>") < text.index("missing.txt") < text.index("b.txt")
+    assert "1: alpha" in text
+    assert "1: beta" in text
+    assert "missing.txt does not exist" in text
+    assert ctx.files.seen(ctx.workspace / "a.txt")
+    assert ctx.files.seen(ctx.workspace / "b.txt")
+
+
+def test_read_several_files_share_one_byte_budget(ctx):
+    from karox6.tools.fs import READ_MAX_BYTES
+
+    line = "x" * 99 + "\n"
+    (ctx.workspace / "big.txt").write_text(line * (READ_MAX_BYTES // 100 + 50))
+    (ctx.workspace / "big2.txt").write_text(line * 100)
+    result = call(ReadTool(), ctx, file_paths=["big.txt", "big2.txt"])
+    first, second = result.content.split("<path>big2.txt</path>")
+    assert "Use offset=" in first
+    assert "Use offset=" in second or "(Not read" in second
+    assert len(result.content.encode()) < READ_MAX_BYTES + 2_000
+
+
+def test_read_needs_a_path(ctx):
+    assert call(ReadTool(), ctx).is_error
+    assert call(ReadTool(), ctx, file_paths=["nope"]).is_error

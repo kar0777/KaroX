@@ -45,8 +45,9 @@ class ReadTool:
     description = (
         "Read a UTF-8 text file and return line-numbered content (`N: text`). Reads up to "
         f"{READ_LIMIT} lines from `offset` (1-based); use offset and limit to continue in large "
-        "files. A directory path lists its entries. Use this tool, not shell commands like cat, "
-        "to inspect files."
+        "files. A directory path lists its entries. `file_paths` reads several whole files in "
+        f"one call (together at most {READ_MAX_BYTES // 1024} KB). Use this tool, not shell "
+        "commands like cat, to inspect files."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -54,64 +55,111 @@ class ReadTool:
             "file_path": {"type": "string", "description": "Path to the file."},
             "offset": {"type": "integer", "description": "First line to read (1-based)."},
             "limit": {"type": "integer", "description": f"Lines to read (default {READ_LIMIT})."},
+            "file_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Several files to read from the start, instead of file_path.",
+            },
         },
-        "required": ["file_path"],
     }
     read_only = True
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        path = ctx.resolve(str(args.get("file_path") or args.get("path") or ""))
-        shown = _display(path, ctx)
-        if not path.exists():
-            return ToolResult(f"Error: {shown} does not exist.", is_error=True)
-        if path.is_dir():
-            return ToolResult(_list_dir(path, shown))
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            return ToolResult(f"Error: cannot read {shown}: {exc}", is_error=True)
-        if _is_binary(data):
+        many = args.get("file_paths")
+        if isinstance(many, list) and many and not args.get("file_path"):
+            return _read_many([str(p) for p in many], ctx)
+        raw = str(args.get("file_path") or args.get("path") or "")
+        if not raw:
             return ToolResult(
-                f"Error: {shown} is a binary file ({len(data)} bytes).", is_error=True
+                "Error: invalid arguments: give file_path (or file_paths).", is_error=True
             )
-        ctx.files.observe(path)
-        lines = _decode(data).replace("\r\n", "\n").split("\n")
-        if lines and lines[-1] == "":
-            lines.pop()
-        total = len(lines)
-        offset = max(int(args.get("offset") or 1), 1)
-        limit = max(int(args.get("limit") or READ_LIMIT), 1)
-        if total and offset > total:
-            return ToolResult(
+        result, _ = _read_file(
+            raw, ctx, int(args.get("offset") or 1), int(args.get("limit") or READ_LIMIT)
+        )
+        return result
+
+
+def _read_many(paths: list[str], ctx: ToolContext) -> ToolResult:
+    parts: list[str] = []
+    errors = 0
+    budget = READ_MAX_BYTES
+    for raw in paths:
+        if budget <= 0:
+            parts.append(
+                f"<path>{raw}</path>\n(Not read: this call's {READ_MAX_BYTES // 1024} KB are "
+                "used up. Read it separately.)"
+            )
+            continue
+        result, used = _read_file(raw, ctx, 1, READ_LIMIT, budget)
+        budget -= used
+        errors += result.is_error
+        parts.append(result.content)
+    return ToolResult("\n\n".join(parts), is_error=errors == len(paths))
+
+
+def _read_file(
+    raw: str, ctx: ToolContext, offset: int, limit: int, max_bytes: int = READ_MAX_BYTES
+) -> tuple[ToolResult, int]:
+    """One file's read result and the bytes of content it used."""
+    path = ctx.resolve(raw)
+    shown = _display(path, ctx)
+    if not path.exists():
+        return ToolResult(f"Error: {shown} does not exist.", is_error=True), 0
+    if path.is_dir():
+        listing = _list_dir(path, shown)
+        return ToolResult(listing), len(listing)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return ToolResult(f"Error: cannot read {shown}: {exc}", is_error=True), 0
+    if _is_binary(data):
+        return (
+            ToolResult(f"Error: {shown} is a binary file ({len(data)} bytes).", is_error=True),
+            0,
+        )
+    ctx.files.observe(path)
+    lines = _decode(data).replace("\r\n", "\n").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    total = len(lines)
+    offset = max(offset, 1)
+    limit = max(limit, 1)
+    if total and offset > total:
+        return (
+            ToolResult(
                 f"Error: offset {offset} is past the end of {shown} ({total} lines).",
                 is_error=True,
-            )
-        out: list[str] = []
-        size = 0
-        last = offset - 1
-        for number in range(offset, min(offset + limit, total + 1)):
-            line = lines[number - 1]
-            if len(line) > READ_MAX_LINE:
-                line = line[:READ_MAX_LINE] + f"... (line truncated to {READ_MAX_LINE} chars)"
-            entry = f"{number}: {line}"
-            size += len(entry.encode("utf-8")) + 1
-            if out and size > READ_MAX_BYTES:
-                break
-            out.append(entry)
-            last = number
-        if total == 0:
-            footer = "(Empty file.)"
-        elif last >= total:
-            footer = f"(End of file - {total} lines.)"
-        else:
-            footer = (
-                f"(Showing lines {offset}-{last} of {total}. Use offset={last + 1} to continue.)"
-            )
-        body = "\n".join(out)
-        return ToolResult(
+            ),
+            0,
+        )
+    out: list[str] = []
+    size = 0
+    last = offset - 1
+    for number in range(offset, min(offset + limit, total + 1)):
+        line = lines[number - 1]
+        if len(line) > READ_MAX_LINE:
+            line = line[:READ_MAX_LINE] + f"... (line truncated to {READ_MAX_LINE} chars)"
+        entry = f"{number}: {line}"
+        size += len(entry.encode("utf-8")) + 1
+        if out and size > max_bytes:
+            break
+        out.append(entry)
+        last = number
+    if total == 0:
+        footer = "(Empty file.)"
+    elif last >= total:
+        footer = f"(End of file - {total} lines.)"
+    else:
+        footer = f"(Showing lines {offset}-{last} of {total}. Use offset={last + 1} to continue.)"
+    body = "\n".join(out)
+    used = sum(len(e.encode("utf-8")) + 1 for e in out)
+    return (
+        ToolResult(
             f"<path>{shown}</path>\n<type>file</type>\n<content>\n{body}\n\n{footer}\n</content>",
             meta={"lines": [offset, last], "total_lines": total},
-        )
+        ),
+        used,
+    )
 
 
 def _list_dir(path: Path, shown: str) -> str:
