@@ -79,22 +79,32 @@ class ReadTool:
         return result
 
 
+READ_MAX_FILES = 20
+
+
 def _read_many(paths: list[str], ctx: ToolContext) -> ToolResult:
     parts: list[str] = []
     errors = 0
     budget = READ_MAX_BYTES
-    for raw in paths:
+    skipped: list[str] = []
+    for raw in paths[:READ_MAX_FILES]:
         if budget <= 0:
-            parts.append(
-                f"<path>{raw}</path>\n(Not read: this call's {READ_MAX_BYTES // 1024} KB are "
-                "used up. Read it separately.)"
-            )
+            skipped.append(raw[:200])
             continue
         result, used = _read_file(raw, ctx, 1, READ_LIMIT, budget)
-        budget -= used
+        budget -= used if not result.is_error else len(result.content)
         errors += result.is_error
         parts.append(result.content)
-    return ToolResult("\n\n".join(parts), is_error=errors == len(paths))
+    skipped.extend(p[:200] for p in paths[READ_MAX_FILES:])
+    if skipped:
+        names = ", ".join(skipped[:20]) + (
+            f" (+{len(skipped) - 20} more)" if len(skipped) > 20 else ""
+        )
+        parts.append(
+            f"(Not read - this call reads at most {READ_MAX_FILES} files and "
+            f"{READ_MAX_BYTES // 1024} KB: {names}. Read them in another call.)"
+        )
+    return ToolResult("\n\n".join(parts), is_error=errors == len(parts) and not skipped)
 
 
 def _read_file(

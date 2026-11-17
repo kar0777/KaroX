@@ -314,3 +314,13 @@ def test_read_several_files_share_one_byte_budget(ctx):
 def test_read_needs_a_path(ctx):
     assert call(ReadTool(), ctx).is_error
     assert call(ReadTool(), ctx, file_paths=["nope"]).is_error
+
+
+def test_read_many_caps_files_and_counts_errors(ctx):
+    from karox6.tools.fs import READ_MAX_FILES
+
+    paths = [f"missing{i}.txt" for i in range(READ_MAX_FILES + 30)]
+    result = call(ReadTool(), ctx, file_paths=paths)
+    assert result.content.count("does not exist") == READ_MAX_FILES
+    assert "(+10 more)" in result.content
+    assert len(result.content) < 5_000

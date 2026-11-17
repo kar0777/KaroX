@@ -106,10 +106,16 @@ def _unread_tail(job: Job) -> str:
         job.run._flush_log()
     try:
         with job.run.log_path.open("rb") as fh:
-            fh.seek(job.read_offset)
+            size = fh.seek(0, 2)
+            unread = size - job.read_offset
+            fh.seek(max(job.read_offset, size - NOTICE_TAIL_CHARS * 4))
             data = fh.read()
     except Exception:  # a notice must never break the step that carries it
         return " Read its output with job_output."
+    if unread > NOTICE_TAIL_CHARS * 4:  # long: show the end only, leave the log unread
+        tail = clean_text(data).rstrip()[-NOTICE_TAIL_CHARS:]
+        tail = tail[tail.find("\n") + 1 :] if "\n" in tail else tail
+        return f" Last lines of {unread} unread bytes (job_output returns all of them):\n{tail}\n"
     text = clean_text(data).rstrip()
     if not text:
         job.read_offset += len(data)

@@ -51,10 +51,10 @@ class ToolContext:
     deadline: float | None = None  # time.monotonic() at which the run's time limit ends
 
     def wait_cap_s(self, wanted_s: float) -> float:
-        """``wanted_s`` cut to the time left in the run (at least one second)."""
+        """``wanted_s`` cut to the time left in the run (never longer than asked)."""
         if self.deadline is None:
             return wanted_s
-        return max(min(wanted_s, self.deadline - time.monotonic()), 1.0)
+        return min(wanted_s, max(self.deadline - time.monotonic(), 0.05))
 
     @property
     def spill_dir(self) -> Path:

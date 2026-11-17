@@ -712,7 +712,13 @@ class Session:
             if after < threshold:
                 return
             before = after
-        await self._summarize(before, emit)
+        try:
+            await self._summarize(before, emit)
+        except ProviderError as exc:
+            # Even the summary request is too big for the model: shrink without it.
+            if exc.code != "context_window":
+                raise
+            await self._recover_overflow(emit)
 
     async def _recover_overflow(self, emit: Callable[[ev.Event], None]) -> bool:
         """After a context-window error: learn the smaller window, prune every big tool
@@ -761,7 +767,9 @@ class Session:
             "(No summary: the earlier part of the conversation no longer fit in the model's "
             "context window and was dropped. Re-read any file you need.)"
         )
-        rebuilt = [first_user] if first_user is not None and first_user not in tail else []
+        rebuilt = [m for m in _user_turns(head) if m not in tail]
+        if first_user is not None and first_user not in tail and first_user not in rebuilt:
+            rebuilt.insert(0, first_user)
         self.messages = [*rebuilt, checkpoint_message(note, files), *tail]
         self.store.reset(self.messages)
         after = estimate_tokens(self.messages, self.system_prompt)
@@ -794,15 +802,20 @@ class Session:
         head, tail = split_for_summary(self.messages, retain)
         if not head:
             return False
+        cut: list[Message] = []  # user turns trimmed from the head: kept verbatim
         if head_budget is not None:
-            # Keep the newest part of the head that fits; older detail is lost, but the
-            # task message is re-added below and the checkpoint lists the changed files.
+            # Keep the newest part of the head that fits; older tool work is lost, but the
+            # user's own messages are kept as they are and the checkpoint lists the changed
+            # files.
+            full = head
             while len(head) > 1 and estimate_tokens(head, self.system_prompt) > head_budget:
                 head = head[max(len(head) // 4, 1) :]
                 while head and head[0].role == "tool":
                     head = head[1:]
             if not head:
                 return False
+            kept = {id(m) for m in head}
+            cut = [m for m in _user_turns(full) if id(m) not in kept and m is not first_user]
         request = self._request()
         request.messages = self._replay_view([*head, Message("user", COMPACTION_INSTRUCTION)])
         # Tool schemas stay in the first try so the cached prefix is reused; a model that
@@ -818,6 +831,7 @@ class Session:
         rebuilt: list[Message] = []
         if first_user is not None and first_user not in tail:
             rebuilt.append(first_user)
+        rebuilt.extend(cut)
         rebuilt.append(checkpoint_message(summary, files))
         rebuilt.extend(tail)
         self.messages = rebuilt
@@ -826,6 +840,11 @@ class Session:
         self._last_input_tokens, self._chars_since_measure = after, 0
         emit(ev.Compacted(mode="summary", tokens_before=before, tokens_after=after))
         return True
+
+
+def _user_turns(messages: list[Message]) -> list[Message]:
+    """The user's own messages (not harness notices or checkpoints)."""
+    return [m for m in messages if m.role == "user" and not m.meta.get("kind")]
 
 
 def _inside(path: Path, workspace: Path) -> tuple[str, ...]:

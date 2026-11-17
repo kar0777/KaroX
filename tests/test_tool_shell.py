@@ -363,3 +363,10 @@ def test_shell_wait_stops_at_the_run_deadline(ctx):
         await JobKillTool().run({"job_id": result.meta["job_id"]}, ctx)
 
     asyncio.run(scenario())
+
+
+def test_deadline_cap_never_lengthens_a_wait(ctx):
+    ctx.deadline = time.monotonic() + 100
+    assert ctx.wait_cap_s(0.01) == 0.01
+    ctx.deadline = time.monotonic() - 5
+    assert ctx.wait_cap_s(30) == 0.05

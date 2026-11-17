@@ -104,7 +104,7 @@ def project_inventory(workspace: Path, max_items: int = 12) -> list[str]:
         return None
 
     def names(items: list[str]) -> str:
-        shown = ", ".join(items[:max_items])
+        shown = ", ".join(i if len(i) <= 40 else i[:40] + "..." for i in items[:max_items])
         return shown + (f" (+{len(items) - max_items} more)" if len(items) > max_items else "")
 
     py = [
@@ -147,7 +147,7 @@ def project_inventory(workspace: Path, max_items: int = 12) -> list[str]:
             targets = [t for t in dict.fromkeys(_MAKE_TARGET.findall(body)) if t != "PHONY"]
             out.append(f"{name} targets: {names(targets)}" if targets else name)
             break
-    return out
+    return [line if len(line) <= 400 else line[:400] + "..." for line in out]
 
 
 def python_hint() -> str | None:

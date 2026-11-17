@@ -35,3 +35,9 @@ def test_inventory_caps_long_lists(tmp_path):
     (tmp_path / "package.json").write_text(json.dumps({"scripts": scripts}))
     (line,) = project_inventory(tmp_path, max_items=5)
     assert line.endswith("s0, s1, s2, s3, s4 (+15 more)")
+
+
+def test_inventory_bounds_long_names(tmp_path):
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"x" * 100_000: "y"}}))
+    (line,) = project_inventory(tmp_path)
+    assert len(line) < 500

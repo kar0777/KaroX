@@ -668,3 +668,30 @@ def test_cancel_mid_batch_keeps_finished_results(tmp_path):
     loaded_tools = [m for m in loaded.messages if m.role == "tool"]
     assert loaded_tools[0].content.startswith("Created done.txt")
     assert loaded_tools[1].content == CANCELLED_RESULT
+
+
+def test_planned_compaction_that_overflows_is_recovered(tmp_path):
+    overflow = ProviderError("context_window", "too long", status=400)
+    messages = [Message("user", "original")] + [
+        Message("assistant", f"step {i} " + "x" * 400) for i in range(9)
+    ]
+    # summary overflows, the bounded retry of the summary overflows too, the step works
+    provider = ScriptedProvider([Turn(error=overflow), Turn(error=overflow), Turn(text="done")])
+    session = Session(config(tmp_path, compact_at_tokens=100), provider, messages=messages)
+    events = run(session, "continue")
+    assert next(e for e in events if isinstance(e, RunFinished)).status == "completed"
+    assert "drop" in [e.mode for e in events if e.type == "compacted"]
+
+
+def test_overflow_keeps_every_user_instruction(tmp_path):
+    overflow = ProviderError("context_window", "too long", status=400)
+    messages = [Message("user", "original task")]
+    for i in range(30):
+        messages.append(Message("assistant", f"step {i} " + "x" * 4000))
+        if i == 3:
+            messages.append(Message("user", "do not touch setup.py"))
+    provider = ScriptedProvider([Turn(error=overflow), Turn(text="checkpoint"), Turn(text="ok")])
+    session = Session(config(tmp_path), provider, messages=messages)
+    run(session, "continue")
+    users = [m.content for m in session.messages if m.role == "user" and not m.meta.get("kind")]
+    assert users[:2] == ["original task", "do not touch setup.py"]
