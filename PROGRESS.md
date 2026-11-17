@@ -847,3 +847,11 @@ git diff --check
   kysely (type-level tests: its types accepted calls the tests expect to be type errors),
   opa (Go build with the hidden tests failed). Four KaroX trials hit the 3600 s cap and
   still solved 3 of them (collect hook).
+- 09:40 UTC, spec-audit A/B decided early (runs 44021663883 A, 44021705895 B; 11 of 16
+  trials per arm done): on the 9 tasks both arms finished (bandit-nosec dropped: B's image
+  pull hit an ECR 429 "data limit"), A solved 8, B 4. With 5 tasks left B cannot reach
+  A + 3, so B is not adopted under the 22:40 rule; the base prompt stays as is. B's losses
+  are mostly one-test misses (abs 5/6, expr 78/79, happy-dom-io 13/14) plus boa 0/17 and
+  they ran no shorter: the audit sentence did not fix spec misreadings and cost steps.
+  Lesson: the three dsg1 misreadings were not cured by a generic "re-read the statement"
+  instruction at the end; any further fix must target how the agent forms its own tests.
