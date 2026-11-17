@@ -586,8 +586,9 @@ def test_context_overflow_without_summary_drops_the_head(tmp_path):
     assert "drop" in [e.mode for e in events if e.type == "compacted"]
     assert session.messages[0].content == "original"
     assert "No summary" in session.messages[1].content
-    assert session.config.context_window is not None
-    assert session.config.context_window < before
+    assert session.config.context_window is None  # the configured value is untouched
+    assert session._learned_window is not None
+    assert session._learned_window < before
 
 
 def test_background_finish_notice_carries_the_unread_output(tmp_path):
@@ -695,3 +696,9 @@ def test_overflow_keeps_every_user_instruction(tmp_path):
     run(session, "continue")
     users = [m.content for m in session.messages if m.role == "user" and not m.meta.get("kind")]
     assert users[:2] == ["original task", "do not touch setup.py"]
+
+
+def test_small_window_still_compacts_below_its_size(tmp_path):
+    cfg = config(tmp_path, context_window=6_000)
+    assert cfg.compaction_threshold() == 3_000
+    assert cfg.compaction_threshold(learned=4_000) == 2_000

@@ -370,10 +370,14 @@ def _grep_py(root: Path, regex: re.Pattern[str], include: str | None) -> list[tu
             continue
         if b"\0" in data[:8000]:
             continue
-        text = data.decode("utf-8", "replace")
-        if not whole.search(text.replace("\r\n", "\n")):
+        text = data.decode("utf-8", "replace").replace("\r\n", "\n")
+        if not whole.search(text):
             continue
-        for number, line in enumerate(text.splitlines(), 1):
+        # Only "\n" ends a line, as in rg and read (splitlines also splits on \f, \x1c...).
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        for number, line in enumerate(lines, 1):
             if regex.search(line):
                 hits.append((rel, number, line))
     return hits
@@ -390,10 +394,13 @@ def _with_context(
     out: list[tuple[str, int, str]] = []
     for rel, numbers in by_file.items():
         try:
-            lines = (base / rel).read_bytes().decode("utf-8", "replace").splitlines()
+            raw = (base / rel).read_bytes().decode("utf-8", "replace")
+            lines = raw.replace("\r\n", "\n").split("\n")
         except OSError:
             out.extend(h for h in hits if h[0] == rel)
             continue
+        if lines and lines[-1] == "":
+            lines.pop()  # the final newline does not start a line
         matched = set(numbers)
         wanted: set[int] = set()
         for n in numbers:

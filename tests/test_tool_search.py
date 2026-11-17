@@ -176,3 +176,9 @@ def test_grep_files_and_count_modes(ctx, backend):
     assert "b.txt: 1" in counts
     assert "3 matches in 2 files." in counts
     assert call(GrepTool(), ctx, pattern="hit", output="bogus").is_error
+
+
+def test_grep_context_numbers_lines_like_read(ctx, backend):
+    (ctx.workspace / "a.txt").write_bytes(b"alpha\x0cbeta\nneedle\nafter\n")
+    result = call(GrepTool(), ctx, pattern="needle", context=1)
+    assert result.content == "a.txt\nLine 1- alpha\x0cbeta\nLine 2: needle\nLine 3- after"

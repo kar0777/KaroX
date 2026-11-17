@@ -67,6 +67,12 @@ class ReadTool:
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         many = args.get("file_paths")
         if isinstance(many, list) and many and not args.get("file_path"):
+            if args.get("offset") or args.get("limit"):
+                return ToolResult(
+                    "Error: invalid arguments: offset and limit apply to file_path only; "
+                    "file_paths reads whole files.",
+                    is_error=True,
+                )
             return _read_many([str(p) for p in many], ctx)
         raw = str(args.get("file_path") or args.get("path") or "")
         if not raw:

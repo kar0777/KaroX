@@ -113,18 +113,19 @@ class SessionConfig:
     wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
-    def effective_window(self) -> int:
+    def effective_window(self, learned: int | None = None) -> int:
         """Tokens the conversation may use: the user's limit, capped by the model's window
-        when it is known (a context-window error from the provider also sets it)."""
-        known = [v for v in (self.context_window, self.context_limit) if v]
+        when it is known and by what a context-window error taught the session."""
+        known = [v for v in (self.context_window, self.context_limit, learned) if v]
         return min(known) if known else 400_000
 
-    def compaction_threshold(self) -> int:
+    def compaction_threshold(self, learned: int | None = None) -> int:
         if self.compact_at_tokens:
             return self.compact_at_tokens
-        window = self.effective_window()
+        window = self.effective_window(learned)
         reserve = (self.max_output_tokens or 32_000) + 16_000
-        return max(int(min(window * 0.8, window - reserve)), 8_000)
+        # A small window (local models) still compacts below its size.
+        return max(int(min(window * 0.8, window - reserve)), min(8_000, window // 2))
 
 
 class Session:
@@ -185,6 +186,7 @@ class Session:
         self._last_input_tokens = 0
         self._chars_since_measure = 0
         self._deadline: float | None = None  # monotonic end of the current run
+        self._learned_window: int | None = None  # from a context-window error
         if not self.resumed:
             self.store.append(
                 "meta",
@@ -699,7 +701,7 @@ class Session:
         return estimate_tokens(self.messages, self.system_prompt)
 
     async def _maybe_compact(self, emit: Callable[[ev.Event], None]) -> None:
-        threshold = self.config.compaction_threshold()
+        threshold = self._threshold()
         before = self.context_tokens()
         if before < threshold:
             return
@@ -720,16 +722,20 @@ class Session:
                 raise
             await self._recover_overflow(emit)
 
+    def _threshold(self) -> int:
+        return self.config.compaction_threshold(self._learned_window)
+
     async def _recover_overflow(self, emit: Callable[[ev.Event], None]) -> bool:
         """After a context-window error: learn the smaller window, prune every big tool
         result, then summarize; if no summary can be made, keep the task, a checkpoint of
         the changed files and the recent tail. True when the conversation got smaller."""
         before = estimate_tokens(self.messages, self.system_prompt)
         sent = max(self.context_tokens(), before)
-        # The provider refused about ``sent`` tokens: from now on stay well below that.
-        learned = int(sent * 0.85)
-        if self.config.context_window is None or learned < self.config.context_window:
-            self.config.context_window = max(learned, 8_000)
+        # The provider refused about ``sent`` tokens: for this session stay well below
+        # that (the configured window is left as it is).
+        learned = max(int(sent * 0.85), 2_000)
+        if self._learned_window is None or learned < self._learned_window:
+            self._learned_window = learned
         removed = prune_tool_results(self.messages, keep_last=0)
         if removed:
             self.store.reset(self.messages)
@@ -744,24 +750,24 @@ class Session:
             summarized = await self._summarize(
                 estimate_tokens(self.messages, self.system_prompt),
                 emit,
-                head_budget=min(self.config.effective_window(), sent) // 2,
+                head_budget=min(self.config.effective_window(self._learned_window), sent) // 2,
             )
         except ProviderError as exc:
             if exc.code != "context_window":
                 raise
-        if not summarized:
-            await self._drop_head(before, emit)
+        dropped = False if summarized else await self._drop_head(before, emit)
         after = estimate_tokens(self.messages, self.system_prompt)
         self._last_input_tokens, self._chars_since_measure = after, 0
-        return after < before
+        # Retry when anything was cut; the retry itself shows whether it now fits.
+        return bool(removed or summarized or dropped)
 
-    async def _drop_head(self, before: int, emit: Callable[[ev.Event], None]) -> None:
+    async def _drop_head(self, before: int, emit: Callable[[ev.Event], None]) -> bool:
         """Model-free fallback: keep the task message, a checkpoint and the recent tail."""
-        retain = int(self.config.compaction_threshold() * 0.2)
+        retain = int(self._threshold() * 0.2)
         first_user = next((m for m in self.messages if m.role == "user"), None)
         head, tail = split_for_summary(self.messages, retain)
         if not head:
-            return
+            return False
         files = await asyncio.to_thread(self.files.changed_files)
         note = (
             "(No summary: the earlier part of the conversation no longer fit in the model's "
@@ -774,6 +780,7 @@ class Session:
         self.store.reset(self.messages)
         after = estimate_tokens(self.messages, self.system_prompt)
         emit(ev.Compacted(mode="drop", tokens_before=before, tokens_after=after))
+        return True
 
     async def _summary_call(
         self, request: ModelRequest, emit: Callable[[ev.Event], None]
@@ -797,7 +804,7 @@ class Session:
         self, before: int, emit: Callable[[ev.Event], None], head_budget: int | None = None
     ) -> bool:
         """Replace the older history with a model-written checkpoint; True on success."""
-        retain = int(self.config.compaction_threshold() * 0.2)
+        retain = int(self._threshold() * 0.2)
         first_user = next((m for m in self.messages if m.role == "user"), None)
         head, tail = split_for_summary(self.messages, retain)
         if not head:

@@ -324,3 +324,8 @@ def test_read_many_caps_files_and_counts_errors(ctx):
     assert result.content.count("does not exist") == READ_MAX_FILES
     assert "(+10 more)" in result.content
     assert len(result.content) < 5_000
+
+
+def test_read_many_rejects_offset_and_limit(ctx):
+    (ctx.workspace / "a.txt").write_text("a\n")
+    assert call(ReadTool(), ctx, file_paths=["a.txt"], limit=5).is_error
