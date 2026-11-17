@@ -920,3 +920,12 @@ git diff --check
   parallel 2. Reading: solved count against the leaderboard's 0/16 for this model; any
   solve is data, not proof (one attempt). Trajectories of failures are read for causes;
   these 4 tasks then join the tuning pool and stop being evidence.
+- dsz1 result (run 44138163101, dev12, 1 attempt): 0/4. Near misses: httpx 106/108 (stream
+  not closed on invalid JSON), csstree 74/79 (every failing test is the background
+  shorthand), koota 70/71 (hit the 3550 s limit); claude-code-by-agents 2/7 (most contract
+  points missed). Three of four ended by the agent's own choice at 29-37 min, old tests all
+  pass, no compaction, no upstream failure. New tools used: grep options 4x per trial,
+  shell file browsing nearly gone (bash ran tests); read file_paths never used. The
+  leaderboard has this model at 0/16 on these tasks, so 0/4 is no regression signal; the
+  dominant cause is still finishing before every stated requirement is exercised.
+  FreeInference runs paused from here at the user's request (lane needed elsewhere).
