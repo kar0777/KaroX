@@ -944,3 +944,11 @@ git diff --check
   these logs 15-21 runs per trial use different test subsets (targeted file, full suite,
   /tmp scripts), so a diff between runs of the same command would rarely apply; revisit
   only with an A/B lane. No code change from dsz1.
+- Quick check k6q1 (run 44164362591, dev12, ReformBoss DSV4.1F-1017, 1 attempt, parallel 1;
+  artifacts in `karox6-bench-data/runs/44164362591`): 1/3. 52 (sqllineage) solved, 11/11,
+  but 18.9 min and 79 calls (rivals 4-5 min); 13 and 39 lost exactly as in k6d1: 13 fixed
+  the kafka batch nack and left the same defect in the confluent broker
+  (`test_batch_nack_rewinds_every_partition`), 39 split snake_case names but not camelCase
+  (`getWeather`). First dev12 run on the target model: no regression on these three, the
+  sibling-implementation miss (H1) is unchanged; the H1 prompt rule was already rejected
+  on cost, so a fix must not be a prompt line.
