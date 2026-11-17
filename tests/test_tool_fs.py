@@ -251,3 +251,34 @@ def test_read_default_first_line(ctx):
 
 def test_edit_missing_file(ctx):
     assert edit(ctx, "x", "y").is_error
+
+
+def test_edit_shows_the_changed_region_with_new_line_numbers(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("".join(f"line{i}\n" for i in range(1, 31)))
+    read(ctx)
+    result = edit(ctx, "line10\n", "line10\nnew_a\nnew_b\nnew_c\n")
+    assert not result.is_error
+    snippet = result.content.split("The edited region now reads:\n")[1].splitlines()
+    assert snippet[0] == "8: line8"
+    assert "11: new_a" in snippet
+    assert "13: new_c" in snippet
+    assert snippet[-1] == "16: line13"
+
+
+def test_edit_snippet_caps_long_regions(ctx):
+    from karox6.tools.fs import SNIPPET_MAX_LINES, changed_snippet
+
+    after = "\n".join(f"n{i}" for i in range(100)) + "\n"
+    text = changed_snippet("x\n", after)
+    assert len(text.splitlines()) == SNIPPET_MAX_LINES + 3  # blank, header, lines, ...
+    assert text.endswith("...")
+
+
+def test_edit_replace_all_has_no_snippet(ctx):
+    (ctx.workspace / "file").write_text("x\ny\nx\n")
+    read(ctx)
+    result = call(
+        EditTool(), ctx, file_path="file", old_string="x", new_string="z", replace_all=True
+    )
+    assert "edited region" not in result.content

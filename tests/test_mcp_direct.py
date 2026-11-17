@@ -91,7 +91,10 @@ def test_read_write_edit_round_trip(tmp_path):
         text, error = await call(
             server, "edit", file_path="pkg/a.txt", old_string="two", new_string="2"
         )
-        assert (error, text) == (False, "Edited pkg/a.txt: replaced 1 occurrence.")
+        assert (error, text) == (
+            False,
+            "Edited pkg/a.txt: replaced 1 occurrence.\nThe edited region now reads:\n1: one\n2: 2",
+        )
         assert (root / "pkg" / "a.txt").read_text() == "one\n2\n"
         (root / "b.txt").write_text("old\n")
         text, error = await call(server, "write", file_path="b.txt", content="new\n")

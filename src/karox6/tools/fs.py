@@ -256,10 +256,42 @@ class EditTool:
         ctx.files.record_write(path, observe=not unsure)
         note = f" (matched {how})" if how != "exactly" else ""
         plural = "s" if count != 1 else ""
+        snippet = changed_snippet(text, updated.replace("\r\n", "\n")) if count == 1 else ""
         return ToolResult(
-            f"Edited {shown}: replaced {count} occurrence{plural}{note}.",
+            f"Edited {shown}: replaced {count} occurrence{plural}{note}.{snippet}",
             meta={"path": str(path), "match": how},
         )
+
+
+SNIPPET_CONTEXT = 3
+SNIPPET_MAX_LINES = 30
+
+
+def changed_snippet(before: str, after: str) -> str:
+    """The edited region of ``after`` with a few lines around it, numbered as read shows
+    them, so the model sees the result and the new line numbers without re-reading."""
+    if before == after:
+        return ""
+    limit = min(len(before), len(after))
+    head = 0
+    while head < limit and before[head] == after[head]:
+        head += 1
+    tail = 0
+    while tail < limit - head and before[-1 - tail] == after[-1 - tail]:
+        tail += 1
+    lines = after.split("\n")
+    if len(lines) > 1 and lines[-1] == "":
+        lines.pop()  # the final newline does not start a line
+    first = after.count("\n", 0, head)  # 0-based line of the first changed char
+    # the last changed character (a changed region may end with its own newline)
+    last = min(after.count("\n", 0, max(len(after) - tail - 1, head)), len(lines) - 1)
+    first = min(first, last)
+    start = max(first - SNIPPET_CONTEXT, 0)
+    end = min(last + SNIPPET_CONTEXT, len(lines) - 1)
+    shown = range(start, min(end, start + SNIPPET_MAX_LINES - 1) + 1)
+    body = "\n".join(f"{n + 1}: {lines[n]}" for n in shown)
+    more = "\n..." if end > shown[-1] else ""
+    return f"\nThe edited region now reads:\n{body}{more}"
 
 
 # --- matching -----------------------------------------------------------------
