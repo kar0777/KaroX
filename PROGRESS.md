@@ -855,3 +855,15 @@ git diff --check
   they ran no shorter: the audit sentence did not fix spec misreadings and cost steps.
   Lesson: the three dsg1 misreadings were not cured by a generic "re-read the statement"
   instruction at the end; any further fix must target how the agent forms its own tests.
+- 11:30 UTC, user asked for the best possible system prompt from the prompts of other top
+  agents. Corpus (public repos, shallow clones in D:\проекты\prompt-corpus, ~40 coding-agent
+  prompts selected into sel/g1-g3): Claude Code (Opus 5.5, headless and code-mode Fable 5.2),
+  Codex (GPT-6.1-Sol, GPT-5.x-codex, models-manager), OpenCode (anthropic/gpt/kimi/meta/
+  trinity/runner), Qwen Code, Kilo, MiMo, Cursor 2.0 + CLI, Devin, Windsurf, Amp, Augment,
+  Junie, Warp, VSCode Copilot, Gemini CLI, Z.ai/ZCode, Qoder, Trae, Hermes, mini-swe-agent.
+  Surveys by agy (Gemini 4 Hydrogen), Codex (gpt-6.1-terra), OpenCode (DeepSeek free);
+  draft reviewed by Codex (gpt-6.1-sol), OpenCode and agy (Gemini 4 Argon), all three
+  against the failed spec-audit A/B. Result: prompts/base_v2_draft.md (522 words; not yet
+  in code). Dropped after review: per-requirement test lists, an up-front requirement
+  taxonomy, "stop exploring once you can name the files", the end-of-run last-message
+  audit. Adoption only through a pre-registered A/B on unseen DeepSWE tasks (user's call).
