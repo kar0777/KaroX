@@ -145,3 +145,34 @@ def test_grep_anchors_match_every_line(ctx, backend):
     assert "crlf.txt\nLine 2: two" in result.content
     assert "three" not in result.content
     assert call(GrepTool(), ctx, pattern="two$").content.count("Line 3: three two") == 2
+
+
+def test_grep_context_windows(ctx, backend):
+    (ctx.workspace / "a.txt").write_text("l1\nl2\nhit3\nl4\nl5\nl6\nl7\nhit8\nl9\n")
+    result = call(GrepTool(), ctx, pattern="hit", context=1)
+    assert result.content == (
+        "a.txt\nLine 2- l2\nLine 3: hit3\nLine 4- l4\n--\nLine 7- l7\nLine 8: hit8\nLine 9- l9"
+    )
+    merged = call(GrepTool(), ctx, pattern="hit", context=3)
+    assert "--" not in merged.content
+    assert merged.content.count(":") == 2
+
+
+def test_grep_literal_and_ignore_case(ctx, backend):
+    (ctx.workspace / "a.py").write_text("x = f(a)\nX = F(A)\n")
+    assert call(GrepTool(), ctx, pattern="f(a)", literal=True).content == "a.py\nLine 1: x = f(a)"
+    both = call(GrepTool(), ctx, pattern="f(a)", literal=True, ignore_case=True)
+    assert both.content == "a.py\nLine 1: x = f(a)\nLine 2: X = F(A)"
+
+
+def test_grep_files_and_count_modes(ctx, backend):
+    (ctx.workspace / "a.txt").write_text("hit\nhit\n")
+    (ctx.workspace / "b.txt").write_text("hit\n")
+    (ctx.workspace / "c.txt").write_text("miss\n")
+    files = call(GrepTool(), ctx, pattern="hit", output="files").content.splitlines()
+    assert sorted(files) == ["a.txt", "b.txt"]
+    counts = call(GrepTool(), ctx, pattern="hit", output="count").content
+    assert "a.txt: 2" in counts
+    assert "b.txt: 1" in counts
+    assert "3 matches in 2 files." in counts
+    assert call(GrepTool(), ctx, pattern="hit", output="bogus").is_error

@@ -26,6 +26,7 @@ from karox6.tools.base import ToolContext, ToolResult
 GLOB_MAX = 100
 GREP_MAX = 250
 GREP_LINE_MAX = 500
+GREP_CONTEXT_MAX = 10
 _SKIP_DIRS = {
     ".git",
     ".hg",
@@ -213,21 +214,35 @@ def _glob(root: Path, pattern: str) -> list[str]:
 class GrepTool:
     name = "grep"
     description = (
-        "Search file contents with a regular expression (ripgrep/Python syntax; `(?i)` for "
-        "case-insensitive). Returns matching lines with line numbers, grouped by file, up to "
-        f"{GREP_MAX} matches; `include` limits the search to files matching one glob (e.g. "
-        "`*.py`). Skips .gitignore'd and binary files. Use this tool, not shell grep or rg; "
-        "use read on a matched file when you need surrounding context."
+        "Search file contents with a regular expression (ripgrep/Python syntax). Returns "
+        f"matching lines with line numbers, grouped by file, up to {GREP_MAX} matches; "
+        "`include` limits the search to files matching one glob (e.g. `*.py`), `context` adds "
+        "that many lines around each match, `literal` searches for the exact text, "
+        "`ignore_case` ignores case, and `output` = `files` or `count` lists only the "
+        "matching files or match counts per file. Skips .gitignore'd and binary files. Use "
+        "this tool, not shell grep or rg."
     )
     parameters: dict[str, Any] = {
         "type": "object",
         "properties": {
-            "pattern": {"type": "string", "description": "Regular expression."},
+            "pattern": {"type": "string", "description": "Regular expression (text if literal)."},
             "path": {
                 "type": "string",
                 "description": "File or directory to search (default: workspace).",
             },
             "include": {"type": "string", "description": "Glob for file names, e.g. `*.py`."},
+            "context": {
+                "type": "integer",
+                "description": f"Lines before and after each match (0-{GREP_CONTEXT_MAX}).",
+            },
+            "literal": {"type": "boolean", "description": "Treat pattern as plain text."},
+            "ignore_case": {"type": "boolean", "description": "Case-insensitive search."},
+            "output": {
+                "type": "string",
+                "enum": ["content", "files", "count"],
+                "description": "content (default): matching lines; files: file paths only; "
+                "count: matches per file.",
+            },
         },
         "required": ["pattern"],
     }
@@ -238,23 +253,45 @@ class GrepTool:
         if not root.exists():
             return ToolResult(f"Error: {_shown(root, ctx)} does not exist.", is_error=True)
         pattern = str(args["pattern"])
+        if args.get("literal"):
+            pattern = re.escape(pattern)
+        if args.get("ignore_case"):
+            pattern = "(?i)" + pattern
         include = str(args.get("include") or "") or None
+        mode = str(args.get("output") or "content")
+        if mode not in ("content", "files", "count"):
+            return ToolResult("Error: output must be content, files or count.", is_error=True)
+        try:
+            context = max(0, min(int(args.get("context") or 0), GREP_CONTEXT_MAX))
+        except (TypeError, ValueError):
+            return ToolResult("Error: context must be an integer.", is_error=True)
+        base = root if root.is_dir() else root.parent
+        hits: list[tuple[str, int, str]] | None = None
         rg = ripgrep()
         if rg:
-            result = await _grep_rg(rg, root, pattern, include, ctx)
-            if result is not None:
-                return result
-        try:
-            regex = re.compile(pattern)
-        except re.error as exc:
-            return ToolResult(f"Error: invalid regular expression: {exc}", is_error=True)
-        hits = await asyncio.to_thread(_grep_py, root, regex, include)
-        return _format_hits(hits, root if root.is_dir() else root.parent, ctx)
+            found = await _grep_rg(rg, root, pattern, include)
+            if isinstance(found, ToolResult):
+                return found
+            hits = found
+        if hits is None:
+            try:
+                regex = re.compile(pattern)
+            except re.error as exc:
+                return ToolResult(f"Error: invalid regular expression: {exc}", is_error=True)
+            hits = await asyncio.to_thread(_grep_py, root, regex, include)
+        if mode == "files":
+            return _format_files(hits, base, ctx)
+        if mode == "count":
+            return _format_counts(hits, base, ctx)
+        if context:
+            hits = await asyncio.to_thread(_with_context, hits, base, context)
+        return _format_hits(hits, base, ctx)
 
 
 async def _grep_rg(
-    rg: str, root: Path, pattern: str, include: str | None, ctx: ToolContext
-) -> ToolResult | None:
+    rg: str, root: Path, pattern: str, include: str | None
+) -> list[tuple[str, int, str]] | ToolResult | None:
+    """Matches from ripgrep; a ToolResult for an invalid pattern; None to fall back."""
     # --crlf: $ also matches before CRLF, so anchors work in Windows-style files.
     argv = [rg, "--no-config", "--json", "--crlf", "--regexp", pattern]
     if include:
@@ -308,8 +345,7 @@ async def _grep_rg(
             rel = root.name
         text = data["lines"].get("text") or "(line is not valid UTF-8)"
         hits.append((rel, int(data["line_number"]), text.rstrip("\r\n")))
-    base = root if root.is_dir() else root.parent
-    return _format_hits(hits, base, ctx)
+    return hits
 
 
 def _grep_py(root: Path, regex: re.Pattern[str], include: str | None) -> list[tuple[str, int, str]]:
@@ -343,11 +379,69 @@ def _grep_py(root: Path, regex: re.Pattern[str], include: str | None) -> list[tu
     return hits
 
 
+def _with_context(
+    hits: list[tuple[str, int, str]], base: Path, context: int
+) -> list[tuple[str, int, str]]:
+    """Matches plus ``context`` surrounding lines. Context lines carry a negative line
+    number; a gap between windows is a ``(rel, 0, "")`` separator."""
+    by_file: dict[str, list[int]] = {}
+    for rel, number, _ in hits:
+        by_file.setdefault(rel, []).append(number)
+    out: list[tuple[str, int, str]] = []
+    for rel, numbers in by_file.items():
+        try:
+            lines = (base / rel).read_bytes().decode("utf-8", "replace").splitlines()
+        except OSError:
+            out.extend(h for h in hits if h[0] == rel)
+            continue
+        matched = set(numbers)
+        wanted: set[int] = set()
+        for n in numbers:
+            wanted.update(range(max(n - context, 1), min(n + context, len(lines)) + 1))
+        previous = None
+        for n in sorted(wanted):
+            if previous is not None and n != previous + 1:
+                out.append((rel, 0, ""))
+            out.append((rel, n if n in matched else -n, lines[n - 1]))
+            previous = n
+    return out
+
+
+def _prefix(base: Path, ctx: ToolContext) -> str:
+    shown = _shown(base, ctx)
+    return "" if shown == "." else shown.rstrip("/") + "/"
+
+
+def _format_files(hits: list[tuple[str, int, str]], base: Path, ctx: ToolContext) -> ToolResult:
+    if not hits:
+        return ToolResult("No matches found.")
+    prefix = _prefix(base, ctx)
+    files = [prefix + rel for rel in dict.fromkeys(rel for rel, _, _ in hits)]
+    if len(files) <= GLOB_MAX:
+        return ToolResult("\n".join(files))
+    spill = write_spill(ctx.spill_dir, "grep", "\n".join(files))
+    return ToolResult(
+        "\n".join(files[:GLOB_MAX])
+        + f"\n\n({len(files)} files match; showing {GLOB_MAX}. Full list: {spill}.)"
+    )
+
+
+def _format_counts(hits: list[tuple[str, int, str]], base: Path, ctx: ToolContext) -> ToolResult:
+    if not hits:
+        return ToolResult("No matches found.")
+    prefix = _prefix(base, ctx)
+    counts: dict[str, int] = {}
+    for rel, _, _ in hits:
+        counts[rel] = counts.get(rel, 0) + 1
+    rows = [f"{prefix}{rel}: {n}" for rel, n in counts.items()]
+    return ToolResult("\n".join(rows) + f"\n\n{len(hits)} matches in {len(counts)} files.")
+
+
 def _format_hits(hits: list[tuple[str, int, str]], base: Path, ctx: ToolContext) -> ToolResult:
     if not hits:
         return ToolResult("No matches found.")
-    prefix_path = _shown(base, ctx)
-    prefix = "" if prefix_path == "." else prefix_path.rstrip("/") + "/"
+    prefix = _prefix(base, ctx)
+    matches = sum(1 for _, n, _ in hits if n > 0)
 
     def render(items: list[tuple[str, int, str]]) -> str:
         blocks: list[str] = []
@@ -358,15 +452,25 @@ def _format_hits(hits: list[tuple[str, int, str]], base: Path, ctx: ToolContext)
                     blocks.append("")
                 blocks.append(prefix + rel)
                 current = rel
+            if number == 0:
+                blocks.append("--")
+                continue
             shown = line if len(line) <= GREP_LINE_MAX else line[:GREP_LINE_MAX] + " (truncated)"
-            blocks.append(f"Line {number}: {shown}")
+            mark = ":" if number > 0 else "-"
+            blocks.append(f"Line {abs(number)}{mark} {shown}")
         return "\n".join(blocks)
 
-    if len(hits) <= GREP_MAX:
+    if matches <= GREP_MAX:
         return ToolResult(render(hits))
+    seen, cut = 0, len(hits)
+    for i, (_, n, _) in enumerate(hits):
+        seen += n > 0
+        if seen > GREP_MAX:
+            cut = i
+            break
     spill = write_spill(ctx.spill_dir, "grep", render(hits))
     return ToolResult(
-        render(hits[:GREP_MAX])
-        + f"\n\n({len(hits)} matches; showing the first {GREP_MAX}. Full list: {spill}. "
+        render(hits[:cut])
+        + f"\n\n({matches} matches; showing the first {GREP_MAX}. Full list: {spill}. "
         "Narrow the pattern, path or include.)"
     )
