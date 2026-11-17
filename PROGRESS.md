@@ -929,3 +929,18 @@ git diff --check
   leaderboard has this model at 0/16 on these tasks, so 0/4 is no regression signal; the
   dominant cause is still finishing before every stated requirement is exercised.
   FreeInference runs paused from here at the user's request (lane needed elsewhere).
+- dsz1 causes, argued (gpt-6.2-sol diagnosis, Gemini 4 Argon critique, lead checked the
+  logs): csstree read `background-size => "auto auto"` at step 5 and wrote `auto` in code
+  and tests; httpx leaves the stream open only on a decode error before the body is
+  exhausted (flush-time errors close it); koota filtered the base-trait event in the add
+  branch only, and its own test hid it by adding and removing in one batch;
+  claude-code-by-agents covered every stated point in its tests, exact mismatch unknown.
+  Rejected: prompt rules (contract table, "no hand-copied constants", early stop; the
+  prompt already says this and was not followed, and early stop would have cut httpx's real
+  base64 fix); an echo-literal detector and an AST linter for generator cleanup / branch
+  symmetry (each one is a rule lifted from one of these four tasks, false positives on
+  ordinary constants and intended asymmetry); a best-test-state snapshot (every final
+  tree here was already the best one). Deferred: a test-failure diff between runs. In
+  these logs 15-21 runs per trial use different test subsets (targeted file, full suite,
+  /tmp scripts), so a diff between runs of the same command would rarely apply; revisit
+  only with an A/B lane. No code change from dsz1.
