@@ -867,3 +867,17 @@ git diff --check
   in code). Dropped after review: per-requirement test lists, an up-front requirement
   taxonomy, "stop exploring once you can name the files", the end-of-run last-message
   audit. Adoption only through a pre-registered A/B on unseen DeepSWE tasks (user's call).
+- 12:00 UTC, user adopted base prompt v2 directly, without an A/B (commit 230d85e, wheel
+  6.0.0.dev11; ruff, mypy, pytest green). Data run v2f (run 44060598494, FreeInference GLM,
+  1 attempt, karox6 only) on the three dsg1 KaroX misses whose causes shaped v2: cattrs
+  solved (dev10: 67/69), fastapi-implicit-head-options solved (dev10: 38/43), kysely pending.
+  These tasks informed the prompt, so this is a sanity check, not evidence of a gain.
+- 12:00 UTC, pre-registered comparison v2c (user asked for 4 tasks that KaroX or another CLI
+  failed in dsg1): koota-pair-relation-tracking (all three arms failed), textual-kitty-key-
+  phases and opa-rego-rule-profiling (KaroX failed, both rivals solved), scriggo-method-
+  declarations (KaroX solved, both rivals failed); set indices 28,33,37,40. Arms karox6
+  (dev11), opencode_v2, deepseek_harness; 1 attempt; FreeInference GLM; parallel 2 (the
+  account's concurrency, so 429s do not decide the result as in dsg1); dispatched after v2f
+  ends. Reading: solved per arm, upstream-failed trials (22:40 definition) dropped for every
+  arm of that task. Four tasks at one attempt cannot prove KaroX better (noise is 3-4 tasks
+  on 11); the result is data. opa's miss (test name collision) shaped one v2 sentence.
