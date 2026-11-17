@@ -232,14 +232,17 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
     p.add_argument("--max-seconds", type=float, default=None)
     p.add_argument("--max-cost", type=float, default=None, help="USD, needs --price-*")
     p.add_argument(
-        "--context-window", type=int, default=128_000, help="tokens the served model accepts"
+        "--context-window",
+        type=int,
+        default=None,
+        help="tokens the served model accepts (default: unknown, learned from a context error)",
     )
     p.add_argument(
         "--context-limit",
         type=int,
         default=400_000,
-        help="working context budget in tokens; the smaller of this and --context-window "
-        "decides when history is compacted (default: 400000)",
+        help="working context budget in tokens; history is compacted near the smaller of this "
+        "and --context-window (default: 400000)",
     )
     p.add_argument("--max-output-tokens", type=int, default=None)
     p.add_argument("--compact-at", type=int, default=None, help="tokens")

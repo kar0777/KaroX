@@ -120,7 +120,7 @@ class Notice(Event):
 @dataclass(slots=True)
 class Compacted(Event):
     type: ClassVar[str] = "compacted"
-    mode: str  # "prune" | "summary"
+    mode: str  # "prune" | "summary" | "drop" (overflow fallback without a model)
     tokens_before: int
     tokens_after: int
 

@@ -557,3 +557,28 @@ def test_context_estimate_counts_a_reply_once(tmp_path):
     args = len(json.dumps({"pattern": "*.none"}))
     result = next(m for m in session.messages if m.role == "tool")
     assert seen[1][1] == 35 + args + len(result.content)
+
+
+def test_unknown_model_window_uses_the_user_limit(tmp_path):
+    assert config(tmp_path).effective_window() == 400_000
+    assert config(tmp_path, context_limit=0).effective_window() == 400_000
+    assert config(tmp_path, context_window=64_000, context_limit=0).effective_window() == 64_000
+
+
+def test_context_overflow_without_summary_drops_the_head(tmp_path):
+    overflow = ProviderError("context_window", "too long", status=400)
+    messages = [Message("user", "original")] + [
+        Message("assistant", f"step {i} " + "x" * 4000) for i in range(40)
+    ]
+    # main call overflows, the summary call overflows too, the retried step succeeds
+    provider = ScriptedProvider([Turn(error=overflow), Turn(error=overflow), Turn(text="done")])
+    session = Session(config(tmp_path), provider, messages=messages)
+    before = session.context_tokens()
+    events = run(session, "continue")
+    finished = next(e for e in events if isinstance(e, RunFinished))
+    assert finished.status == "completed"
+    assert "drop" in [e.mode for e in events if e.type == "compacted"]
+    assert session.messages[0].content == "original"
+    assert "No summary" in session.messages[1].content
+    assert session.config.context_window is not None
+    assert session.config.context_window < before

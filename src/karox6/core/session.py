@@ -89,7 +89,7 @@ class SessionConfig:
     max_seconds: float | None = None
     max_cost_usd: float | None = None
     max_output_tokens: int | None = None
-    context_window: int = 128_000  # what the served model accepts
+    context_window: int | None = None  # what the served model accepts (None: unknown)
     context_limit: int = 400_000  # the user's working budget; the smaller of the two counts
     compact_at_tokens: int | None = None  # default: derived from the effective window
     temperature: float | None = None
@@ -110,12 +110,10 @@ class SessionConfig:
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def effective_window(self) -> int:
-        """Tokens the conversation may use: the model's window, capped by the user's limit."""
-        return (
-            min(self.context_window, self.context_limit)
-            if self.context_limit
-            else (self.context_window)
-        )
+        """Tokens the conversation may use: the user's limit, capped by the model's window
+        when it is known (a context-window error from the provider also sets it)."""
+        known = [v for v in (self.context_window, self.context_limit) if v]
+        return min(known) if known else 400_000
 
     def compaction_threshold(self) -> int:
         if self.compact_at_tokens:
@@ -704,11 +702,15 @@ class Session:
         await self._summarize(before, emit)
 
     async def _recover_overflow(self, emit: Callable[[ev.Event], None]) -> bool:
-        """After a context-window error: prune every big tool result, then summarize.
-
-        Returns True when the conversation got smaller (the caller retries once).
-        """
+        """After a context-window error: learn the smaller window, prune every big tool
+        result, then summarize; if no summary can be made, keep the task, a checkpoint of
+        the changed files and the recent tail. True when the conversation got smaller."""
         before = estimate_tokens(self.messages, self.system_prompt)
+        sent = max(self.context_tokens(), before)
+        # The provider refused about ``sent`` tokens: from now on stay well below that.
+        learned = int(sent * 0.85)
+        if self.config.context_window is None or learned < self.config.context_window:
+            self.config.context_window = max(learned, 8_000)
         removed = prune_tool_results(self.messages, keep_last=0)
         if removed:
             self.store.reset(self.messages)
@@ -717,19 +719,40 @@ class Session:
                     mode="prune", tokens_before=before, tokens_after=before - int(removed / 3.5)
                 )
             )
+        summarized = False
         try:
-            # The head itself may not fit in one request: summarize at most half the window.
-            await self._summarize(
+            # The head itself must fit in one request: summarize at most half of it.
+            summarized = await self._summarize(
                 estimate_tokens(self.messages, self.system_prompt),
                 emit,
-                head_budget=self.config.effective_window() // 2,
+                head_budget=min(self.config.effective_window(), sent) // 2,
             )
         except ProviderError as exc:
             if exc.code != "context_window":
                 raise
+        if not summarized:
+            await self._drop_head(before, emit)
         after = estimate_tokens(self.messages, self.system_prompt)
         self._last_input_tokens, self._chars_since_measure = after, 0
         return after < before
+
+    async def _drop_head(self, before: int, emit: Callable[[ev.Event], None]) -> None:
+        """Model-free fallback: keep the task message, a checkpoint and the recent tail."""
+        retain = int(self.config.compaction_threshold() * 0.2)
+        first_user = next((m for m in self.messages if m.role == "user"), None)
+        head, tail = split_for_summary(self.messages, retain)
+        if not head:
+            return
+        files = await asyncio.to_thread(self.files.changed_files)
+        note = (
+            "(No summary: the earlier part of the conversation no longer fit in the model's "
+            "context window and was dropped. Re-read any file you need.)"
+        )
+        rebuilt = [first_user] if first_user is not None and first_user not in tail else []
+        self.messages = [*rebuilt, checkpoint_message(note, files), *tail]
+        self.store.reset(self.messages)
+        after = estimate_tokens(self.messages, self.system_prompt)
+        emit(ev.Compacted(mode="drop", tokens_before=before, tokens_after=after))
 
     async def _summary_call(
         self, request: ModelRequest, emit: Callable[[ev.Event], None]
@@ -751,12 +774,13 @@ class Session:
 
     async def _summarize(
         self, before: int, emit: Callable[[ev.Event], None], head_budget: int | None = None
-    ) -> None:
+    ) -> bool:
+        """Replace the older history with a model-written checkpoint; True on success."""
         retain = int(self.config.compaction_threshold() * 0.2)
         first_user = next((m for m in self.messages if m.role == "user"), None)
         head, tail = split_for_summary(self.messages, retain)
         if not head:
-            return
+            return False
         if head_budget is not None:
             # Keep the newest part of the head that fits; older detail is lost, but the
             # task message is re-added below and the checkpoint lists the changed files.
@@ -765,18 +789,18 @@ class Session:
                 while head and head[0].role == "tool":
                     head = head[1:]
             if not head:
-                return
+                return False
         request = self._request()
         request.messages = self._replay_view([*head, Message("user", COMPACTION_INSTRUCTION)])
         # Tool schemas stay in the first try so the cached prefix is reused; a model that
         # answers with a tool call instead of text gets one retry without tools.
         summary = await self._summary_call(request, emit)
         if summary is None:
-            return
+            return False
         if not summary:
             summary = await self._summary_call(replace(request, tools=[]), emit)
             if not summary:
-                return
+                return False
         files = await asyncio.to_thread(self.files.changed_files)
         rebuilt: list[Message] = []
         if first_user is not None and first_user not in tail:
@@ -788,6 +812,7 @@ class Session:
         after = estimate_tokens(self.messages, self.system_prompt)
         self._last_input_tokens, self._chars_since_measure = after, 0
         emit(ev.Compacted(mode="summary", tokens_before=before, tokens_after=after))
+        return True
 
 
 def _inside(path: Path, workspace: Path) -> tuple[str, ...]:
