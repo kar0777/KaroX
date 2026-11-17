@@ -182,6 +182,7 @@ class Session:
         )
         self._last_input_tokens = 0
         self._chars_since_measure = 0
+        self._deadline: float | None = None  # monotonic end of the current run
         if not self.resumed:
             self.store.append(
                 "meta",
@@ -226,6 +227,9 @@ class Session:
 
     async def _drive(self, prompt: str, emit: Callable[[ev.Event], None]) -> None:
         started = time.monotonic()
+        self._deadline = (
+            started + self.config.max_seconds if self.config.max_seconds is not None else None
+        )
         ctx = ToolContext(
             workspace=self.workspace,
             session_dir=self.store.dir,
@@ -742,7 +746,17 @@ class Session:
                 return
         request = self._request()
         request.messages = self._replay_view([*head, Message("user", COMPACTION_INSTRUCTION)])
-        response = await complete_with_retry(self.provider, request, None, self.config.retry)
+        call = complete_with_retry(self.provider, request, None, self.config.retry)
+        deadline = self._deadline
+        if deadline is None:
+            response = await call
+        else:
+            # The run's time limit bounds compaction too (its retries included); on
+            # timeout the history stays as it is and the main loop reports the limit.
+            try:
+                response = await asyncio.wait_for(call, max(deadline - time.monotonic(), 1.0))
+            except TimeoutError:
+                return
         self._account(0, response, emit)
         summary = response.message.content.strip()
         if not summary:

@@ -499,3 +499,21 @@ def test_context_overflow_twice_ends_the_run(tmp_path):
     finished = next(e for e in events if isinstance(e, RunFinished))
     assert finished.status == "error"
     assert "context_window" in finished.reason
+
+
+def test_compaction_respects_the_run_time_limit(tmp_path):
+    class SlowSummary(ScriptedProvider):
+        async def complete(self, request, on_delta=None):
+            if request.messages[-1].content == COMPACTION_INSTRUCTION:
+                await asyncio.sleep(30)
+            return await ScriptedProvider.complete(self, request, on_delta)
+
+    messages = [Message("user", "original")] + [Message("assistant", "x" * 400) for _ in range(9)]
+    provider = SlowSummary([Turn(text="checkpoint"), Turn(text="done")])
+    session = Session(
+        config(tmp_path, compact_at_tokens=100, max_seconds=1.5), provider, messages=messages
+    )
+    events = run(session, "continue")
+    finished = next(e for e in events if isinstance(e, RunFinished))
+    assert finished.elapsed_s < 10
+    assert not any(m.meta.get("kind") == "compaction" for m in session.messages)
