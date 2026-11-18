@@ -1131,3 +1131,15 @@ git diff --check
   logs `vmstat -t 30` (runner load when the trio shares it). Checked on the tbd1/tbd2
   data: the flag marks all tbd1 trials and DSH's tbd2 task 7 (malformed upstream JSON) as
   upstream-failed. Free replay of dev18 (run 44369239084): green.
+- Speed A/B kw (user: "запускай"), fixed before results. Lever (b) only, as a mechanical
+  flag: dev19 `--command-wait-cap 300` (a foreground command waits at most 300 s, then
+  keeps running as a job and the model gets control back; today the model may ask for
+  600 s). Lever (c) "narrowest check first" is already in BASE_PROMPT; lever (a) (less
+  visible text) has no mechanical form and prompt rules have lost their A/Bs, so it is not
+  tested now. Arms: kwA = dev19 default, kwB = dev19 + `--command-wait-cap 300`; the 30
+  hard12 tasks of the OpenRouter three-CLI comparison (18,19,20,21,22,23,24,31,34,35,36,41,
+  44,45,47,48,49,50,51,54,56,58,60,61,62,65,66,69,70,73; none from the dev pool); ReformBoss;
+  1 attempt; two runs at parallel 1 (2 IPs, 2 requests in flight). Trials marked
+  upstream_failed (time_breakdown.py) are dropped for both arms. Rule: the cap becomes the
+  default if B's total agent time on the kept tasks is <= 90% of A's and B solves >= A - 2
+  (1-attempt noise); otherwise it stays off. Time split (model / tools) reported for both.
