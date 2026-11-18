@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import stat
 import unicodedata
 from collections.abc import Callable
 from pathlib import Path
@@ -22,6 +23,7 @@ from karox6.tools.clones import TIME_BUDGET_S, copies_note, find_copies
 READ_LIMIT = 2000
 READ_MAX_LINE = 2000
 READ_MAX_BYTES = 50 * 1024
+READ_MAX_FILE_BYTES = 64 * 1024 * 1024  # larger files: grep or a shell slice
 BINARY_PROBE = 8000
 
 
@@ -127,6 +129,19 @@ def _read_file(
         listing = _list_dir(path, shown)
         return ToolResult(listing), len(listing)
     try:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            # A FIFO without a writer or a device would block the whole session.
+            return ToolResult(f"Error: {shown} is not a regular file.", is_error=True), 0
+        if info.st_size > READ_MAX_FILE_BYTES:
+            return (
+                ToolResult(
+                    f"Error: {shown} is {info.st_size // (1024 * 1024)} MB, too large to "
+                    "read whole; use grep, or shell head/tail/sed -n on the part you need.",
+                    is_error=True,
+                ),
+                0,
+            )
         data = path.read_bytes()
     except OSError as exc:
         return ToolResult(f"Error: cannot read {shown}: {exc}", is_error=True), 0

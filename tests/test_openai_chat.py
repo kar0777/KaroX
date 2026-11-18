@@ -328,3 +328,41 @@ def test_rate_limit_retries_until_budget():
         assert provider.calls == 10
 
     asyncio.run(go())
+
+
+def _stream_then_reset(body: str):
+    class Reset(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield body.encode()
+            raise httpx.ReadError("connection reset")
+
+    async def go():
+        calls = []
+
+        def handler(http_request):
+            calls.append(1)
+            return httpx.Response(200, stream=Reset())
+
+        provider = OpenAIChatProvider("https://example.test", stream=True)
+        provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            return await provider.complete(request(), None), len(calls)
+        finally:
+            await provider.aclose()
+
+    return asyncio.run(go())
+
+
+def test_reset_after_the_reply_finished_keeps_it():
+    result, calls = _stream_then_reset(sse(chunk({"content": "ok"}, "stop")))
+    assert result.message.content == "ok"
+    assert calls == 1
+    no_done = "data: " + json.dumps(chunk({"content": "ok"}, "stop")) + "\n\n"
+    result, _ = _stream_then_reset(no_done)
+    assert result.message.content == "ok"
+
+
+def test_reset_mid_reply_is_a_transport_error():
+    with pytest.raises(ProviderError) as exc:
+        _stream_then_reset("data: " + json.dumps(chunk({"content": "par"})) + "\n\n")
+    assert exc.value.code == "transport"

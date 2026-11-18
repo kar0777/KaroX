@@ -702,3 +702,48 @@ def test_small_window_still_compacts_below_its_size(tmp_path):
     cfg = config(tmp_path, context_window=6_000)
     assert cfg.compaction_threshold() == 3_000
     assert cfg.compaction_threshold(learned=4_000) == 2_000
+
+
+def test_compaction_ignores_a_preamble_before_a_tool_call(tmp_path):
+    messages = [Message("user", "original")] + [Message("assistant", "x" * 400) for _ in range(9)]
+    provider = ScriptedProvider(
+        [
+            Turn(text="Let me check the file first.", calls=[("glob", {"pattern": "*"})]),
+            Turn(text="checkpoint"),
+            Turn(text="done"),
+        ]
+    )
+    session = Session(config(tmp_path, compact_at_tokens=100), provider, messages=messages)
+    run(session, "continue")
+    assert provider.requests[1].tools == []
+    summary = next(m for m in session.messages if m.meta.get("kind") == "compaction")
+    assert "checkpoint" in summary.content
+    assert "Let me check" not in summary.content
+
+
+def test_compaction_rejects_a_summary_cut_at_the_limit(tmp_path):
+    messages = [Message("user", "original")] + [Message("assistant", "x" * 400) for _ in range(9)]
+    provider = ScriptedProvider(
+        [
+            Turn(text="partial summ", finish_reason="length"),
+            Turn(text="checkpoint"),
+            Turn(text="done"),
+        ]
+    )
+    session = Session(config(tmp_path, compact_at_tokens=100), provider, messages=messages)
+    run(session, "continue")
+    summary = next(m for m in session.messages if m.meta.get("kind") == "compaction")
+    assert "partial summ" not in summary.content
+
+
+def test_content_filter_stop_is_not_a_completed_run(tmp_path):
+    provider = ScriptedProvider([Turn(text="I will now", finish_reason="content_filter")])
+    events = run(Session(config(tmp_path), provider))
+    assert finish(events).status == "error"
+
+
+def test_resume_keeps_records_with_unicode_line_separators(tmp_path):
+    store = SessionStore(tmp_path, "20260101-000000-abcdef")
+    store.message(Message("user", "a\u2028b\u2029c\x85d"))
+    loaded = SessionStore.load(tmp_path, "20260101-000000-abcdef")
+    assert [m.content for m in loaded.messages] == ["a\u2028b\u2029c\x85d"]

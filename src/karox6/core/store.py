@@ -69,7 +69,9 @@ class SessionStore:
         if not valid_session_id(session_id) or not path.is_file():
             raise FileNotFoundError(f"no session {session_id!r} under {home / 'sessions'}")
         loaded = LoadedSession(session_id=session_id, meta={})
-        for line in path.read_text(encoding="utf-8").splitlines():
+        # Split on "\n" only: splitlines() also breaks on U+2028 and other separators
+        # that json.dumps(ensure_ascii=False) leaves inside strings.
+        for line in path.read_text(encoding="utf-8").split("\n"):
             if not line.strip():
                 continue
             try:

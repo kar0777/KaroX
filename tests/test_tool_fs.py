@@ -329,3 +329,21 @@ def test_read_many_caps_files_and_counts_errors(ctx):
 def test_read_many_rejects_offset_and_limit(ctx):
     (ctx.workspace / "a.txt").write_text("a\n")
     assert call(ReadTool(), ctx, file_paths=["a.txt"], limit=5).is_error
+
+
+def test_huge_file_is_refused_with_a_hint(ctx, monkeypatch):
+    from karox6.tools import fs
+
+    monkeypatch.setattr(fs, "READ_MAX_FILE_BYTES", 10)
+    (ctx.workspace / "file").write_text("x" * 100)
+    result = read(ctx, limit=1)
+    assert result.is_error
+    assert "grep" in result.content
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs here")
+def test_fifo_is_not_read(ctx):
+    os.mkfifo(ctx.workspace / "file")
+    result = read(ctx)
+    assert result.is_error
+    assert "not a regular file" in result.content

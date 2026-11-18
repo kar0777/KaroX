@@ -307,6 +307,9 @@ class Session:
                 truncations = 0  # the limit is on consecutive cut-off replies
                 if not message.tool_calls:
                     final_text = message.content
+                    if response.finish_reason == "content_filter":
+                        # The provider cut the reply; it is not the model's final answer.
+                        status, reason = "error", "the provider stopped the reply (content_filter)"
                     break
                 stop = await self._run_calls(message.tool_calls, ctx, emit)
                 if stop:
@@ -800,6 +803,11 @@ class Session:
             except TimeoutError:
                 return None
         self._account(0, response, emit)
+        if response.message.tool_calls or response.finish_reason == "length":
+            # A preamble before a tool call ("let me check the file") or a summary cut at
+            # the token limit is not a checkpoint; replacing the history with it would
+            # lose the work it was meant to keep.
+            return ""
         return response.message.content.strip()
 
     async def _summarize(

@@ -106,8 +106,17 @@ class OpenAIChatProvider:
                     if resp.status_code >= 400:
                         await resp.aread()
                         raise _http_error(resp.status_code, resp.text, resp.headers)
-                    async for line in resp.aiter_lines():
-                        acc.feed_sse_line(line, on_delta)
+                    try:
+                        async for line in resp.aiter_lines():
+                            acc.feed_sse_line(line, on_delta)
+                            if acc.done:
+                                break  # a reset after [DONE] must not discard the reply
+                    except (httpx.TimeoutException, httpx.TransportError):
+                        # The connection dropped after the reply finished (its finish
+                        # reason arrived, only the usage chunk or [DONE] is missing): keep
+                        # it rather than pay for the whole request again.
+                        if acc.finish_reason is None:
+                            raise
                     if not acc.done and acc.finish_reason is None:
                         raise ProviderError(
                             "transport", "stream ended before the response finished"
