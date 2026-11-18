@@ -1090,3 +1090,34 @@ git diff --check
   agents) per moment is the most that runs without 429s, and 429 handling differs between
   the CLIs (DSH ended on provider errors in tbd1), so packing more agents would bias the
   duel. tbd2 stays as launched (trio, parallel 1).
+- 2026-11-18 ~17:30 UTC, user: stop runs and study telemetry (why KaroX is slow). tbd2
+  (run 44329722788) cancelled after 3 of 12 tasks (3, 7: nobody solved; 8 cut); the 6.2
+  model night check removed (sol and astra are the 6.2 family). Tool:
+  karox6-bench-data/telemetry.py -> work/telemetry.csv (556 trials; audit latency and
+  tokens per call, karox6 tool durations, Harbor reward/exception/agent time).
+  Findings, same model DSV4.1F on OpenRouter, 30 tasks, all three arms (runs 43828489989,
+  43829985688): solved karox6 16, opencode_v2 15, deepseek_harness 12. Median agent time
+  282 / 332 / 275 s (typical task: not slower), but total 18,258 / 15,380 / 13,534 s.
+  Split: LLM time 9,354 / 7,940 / 7,795 s (KaroX +18-20%, from +24% output tokens: 1,160k
+  vs 931k / 941k; same effort, the gateway enforces max for everyone); non-LLM (tools)
+  8,904 / 7,440 / 5,739 s. On tasks all three solved (12) median time 244 / 243 / 175 s.
+  The long tail is tool time: pypsa 1,244 s of 1,802, crosstl 1,164 of 1,980, vera 1,971
+  of 2,637; two commands hit the 600 s cap (gammapy: a hung numeric integral; pypsa: a
+  broad test glob), job_output waits of 300 s, broad pytest runs 79 vs DSH 58. Identical
+  slow reruns are negligible (65 s). FreeInference trials are dominated by 429s (700-1000
+  failed calls per KaroX trial, 2-slot limit), so they say nothing about speed. ReformBoss
+  (tbd2, 3 tasks): mean call latency 35 s karox6 vs 26 / 23 s, reasoning per call ~2,200
+  vs ~1,600 tokens.
+  Hypotheses for KaroX (each needs an A/B, none adopted): (a) less visible output per step
+  (text + tool arguments are ~9k vs ~6.5k tokens per task over opencode); (b) a cap or
+  a nudge for single long foreground commands (a 600 s hang is 1/6 of the budget); (c)
+  targeted tests before broad suites.
+  Telemetry gaps to add in KaroX: a timestamp on every JSON event; per-request latency,
+  time to first token, finish_reason and retry wait in `usage`; compaction duration;
+  tool events with exit code and timed_out at top level. Bench gaps: per-trial time
+  breakdown (env setup, agent LLM, agent tools, verifier) for every arm in the report;
+  rival tool timings (opencode has part.time start/end; DSH logs none, derive from audit
+  ts); request start time and time-to-first-token in the gateway audit (it has only the
+  end ts and total latency); automatic upstream-failed marking from audit (failed calls,
+  429s, last success time); runner CPU/memory load when the trio shares a runner; hidden
+  test counts (ctrf) per trial in the report.
