@@ -7,6 +7,7 @@ is the JSON-stream wire format: one object per line with a ``type`` field.
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar
 
@@ -18,6 +19,9 @@ class Event:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["type"] = self.type
+        # Wall clock at serialization; consumers serialize as events arrive, so this is
+        # when the event happened (to the millisecond), for time breakdowns of a run.
+        data["ts"] = round(time.time(), 3)
         return data
 
 
@@ -98,6 +102,14 @@ class UsageUpdate(Event):
     total: dict[str, int]
     cost_usd: float | None
     total_cost_usd: float | None
+    # Timing of the request that produced this usage: latency_s of the attempt that
+    # answered, ttft_s from that attempt's start to its first streamed delta (None
+    # without deltas), total_s including failed attempts and retry waits.
+    latency_s: float | None = None
+    ttft_s: float | None = None
+    total_s: float | None = None
+    finish_reason: str = ""
+    retries: int = 0
 
 
 @dataclass(slots=True)
@@ -123,6 +135,7 @@ class Compacted(Event):
     mode: str  # "prune" | "summary" | "drop" (overflow fallback without a model)
     tokens_before: int
     tokens_after: int
+    duration_s: float = 0.0
 
 
 @dataclass(slots=True)

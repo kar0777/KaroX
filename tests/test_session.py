@@ -781,3 +781,40 @@ def test_split_keeps_the_newest_step_even_when_it_is_over_budget():
     head, tail = split_for_summary(messages, retain_tokens=10)
     assert [m.role for m in tail] == ["assistant", "tool"]
     assert head == messages[:2]
+
+
+def test_events_carry_time_and_usage_carries_call_timing(tmp_path):
+    from karox6.core import events as ev
+    from karox6.core.messages import Message as Msg
+    from karox6.providers.base import Delta, ModelResponse
+
+    class SlowStream:
+        name = "slow"
+        calls = 0
+
+        async def complete(self, request, on_delta=None):
+            SlowStream.calls += 1
+            if SlowStream.calls == 1:
+                raise ProviderError("rate_limit", "busy", status=429, retry_after=0.05)
+            await asyncio.sleep(0.05)
+            if on_delta:
+                on_delta(Delta("text", "do"))
+            await asyncio.sleep(0.05)
+            return ModelResponse(
+                message=Msg("assistant", "done"),
+                usage=Usage(input_tokens=10, output_tokens=2, requests=1),
+                finish_reason="stop",
+                model="slow",
+            )
+
+        async def aclose(self):
+            return None
+
+    session = Session(config(tmp_path), SlowStream())
+    events = run(session)
+    assert all("ts" in e.to_dict() for e in events)
+    usage = next(e for e in events if isinstance(e, ev.UsageUpdate))
+    assert usage.finish_reason == "stop"
+    assert usage.retries == 1
+    assert 0.04 <= usage.ttft_s < usage.latency_s <= usage.total_s
+    assert usage.total_s >= usage.latency_s + 0.04  # the retry wait counts only in total

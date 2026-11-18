@@ -376,8 +376,10 @@ class Session:
         self, step: int, started: float, emit: Callable[[ev.Event], None]
     ) -> ModelResponse | None:
         request = self._request()
+        timing = _CallTiming()
 
         def on_delta(delta: Delta) -> None:
+            timing.delta()
             if self.config.stream_deltas:
                 emit(
                     ev.TextDelta(delta.text)
@@ -386,6 +388,7 @@ class Session:
                 )
 
         def on_retry(attempt: int, delay: float, exc: ProviderError) -> None:
+            timing.retry(delay)
             emit(ev.Retry(attempt=attempt, delay_s=round(delay, 2), error=str(exc)))
 
         call = complete_with_retry(
@@ -399,7 +402,7 @@ class Session:
                 response = await asyncio.wait_for(call, max(remaining, 1.0))
             except TimeoutError:
                 return None
-        self._account(step, response, emit)
+        self._account(step, response, emit, timing=timing)
         return response
 
     def _account(
@@ -409,8 +412,10 @@ class Session:
         emit: Callable[[ev.Event], None],
         *,
         measures_context: bool = True,
+        timing: _CallTiming | None = None,
     ) -> None:
         usage = response.usage
+        times = timing.done() if timing is not None else {}
         usage.requests = max(usage.requests, 1)
         self.usage.add(usage)
         cost = self.config.price.cost(usage) if self.config.price else None
@@ -421,7 +426,14 @@ class Session:
             # conversation's. The reply itself is counted when it is appended.
             self._last_input_tokens = usage.input_tokens
             self._chars_since_measure = 0
-        self.store.append("usage", step=step, usage=usage.to_dict(), cost_usd=cost)
+        self.store.append(
+            "usage",
+            step=step,
+            usage=usage.to_dict(),
+            cost_usd=cost,
+            finish_reason=response.finish_reason,
+            **times,
+        )
         emit(
             ev.UsageUpdate(
                 step=step,
@@ -429,6 +441,8 @@ class Session:
                 total=self.usage.to_dict(),
                 cost_usd=round(cost, 6) if cost is not None else None,
                 total_cost_usd=round(self.cost_usd, 6) if self.config.price else None,
+                finish_reason=response.finish_reason or "",
+                **times,
             )
         )
 
@@ -805,7 +819,14 @@ class Session:
         self, request: ModelRequest, emit: Callable[[ev.Event], None]
     ) -> str | None:
         """The checkpoint text ("" when the model gave none); None when out of time."""
-        call = complete_with_retry(self.provider, request, None, self.config.retry)
+        timing = _CallTiming()
+        call = complete_with_retry(
+            self.provider,
+            request,
+            lambda _delta: timing.delta(),
+            self.config.retry,
+            on_retry=lambda _attempt, delay, _exc: timing.retry(delay),
+        )
         if self._deadline is None:
             response = await call
         else:
@@ -816,7 +837,7 @@ class Session:
                 response = await asyncio.wait_for(call, remaining)
             except TimeoutError:
                 return None
-        self._account(0, response, emit, measures_context=False)
+        self._account(0, response, emit, measures_context=False, timing=timing)
         if response.message.tool_calls or response.finish_reason in ("length", "content_filter"):
             # A preamble before a tool call ("let me check the file") or a summary cut at
             # the token limit is not a checkpoint; replacing the history with it would
@@ -828,6 +849,7 @@ class Session:
         self, before: int, emit: Callable[[ev.Event], None], head_budget: int | None = None
     ) -> bool:
         """Replace the older history with a model-written checkpoint; True on success."""
+        began = time.monotonic()
         retain = int(self._threshold() * 0.2)
         first_user = next((m for m in self.messages if m.role == "user"), None)
         head, tail = split_for_summary(self.messages, retain)
@@ -869,8 +891,49 @@ class Session:
         self.store.reset(self.messages)
         after = estimate_tokens(self.messages, self.system_prompt)
         self._last_input_tokens, self._chars_since_measure = after, 0
-        emit(ev.Compacted(mode="summary", tokens_before=before, tokens_after=after))
+        emit(
+            ev.Compacted(
+                mode="summary",
+                tokens_before=before,
+                tokens_after=after,
+                duration_s=round(time.monotonic() - began, 2),
+            )
+        )
         return True
+
+
+class _CallTiming:
+    """Timing of one model call across its retries (monotonic clock)."""
+
+    __slots__ = ("attempt_start", "first_delta", "retries", "start")
+
+    def __init__(self) -> None:
+        self.start = self.attempt_start = time.monotonic()
+        self.first_delta: float | None = None
+        self.retries = 0
+
+    def delta(self) -> None:
+        if self.first_delta is None:
+            self.first_delta = time.monotonic()
+
+    def retry(self, delay: float) -> None:
+        # The next attempt starts after the wait; deltas of the failed one do not count.
+        self.retries += 1
+        self.attempt_start = time.monotonic() + delay
+        self.first_delta = None
+
+    def done(self) -> dict[str, Any]:
+        end = time.monotonic()
+        return {
+            "latency_s": round(end - self.attempt_start, 2),
+            "ttft_s": (
+                round(self.first_delta - self.attempt_start, 2)
+                if self.first_delta is not None
+                else None
+            ),
+            "total_s": round(end - self.start, 2),
+            "retries": self.retries,
+        }
 
 
 def _user_turns(messages: list[Message]) -> list[Message]:
