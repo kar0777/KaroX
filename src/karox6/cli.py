@@ -284,6 +284,11 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
         action="store_true",
         help="offer run_code: one Python program makes several tool calls (experimental)",
     )
+    p.add_argument(
+        "--copy-notes",
+        action="store_true",
+        help="after an edit, list other places that still hold the replaced code (experimental)",
+    )
     if settings:
         p.set_defaults(**settings)
 
@@ -489,6 +494,7 @@ def _session_config(
         system_append=args.append_system_prompt,
         subagents=args.subagents,
         code_mode=args.code_mode,
+        copy_notes=args.copy_notes,
         wrap_up_steps=_positive(args.wrap_up_steps),
     )
 

@@ -9,6 +9,7 @@ punctuation) is tried; a fallback is used only when it matches exactly one place
 
 from __future__ import annotations
 
+import asyncio
 import re
 import unicodedata
 from collections.abc import Callable
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from karox6.tools.base import ToolContext, ToolResult
+from karox6.tools.clones import copies_note, find_copies
 
 READ_LIMIT = 2000
 READ_MAX_LINE = 2000
@@ -321,10 +323,24 @@ class EditTool:
         note = f" (matched {how})" if how != "exactly" else ""
         plural = "s" if count != 1 else ""
         snippet = changed_snippet(text, updated.replace("\r\n", "\n")) if count == 1 else ""
+        copies = await _copies_note(ctx, path, old_n, new_n) if ctx.copy_notes else ""
         return ToolResult(
-            f"Edited {shown}: replaced {count} occurrence{plural}{note}.{snippet}",
+            f"Edited {shown}: replaced {count} occurrence{plural}{note}.{snippet}{copies}",
             meta={"path": str(path), "match": how},
         )
+
+
+async def _copies_note(ctx: ToolContext, path: Path, old: str, new: str) -> str:
+    """Other places that still hold the replaced code; never fails the edit."""
+    try:
+        path.relative_to(ctx.workspace)
+    except ValueError:
+        return ""
+    try:
+        found = await asyncio.to_thread(find_copies, ctx.workspace, path, old, new)
+    except Exception:
+        return ""
+    return copies_note(found, ctx.reported_copies)
 
 
 SNIPPET_CONTEXT = 3

@@ -44,6 +44,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "apply_patch": (bool,),
     "subagents": (bool,),
     "code_mode": (bool,),
+    "copy_notes": (bool,),
 }
 ENV = {"model": "KAROX_MODEL", "provider": "KAROX_PROVIDER", "base_url": "KAROX_BASE_URL"}
 

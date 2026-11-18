@@ -170,7 +170,13 @@ Using KaroX from ChatGPT, Claude and other web clients (Tailscale tunnel built i
 
 ## Experimental options
 
-Both are off by default and stay so until they win an A/B run on the benchmark.
+All are off by default and stay so until they win an A/B run on the benchmark.
+
+- `--copy-notes`: after an `edit`, KaroX looks for other places in the project (files of the
+  same type, tracked by git when it is a repository) that still hold three consecutive lines
+  of the code the edit replaced, and appends up to five of them to the edit result, each
+  place once per run. A fix made in one copy of duplicated code is then visible in the
+  others. The search is limited to 1.5 s and never fails the edit.
 
 - `--code-mode` adds `run_code`: the agent writes one Python program that calls the other
   tools as functions (`tools.bash(command=...)`, `tools.read(file_path=...)`, ...) and gets
