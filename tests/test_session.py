@@ -747,3 +747,15 @@ def test_resume_keeps_records_with_unicode_line_separators(tmp_path):
     store.message(Message("user", "a\u2028b\u2029c\x85d"))
     loaded = SessionStore.load(tmp_path, "20260101-000000-abcdef")
     assert [m.content for m in loaded.messages] == ["a\u2028b\u2029c\x85d"]
+
+
+def test_split_keeps_the_newest_step_even_when_it_is_over_budget():
+    messages = [
+        Message("user", "task"),
+        Message("assistant", "a"),
+        Message("assistant", "", tool_calls=[ToolCall("c1", "read", "{}")]),
+        Message("tool", "x" * 50_000, tool_call_id="c1"),
+    ]
+    head, tail = split_for_summary(messages, retain_tokens=10)
+    assert [m.role for m in tail] == ["assistant", "tool"]
+    assert head == messages[:2]

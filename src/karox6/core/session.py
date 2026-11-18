@@ -403,7 +403,12 @@ class Session:
         return response
 
     def _account(
-        self, step: int, response: ModelResponse, emit: Callable[[ev.Event], None]
+        self,
+        step: int,
+        response: ModelResponse,
+        emit: Callable[[ev.Event], None],
+        *,
+        measures_context: bool = True,
     ) -> None:
         usage = response.usage
         usage.requests = max(usage.requests, 1)
@@ -411,9 +416,11 @@ class Session:
         cost = self.config.price.cost(usage) if self.config.price else None
         if cost is not None:
             self.cost_usd += cost
-        self._last_input_tokens = usage.input_tokens
-        # The reply itself is counted when it is appended to the history.
-        self._chars_since_measure = 0
+        if measures_context:
+            # A summary call sends only part of the history: its input size is not the
+            # conversation's. The reply itself is counted when it is appended.
+            self._last_input_tokens = usage.input_tokens
+            self._chars_since_measure = 0
         self.store.append("usage", step=step, usage=usage.to_dict(), cost_usd=cost)
         emit(
             ev.UsageUpdate(
@@ -619,7 +626,7 @@ class Session:
             snapshot_on_finish=False,
             stream_deltas=False,
             max_steps=min(cfg.max_steps or SUBAGENT_MAX_STEPS, SUBAGENT_MAX_STEPS),
-            max_seconds=min(cfg.max_seconds or SUBAGENT_MAX_SECONDS, SUBAGENT_MAX_SECONDS),
+            max_seconds=self._subagent_seconds(),
             max_cost_usd=None,
             system_append="\n\n".join(p for p in (cfg.system_append, SUBAGENT_APPEND) if p),
         )
@@ -668,6 +675,13 @@ class Session:
             is_error=not final,
             meta=meta,
         )
+
+    def _subagent_seconds(self) -> float:
+        """A subagent's time limit: its own cap, and never past the parent's deadline."""
+        limit = float(min(self.config.max_seconds or SUBAGENT_MAX_SECONDS, SUBAGENT_MAX_SECONDS))
+        if self._deadline is not None:
+            limit = min(limit, max(self._deadline - time.monotonic(), 1.0))
+        return limit
 
     def _close_dangling_calls(self) -> None:
         """Answer the tool calls a cancelled turn left open, so the history stays valid."""
@@ -802,7 +816,7 @@ class Session:
                 response = await asyncio.wait_for(call, remaining)
             except TimeoutError:
                 return None
-        self._account(0, response, emit)
+        self._account(0, response, emit, measures_context=False)
         if response.message.tool_calls or response.finish_reason == "length":
             # A preamble before a tool call ("let me check the file") or a summary cut at
             # the token limit is not a checkpoint; replacing the history with it would

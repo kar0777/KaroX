@@ -99,6 +99,9 @@ def split_for_summary(
         if acc > retain_tokens:
             break
         start = i
+    # The newest message alone over the budget: keep it (and the call it answers) anyway;
+    # dropping the step the model is on would leave it with no recent context.
+    start = min(start, len(messages) - 1)
     # Move the boundary back while it would orphan tool results.
     while start < len(messages) and messages[start].role == "tool":
         start -= 1

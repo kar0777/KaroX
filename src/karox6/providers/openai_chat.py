@@ -117,7 +117,9 @@ class OpenAIChatProvider:
                         # it rather than pay for the whole request again.
                         if acc.finish_reason is None:
                             raise
-                    if not acc.done and acc.finish_reason is None:
+                    if acc.finish_reason is None:
+                        # Also after [DONE]: a proxy may close the stream normally after
+                        # its upstream dropped mid-reply; partial text is not an answer.
                         raise ProviderError(
                             "transport", "stream ended before the response finished"
                         )
@@ -147,7 +149,12 @@ def to_wire(m: Message) -> dict[str, Any]:
     if m.role == "tool":
         return {"role": "tool", "tool_call_id": m.tool_call_id or "", "content": m.content}
     if m.role == "assistant":
-        out: dict[str, Any] = {"role": "assistant", "content": m.content or None}
+        # content null is valid only beside tool calls (a reasoning-only reply cut at the
+        # token limit has neither).
+        out: dict[str, Any] = {
+            "role": "assistant",
+            "content": (m.content or None) if m.tool_calls else m.content,
+        }
         if m.tool_calls:
             out["tool_calls"] = []
             for call in m.tool_calls:
@@ -197,8 +204,9 @@ class _Accumulator:
             err = chunk["error"]
             message = err.get("message") if isinstance(err, dict) else str(err)
             code = err.get("code") if isinstance(err, dict) else None
-            status = int(str(code)) if str(code).isdigit() else 500
-            raise _http_error(status, str(message), {})
+            kind = err.get("type") if isinstance(err, dict) else None
+            text = str(message) if code is None or str(code).isdigit() else f"{code}: {message}"
+            raise _http_error(_sse_error_status(code, kind), text, {})
         self._chunk(chunk, on_delta)
 
     def _chunk(self, chunk: dict[str, Any], on_delta: DeltaCallback | None) -> None:
@@ -313,6 +321,21 @@ class _Accumulator:
         )
 
 
+def _sse_error_status(code: Any, kind: Any) -> int:
+    """HTTP-like status for an error sent inside the stream; its code is often a string
+    ("rate_limit_exceeded", "context_length_exceeded") rather than a number."""
+    if str(code).isdigit():
+        return int(str(code))
+    label = f"{code} {kind}".lower()
+    if "rate" in label or "quota" in label:
+        return 429
+    if any(hint in label for hint in _CONTEXT_HINTS) or "context" in label:
+        return 400
+    if "overload" in label:
+        return 529
+    return 500
+
+
 def _normalize_finish(raw: str | None, has_calls: bool) -> str:
     if raw in ("length", "max_tokens"):
         return "length"
@@ -340,10 +363,12 @@ def _http_error(status: int, text: str, headers: Any) -> ProviderError:
         code = "auth"
     elif status in (408, 504):
         code = "timeout"
+    elif any(hint in lowered for hint in _CONTEXT_HINTS):
+        # Before the 5xx check: gateways wrap an upstream context overflow in a 500/502,
+        # and retrying the same oversized request cannot succeed.
+        code = "context_window"
     elif status >= 500 or status == 409:
         code = "server"
-    elif any(hint in lowered for hint in _CONTEXT_HINTS):
-        code = "context_window"
     else:
         code = "bad_request"
     return ProviderError(code, snippet or f"HTTP {status}", status=status, retry_after=retry_after)

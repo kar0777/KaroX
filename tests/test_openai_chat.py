@@ -366,3 +366,35 @@ def test_reset_mid_reply_is_a_transport_error():
     with pytest.raises(ProviderError) as exc:
         _stream_then_reset("data: " + json.dumps(chunk({"content": "par"})) + "\n\n")
     assert exc.value.code == "transport"
+
+
+def test_done_without_a_finish_reason_is_not_an_answer():
+    with pytest.raises(ProviderError) as exc:
+        run_response(sse(chunk({"content": "I will now edit"})))
+    assert exc.value.code == "transport"
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        ({"code": "rate_limit_exceeded", "message": "slow down"}, "rate_limit"),
+        ({"code": "context_length_exceeded", "message": "too long"}, "context_window"),
+        ({"type": "server_error", "message": "boom"}, "server"),
+    ],
+)
+def test_stream_error_with_a_string_code(error, code):
+    with pytest.raises(ProviderError) as exc:
+        run_response(sse({"error": error}))
+    assert exc.value.code == code
+
+
+def test_gateway_500_wrapping_a_context_overflow():
+    with pytest.raises(ProviderError) as exc:
+        run_response('{"error": "maximum context length is 128000 tokens"}', status=500)
+    assert exc.value.code == "context_window"
+
+
+def test_reasoning_only_reply_has_string_content_on_the_wire():
+    from karox6.providers.openai_chat import to_wire
+
+    assert to_wire(Message("assistant", ""))["content"] == ""

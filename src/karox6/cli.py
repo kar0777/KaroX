@@ -476,8 +476,8 @@ def _session_config(
         workspace=workspace,
         home=home,
         max_steps=_positive(args.max_steps),  # 0 or less: no limit
-        max_seconds=args.max_seconds,
-        max_cost_usd=args.max_cost,
+        max_seconds=_positive(args.max_seconds),  # 0: no limit, as for --max-steps
+        max_cost_usd=_positive(args.max_cost),
         max_output_tokens=args.max_output_tokens,
         context_window=args.context_window,
         context_limit=args.context_limit,
@@ -499,7 +499,7 @@ def _session_config(
     )
 
 
-def _positive(value: int | None) -> int | None:
+def _positive[N: (int, float)](value: N | None) -> N | None:
     return value if value is not None and value > 0 else None
 
 
