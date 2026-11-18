@@ -1121,3 +1121,13 @@ git diff --check
   end ts and total latency); automatic upstream-failed marking from audit (failed calls,
   429s, last success time); runner CPU/memory load when the trio shares a runner; hidden
   test counts (ctrf) per trial in the report.
+- Telemetry added (user: "делай"). KaroX dev18 (04f6d0c): every JSON event carries `ts`;
+  `usage` events and session records carry latency_s, ttft_s, total_s (with retries and
+  waits), retries, finish_reason; summary compaction reports duration_s. Bench (128a9ab,
+  karox6-adapter): scripts/time_breakdown.py in the hard12 report (per trial, every arm:
+  Harbor phases, model time from the audit, tool time - karox6 events, opencode part
+  timings, others = agent - model -, failed calls, 429s, median TTFT, upstream_failed flag,
+  hidden tests passed/total); the gateway audit records start_epoch and ttft_s; each job
+  logs `vmstat -t 30` (runner load when the trio shares it). Checked on the tbd1/tbd2
+  data: the flag marks all tbd1 trials and DSH's tbd2 task 7 (malformed upstream JSON) as
+  upstream-failed. Free replay of dev18 (run 44369239084): green.
