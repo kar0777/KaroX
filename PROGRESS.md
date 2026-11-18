@@ -952,3 +952,18 @@ git diff --check
   (`getWeather`). First dev12 run on the target model: no regression on these three, the
   sibling-implementation miss (H1) is unchanged; the H1 prompt rule was already rejected
   on cost, so a fix must not be a prompt line.
+- `--copy-notes` (experimental, off; dev13, commits 0b58d6c, 144cfc5): after an edit, other
+  places in files of the same type that still hold 3 consecutive meaningful lines of the
+  replaced code (one of them changed, imports excluded) are appended to the edit result,
+  up to 5, once per run, 1.5 s budget. Source: k6q1 task 13 saw `confluent/message.py`'s
+  `nack` at step 2 and never opened it; that file held three of the replaced lines.
+  Model-free check on git history (`karox6-bench-data/eval_copies.py`, each commit hunk
+  replayed as an edit against the parent tree): KaroX-6, last 150 commits: fires on 15 of
+  315 qualifying edits, 12 of 21 places were changed by the same commit; KaroX-v5 (many
+  snapshot copies under tools/ and lab/): fires on 172 of 965, 622 of 1440 places changed
+  by the same commit. Reviewed by codex gpt-6.2-sol (61 s): deadline not enforced,
+  FIFO/symlink reads, truncation before sorting, dedup and path-escaping issues, all
+  fixed with tests; not taken: an occurrence-aware diff for `ABCABC -> ABC` (only a miss).
+  Bench fix: "newest karox6 wheel" sorted by name picked dev9 over dev10..13 in replay.yml
+  and the hard12 default; earlier replays of dev10-12 therefore ran dev9 (paid runs passed
+  the wheel explicitly and were right).
