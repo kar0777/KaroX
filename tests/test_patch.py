@@ -152,14 +152,16 @@ def test_markers_with_trailing_spaces(tmp_path: Path) -> None:
 
 
 def test_commit_failure_reports_applied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    original = Path.write_bytes
+    from karox6.tools import patch as patch_module
 
-    def failing_write(path: Path, data: bytes) -> int:
+    original = patch_module.write_atomic
+
+    def failing_write(path: Path, data: bytes) -> None:
         if path.name == "b":
             raise OSError("write failed")
-        return original(path, data)
+        original(path, data)
 
-    monkeypatch.setattr(Path, "write_bytes", failing_write)
+    monkeypatch.setattr(patch_module, "write_atomic", failing_write)
     with pytest.raises(PatchError, match="applied: a"):
         apply_patch(patch("*** Add File: a\n+x\n*** Add File: b\n+y"), tmp_path)
     assert (tmp_path / "a").read_bytes() == b"x\n"

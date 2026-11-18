@@ -347,3 +347,44 @@ def test_fifo_is_not_read(ctx):
     result = read(ctx)
     assert result.is_error
     assert "not a regular file" in result.content
+
+
+def test_edit_keeps_bytes_that_are_not_utf8(ctx):
+    (ctx.workspace / "file").write_bytes(b"name = 'caf\xe9'\nvalue = 1\n")
+    read(ctx)
+    result = edit(ctx, "value = 1", "value = 2")
+    assert not result.is_error
+    assert (ctx.workspace / "file").read_bytes() == b"name = 'caf\xe9'\nvalue = 2\n"
+
+
+def test_edit_keeps_mixed_line_endings(ctx):
+    (ctx.workspace / "file").write_bytes(b"a = 1\r\nb = 2\nc = 3\n")
+    read(ctx)
+    assert not edit(ctx, "b = 2", "b = 20").is_error
+    assert (ctx.workspace / "file").read_bytes() == b"a = 1\r\nb = 20\nc = 3\n"
+
+
+def test_failed_write_leaves_the_old_file(ctx, monkeypatch):
+    from karox6.tools import atomic
+
+    (ctx.workspace / "file").write_text("keep me\n")
+    read(ctx)
+
+    def boom(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(atomic.os, "replace", boom)
+    result = edit(ctx, "keep me", "changed")
+    assert result.is_error
+    assert (ctx.workspace / "file").read_text() == "keep me\n"
+    assert [p.name for p in ctx.workspace.iterdir()] == ["file"]  # no temp file left
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_write_keeps_the_file_mode(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("#!/bin/sh\necho hi\n")
+    path.chmod(0o755)
+    read(ctx)
+    assert not edit(ctx, "echo hi", "echo bye").is_error
+    assert path.stat().st_mode & 0o777 == 0o755

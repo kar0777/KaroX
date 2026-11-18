@@ -182,3 +182,15 @@ def test_grep_context_numbers_lines_like_read(ctx, backend):
     (ctx.workspace / "a.txt").write_bytes(b"alpha\x0cbeta\nneedle\nafter\n")
     result = call(GrepTool(), ctx, pattern="needle", context=1)
     assert result.content == "a.txt\nLine 1- alpha\x0cbeta\nLine 2: needle\nLine 3- after"
+
+
+def test_python_grep_does_not_hang_on_a_long_line(ctx, monkeypatch):
+    import time
+
+    monkeypatch.setenv("KAROX_NO_RG", "1")
+    (ctx.workspace / "bundle.min.js").write_text("var a=1;" * 250_000 + "\nfound_here\n")
+    started = time.monotonic()
+    result = call(GrepTool(), ctx, pattern=".*MissingSymbol")
+    assert result.content == "No matches found."
+    assert call(GrepTool(), ctx, pattern="found_here").content.endswith("found_here")
+    assert time.monotonic() - started < 10

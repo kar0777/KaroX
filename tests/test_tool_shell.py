@@ -370,3 +370,23 @@ def test_deadline_cap_never_lengthens_a_wait(ctx):
     assert ctx.wait_cap_s(0.01) == 0.01
     ctx.deadline = time.monotonic() - 5
     assert ctx.wait_cap_s(30) == 0.05
+
+
+def test_job_kill_stops_a_child_after_the_shell_exited(ctx):
+    class Lingering:
+        returncode = 0
+        active = True
+        killed = False
+        kills = 0
+
+        async def kill(self):
+            self.kills += 1
+            self.active = False
+
+    run = Lingering()
+    job = ctx.jobs.register(run)
+    result = asyncio.run(JobKillTool().run({"job_id": job.id}, ctx))
+    assert run.kills == 1
+    assert "stopped" in result.content
+    again = asyncio.run(JobKillTool().run({"job_id": job.id}, ctx))
+    assert "already finished" in again.content

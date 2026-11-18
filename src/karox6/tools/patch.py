@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from karox6.tools.atomic import write_atomic
+
 
 class PatchError(ValueError):
     """A patch is invalid or cannot be applied."""
@@ -284,7 +286,7 @@ def apply_patch(patch_text: str, root: Path) -> PatchResult:
             else:
                 target = destination or path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(action_data)
+                write_atomic(target, action_data)
                 if destination:
                     path.unlink()
             result.changes.append(change)

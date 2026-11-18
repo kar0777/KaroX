@@ -44,6 +44,7 @@ _SKIP_DIRS = {
     ".idea",
 }
 _MAX_FILE_BYTES = 4 * 1024 * 1024
+_MATCH_LINE_CHARS = 5000  # Python fallback: longer lines are matched on this prefix
 
 
 @lru_cache(maxsize=1)
@@ -371,10 +372,16 @@ def _grep_py(root: Path, regex: re.Pattern[str], include: str | None) -> list[tu
         if b"\0" in data[:8000]:
             continue
         text = data.decode("utf-8", "replace").replace("\r\n", "\n")
-        if not whole.search(text):
-            continue
         # Only "\n" ends a line, as in rg and read (splitlines also splits on \f, \x1c...).
         lines = text.split("\n")
+        if any(len(line) > _MATCH_LINE_CHARS for line in lines):
+            # Python's regex engine backtracks: ".*name" on a megabyte-long minified line
+            # is quadratic and would hang the tool. Long lines are searched in their
+            # first _MATCH_LINE_CHARS characters only (rg, when installed, has no limit).
+            lines = [line[:_MATCH_LINE_CHARS] for line in lines]
+            text = "\n".join(lines)
+        if not whole.search(text):
+            continue
         if lines and lines[-1] == "":
             lines.pop()
         for number, line in enumerate(lines, 1):

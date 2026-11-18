@@ -207,7 +207,9 @@ class JobKillTool:
         job = ctx.jobs.get(str(args["job_id"]))
         if job is None:
             return ToolResult(f"Error: no background job {args['job_id']!r}.", is_error=True)
-        if job.run.returncode is not None:
+        if job.run.returncode is not None and not job.run.active:
+            # The shell may have exited while a process it started (`server &`) still
+            # runs and holds the output: that one is still stopped below.
             return ToolResult(f"Job {job.id} already finished ({job.status}).")
         job.killed_by_model = True
         await job.run.kill()

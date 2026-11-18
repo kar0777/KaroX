@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from karox6.tools.atomic import write_atomic
 from karox6.tools.base import ToolContext, ToolResult
 from karox6.tools.clones import TIME_BUDGET_S, copies_note, find_copies
 
@@ -241,9 +242,7 @@ class WriteTool:
             if b"\r\n" in old and "\r\n" not in content:
                 content = content.replace("\n", "\r\n")
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8", newline="") as fh:
-                fh.write(content)
+            write_atomic(path, content.encode("utf-8"))
         except OSError as exc:
             return ToolResult(f"Error: cannot write {shown}: {exc}", is_error=True)
         ctx.files.record_write(path)
@@ -302,14 +301,25 @@ class EditTool:
         if _is_binary(data):
             return ToolResult(f"Error: {shown} is a binary file.", is_error=True)
         had_bom = data.startswith(b"\xef\xbb\xbf")
-        raw = _decode(data)
-        crlf = "\r\n" in raw
-        text = raw.replace("\r\n", "\n")
+        # surrogateescape keeps bytes that are not UTF-8 (a Latin-1 fixture) as they were
+        # instead of turning them into U+FFFD on write.
+        raw = (data[3:] if had_bom else data).decode("utf-8", "surrogateescape")
+        crlfs = raw.count("\r\n")
+        mixed = 0 < crlfs < raw.count("\n")
+        crlf = crlfs > 0 and not mixed
         old_n = old.replace("\r\n", "\n")
         new_n = new.replace("\r\n", "\n")
         replace_all = bool(args.get("replace_all"))
 
-        result = apply_edit(text, old_n, new_n, replace_all)
+        result: tuple[str, int, str] | str
+        if mixed and old_n in raw:
+            # Mixed line endings: edit the text as it is, so lines outside the edit keep
+            # their own endings.
+            result = apply_edit(raw, old_n, new_n, replace_all)
+            text = raw
+        else:
+            text = raw.replace("\r\n", "\n") if crlfs else raw
+            result = apply_edit(text, old_n, new_n, replace_all)
         if isinstance(result, str):
             return ToolResult(f"Error: {result.replace('{path}', shown)}", is_error=True)
         updated, count, how = result
@@ -327,11 +337,11 @@ class EditTool:
             )
         if crlf:
             updated = updated.replace("\n", "\r\n")
-        payload = updated.encode("utf-8")
+        payload = updated.encode("utf-8", "surrogateescape")
         if had_bom:
             payload = b"\xef\xbb\xbf" + payload
         try:
-            path.write_bytes(payload)
+            write_atomic(path, payload)
         except OSError as exc:
             return ToolResult(f"Error: cannot write {shown}: {exc}", is_error=True)
         ctx.files.record_write(path, observe=not unsure)
