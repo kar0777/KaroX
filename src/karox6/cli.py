@@ -789,6 +789,9 @@ class _TextRenderer:
                 sys.stdout.write(data["text"].rstrip("\n") + "\n")
                 sys.stdout.flush()
             self._streamed = False
+        elif kind == "retry":
+            # A failed partial stream is replayed in full by the retry.
+            self._streamed = False
         if self._open_text and kind != "reasoning_delta":
             sys.stdout.write("\n")
             self._open_text = False

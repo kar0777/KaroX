@@ -90,7 +90,7 @@ class SessionStore:
                 loaded.usage.add(Usage.from_dict(record.get("usage") or {}))
                 loaded.cost_usd += float(record.get("cost_usd") or 0.0)
         # A crash between an assistant tool call and its results leaves dangling calls:
-        # answer them as cancelled so providers accept the history. The results that did
+        # answer them (outcome unknown) so providers accept the history. The results that did
         # arrive stay: their effects (edited files) are on disk either way.
         loaded.messages = close_dangling_calls(loaded.messages)
         return loaded
@@ -133,24 +133,36 @@ UNKNOWN_RESULT = (
 
 
 def close_dangling_calls(messages: list[Message]) -> list[Message]:
-    """``messages`` with the last assistant turn's unanswered tool calls answered as of
-    unknown outcome (results that did arrive are kept)."""
-    out = list(messages)
-    last = max((i for i, m in enumerate(out) if m.role == "assistant"), default=-1)
-    if last < 0 or not out[last].tool_calls:
-        return out
-    answered = {m.tool_call_id for m in out[last + 1 :] if m.role == "tool"}
-    for call in out[last].tool_calls:
-        if call.id not in answered:
-            out.append(
-                Message(
-                    "tool",
-                    UNKNOWN_RESULT,
-                    tool_call_id=call.id,
-                    name=call.name,
-                    is_error=True,
-                )
+    """``messages`` with every assistant turn's unanswered tool calls answered as of
+    unknown outcome, right after that turn's results (results that did arrive are kept).
+
+    Every turn, not only the last: a resumed session appends after the repaired turn,
+    and the repair itself lives only in memory, so the next load sees the gap mid-history.
+    """
+    out: list[Message] = []
+    i = 0
+    while i < len(messages):
+        message = messages[i]
+        out.append(message)
+        i += 1
+        if message.role != "assistant" or not message.tool_calls:
+            continue
+        answered: set[str | None] = set()
+        while i < len(messages) and messages[i].role == "tool":
+            answered.add(messages[i].tool_call_id)
+            out.append(messages[i])
+            i += 1
+        out.extend(
+            Message(
+                "tool",
+                UNKNOWN_RESULT,
+                tool_call_id=call.id,
+                name=call.name,
+                is_error=True,
             )
+            for call in message.tool_calls
+            if call.id not in answered
+        )
     return out
 
 

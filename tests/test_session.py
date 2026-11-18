@@ -244,6 +244,22 @@ def test_dangling_calls_are_answered_and_finished_results_kept():
     assert close_dangling_calls(closed) == closed
 
 
+def test_dangling_calls_are_answered_in_every_turn_not_only_the_last():
+    # Resumed once (repair kept in memory only), then more turns were appended.
+    messages = [
+        Message("user", "task"),
+        Message("assistant", tool_calls=[ToolCall("a", "bash", "{}"), ToolCall("b", "bash", "{}")]),
+        Message("tool", "ok", tool_call_id="a"),
+        Message("user", "continue"),
+        Message("assistant", tool_calls=[ToolCall("c", "read", "{}")]),
+        Message("tool", "text", tool_call_id="c"),
+    ]
+    closed = close_dangling_calls(messages)
+    assert [m.tool_call_id for m in closed] == [None, None, "a", "b", None, None, "c"]
+    assert closed[3].content == UNKNOWN_RESULT
+    assert close_dangling_calls(closed) == closed
+
+
 @pytest.mark.parametrize(
     ("mode", "expected"), [("turn", [None, "new"]), ("none", [None, None]), ("all", ["old", "new"])]
 )
