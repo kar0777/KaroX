@@ -329,3 +329,44 @@ def test_stdio_close_leaves_no_process(tmp_path):
         assert proc.stdin.is_closing()
 
     asyncio.run(go())
+
+
+def test_cancelled_load_closes_the_servers_already_connected(tmp_path, monkeypatch):
+    import contextlib
+
+    import pytest
+
+    from karox6.mcp import client
+
+    config = write_config(
+        tmp_path,
+        {
+            "fake": {"command": sys.executable, "args": [FAKE]},
+            # Never answers initialize: the load is still waiting on it when cancelled.
+            "mute": {"command": sys.executable, "args": ["-c", "import time; time.sleep(60)"]},
+        },
+    )
+    closed: list[str] = []
+    real_close = client.close_all
+
+    async def recording_close(handles):
+        closed.extend(h.name for h in handles)
+        await real_close(handles)
+
+    monkeypatch.setattr(client, "close_all", recording_close)
+
+    async def go():
+        task = asyncio.ensure_future(load_mcp_tools(config))
+        await asyncio.sleep(3)  # the fake server connects in well under a second
+        assert not task.done()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert closed == ["fake"]
+
+    bad = tmp_path / "list.json"
+    bad.write_text("[]")
+    with pytest.raises(ValueError, match="JSON object"):
+        asyncio.run(load_mcp_tools(bad))

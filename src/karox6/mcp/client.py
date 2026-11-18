@@ -530,31 +530,53 @@ async def connect(name: str, spec: dict[str, Any]) -> McpServerHandle:
 
 
 async def load_mcp_tools(path: Path) -> tuple[list[McpTool], list[McpServerHandle]]:
-    """Connect every configured server; return their tools and handles (close them later)."""
+    """Connect every configured server; return their tools and handles (close them later).
+
+    On failure or cancellation part-way, the servers already connected are closed here:
+    the caller never received their handles.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: the MCP config must be a JSON object")
     servers = data.get("mcpServers") or data.get("servers") or {}
     if not isinstance(servers, dict):
         raise ValueError(f"{path}: 'mcpServers' must be an object")
+    connected: list[McpServerHandle] = []
 
-    async def one(name: str, spec: Any) -> McpServerHandle | None:
+    async def one(name: str, spec: Any) -> None:
         if not isinstance(spec, dict) or spec.get("disabled"):
-            return None
+            return
         try:
-            return await asyncio.wait_for(connect(name, spec), CONNECT_TIMEOUT_S + 5)
+            handle = await asyncio.wait_for(connect(name, spec), CONNECT_TIMEOUT_S + 5)
         except Exception as exc:
             reason = str(exc) or f"{type(exc).__name__} (no answer in {CONNECT_TIMEOUT_S:g}s)"
             sys.stderr.write(f"karox: MCP server {name!r} skipped: {reason}\n")
-            return None
+            return
+        connected.append(handle)
 
-    handles = [h for h in await asyncio.gather(*(one(n, s) for n, s in servers.items())) if h]
-    tools: list[McpTool] = []
-    seen: set[str] = set()
-    for handle in handles:
-        for spec in handle.tools:
-            tool = McpTool(handle, spec)
-            if tool.name not in seen:
-                seen.add(tool.name)
-                tools.append(tool)
+    try:
+        names = list(servers)
+        await asyncio.gather(*(one(n, servers[n]) for n in names))
+        order = {n: i for i, n in enumerate(names)}
+        handles = sorted(connected, key=lambda h: order.get(h.name, len(order)))
+        tools: list[McpTool] = []
+        seen: set[str] = set()
+        for handle in handles:
+            for spec in handle.tools:
+                try:
+                    tool = McpTool(handle, spec)
+                except Exception as exc:
+                    sys.stderr.write(
+                        f"karox: MCP tool from {handle.name!r} skipped: {type(exc).__name__}: "
+                        f"{exc}\n"
+                    )
+                    continue
+                if tool.name not in seen:
+                    seen.add(tool.name)
+                    tools.append(tool)
+    except BaseException:
+        await asyncio.shield(close_all(connected))
+        raise
     return tools, handles
 
 
