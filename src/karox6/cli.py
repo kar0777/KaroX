@@ -389,14 +389,18 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
     if not workspace.is_dir():
         raise ValueError(f"workspace {workspace} is not a directory")
     config = _session_config(args, workspace, home, stream_deltas=args.stream or not args.json)
-    mcp_tools, mcp_handles = await _mcp_tools(args, home)
+    # The key leaves the environment before any MCP server starts: they inherit it.
     provider = _provider(args)
-    approver = _approver(args.approve_dangerous, json_mode=args.json)
-    session_kwargs = resume_kwargs(home, args.resume) if args.resume else {}
-    session = Session(config, provider, approver=approver, extra_tools=mcp_tools, **session_kwargs)
-    render = _JsonRenderer() if args.json else _TextRenderer()
+    mcp_handles: list[Any] = []
     status = "error"
     try:
+        mcp_tools, mcp_handles = await _mcp_tools(args, home)
+        approver = _approver(args.approve_dangerous, json_mode=args.json)
+        session_kwargs = resume_kwargs(home, args.resume) if args.resume else {}
+        session = Session(
+            config, provider, approver=approver, extra_tools=mcp_tools, **session_kwargs
+        )
+        render = _JsonRenderer() if args.json else _TextRenderer()
         async for event in session.run(task):
             render(event)
             if event.type == "run_finished":
@@ -431,9 +435,10 @@ async def _chat_async(args: argparse.Namespace) -> int:
     config = _session_config(args, workspace, home, stream_deltas=True)
     session_kwargs = resume_kwargs(home, args.resume) if args.resume else {}
     read_line, read_answer = terminal_io(home / "chat_history")
-    mcp_tools, mcp_handles = await _mcp_tools(args, home)
     provider = _provider(args)
+    mcp_handles: list[Any] = []
     try:
+        mcp_tools, mcp_handles = await _mcp_tools(args, home)
         app = ChatApp(
             config=config,
             provider=provider,
@@ -461,6 +466,8 @@ def _session_config(
     price = None
     if args.price_input is not None and args.price_output is not None:
         price = Price(args.price_input, args.price_output, args.price_cached)
+    elif _positive(args.max_cost) is not None:
+        raise ValueError("--max-cost needs --price-input and --price-output")
     extra_body: dict[str, Any] = {}
     if args.extra_body:
         loaded = json.loads(args.extra_body)
@@ -593,8 +600,8 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         )
         server = McpServer(direct=backend, redactor=redactor)
     else:
-        mcp_tools, mcp_handles = await _mcp_tools(args, home)
         provider = _provider(args)
+        mcp_tools, mcp_handles = await _mcp_tools(args, home)
         backend = RunManager(
             lambda ws: _session_config(args, ws, home, stream_deltas=False),
             lambda: provider,
@@ -765,6 +772,7 @@ class _TextRenderer:
 
     def __init__(self) -> None:
         self._open_text = False
+        self._streamed = False
 
     def __call__(self, event: Event) -> None:
         data = event.to_dict()
@@ -773,7 +781,14 @@ class _TextRenderer:
             sys.stdout.write(data["text"])
             sys.stdout.flush()
             self._open_text = True
+            self._streamed = True
             return
+        if kind == "assistant_message":
+            # Without SSE (--no-sse) no deltas arrive: the whole reply comes here.
+            if not self._streamed and data["text"]:
+                sys.stdout.write(data["text"].rstrip("\n") + "\n")
+                sys.stdout.flush()
+            self._streamed = False
         if self._open_text and kind != "reasoning_delta":
             sys.stdout.write("\n")
             self._open_text = False

@@ -12,7 +12,11 @@ from karox6.context.compaction import COMPACTION_INSTRUCTION, split_for_summary
 from karox6.core.events import RunFinished
 from karox6.core.messages import Message, Price, ToolCall, Usage
 from karox6.core.session import Session, SessionConfig
-from karox6.core.store import CANCELLED_RESULT, SessionStore, close_dangling_calls
+from karox6.core.store import (
+    UNKNOWN_RESULT,
+    SessionStore,
+    close_dangling_calls,
+)
 from karox6.providers.base import ProviderError, RetryPolicy
 from karox6.providers.scripted import ScriptedProvider, Turn
 from karox6.tools.base import ToolResult
@@ -235,7 +239,8 @@ def test_dangling_calls_are_answered_and_finished_results_kept():
     closed = close_dangling_calls(messages)
     assert closed[:3] == messages
     assert closed[3].tool_call_id == "b"
-    assert closed[3].content == CANCELLED_RESULT
+    # Loaded after a hard stop: the call may have run, so "cancelled" would be a guess.
+    assert closed[3].content == UNKNOWN_RESULT
     assert close_dangling_calls(closed) == closed
 
 
@@ -668,7 +673,8 @@ def test_cancel_mid_batch_keeps_finished_results(tmp_path):
     loaded = SessionStore.load(session.store.home, session.session_id)
     loaded_tools = [m for m in loaded.messages if m.role == "tool"]
     assert loaded_tools[0].content.startswith("Created done.txt")
-    assert loaded_tools[1].content == CANCELLED_RESULT
+    # The slow command was killed mid-run: on resume its outcome is unknown.
+    assert loaded_tools[1].content == UNKNOWN_RESULT
 
 
 def test_planned_compaction_that_overflows_is_recovered(tmp_path):

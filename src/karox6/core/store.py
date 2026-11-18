@@ -124,11 +124,17 @@ def active_sessions(home: Path, exclude: str | None = None) -> list[str]:
 
 
 CANCELLED_RESULT = "[cancelled by the user before this call finished]"
+# A loaded session's open calls: the process may have been killed after the call ran but
+# before its result was written, so "cancelled" could make the model repeat a side effect.
+UNKNOWN_RESULT = (
+    "[the session stopped before this call's result was recorded: it may or may not have "
+    "run. Check its effects (files, processes) before running it again]"
+)
 
 
 def close_dangling_calls(messages: list[Message]) -> list[Message]:
-    """``messages`` with the last assistant turn's unanswered tool calls answered as
-    cancelled (results that did arrive are kept)."""
+    """``messages`` with the last assistant turn's unanswered tool calls answered as of
+    unknown outcome (results that did arrive are kept)."""
     out = list(messages)
     last = max((i for i, m in enumerate(out) if m.role == "assistant"), default=-1)
     if last < 0 or not out[last].tool_calls:
@@ -139,7 +145,7 @@ def close_dangling_calls(messages: list[Message]) -> list[Message]:
             out.append(
                 Message(
                     "tool",
-                    CANCELLED_RESULT,
+                    UNKNOWN_RESULT,
                     tool_call_id=call.id,
                     name=call.name,
                     is_error=True,

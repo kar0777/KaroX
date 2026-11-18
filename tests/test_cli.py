@@ -166,3 +166,66 @@ def test_task_on_stdin_is_read_as_utf8(payload: bytes, expected: str) -> None:
         [sys.executable, "-c", code], input=payload, capture_output=True, env=env, check=True
     )
     assert out.stdout.decode().strip() == ascii(expected)
+
+
+def test_mcp_servers_start_after_the_key_left_the_environment(tmp_path, monkeypatch):
+    import asyncio
+
+    from karox6 import cli
+
+    monkeypatch.setenv("KX_TEST_KEY", "secret-value")
+    seen: dict[str, object] = {}
+
+    class Stub:
+        closed = False
+
+        async def aclose(self) -> None:
+            Stub.closed = True
+
+    def fake_provider(args):
+        os.environ.pop(args.api_key_env, None)
+        return Stub()
+
+    async def fake_mcp(args, home):
+        seen["key"] = os.environ.get("KX_TEST_KEY")
+        raise ValueError("bad mcp.json")
+
+    monkeypatch.setattr(cli, "_provider", fake_provider)
+    monkeypatch.setattr(cli, "_mcp_tools", fake_mcp)
+    args = cli._parser().parse_args(
+        [
+            "run",
+            "--model",
+            "m",
+            "--api-key-env",
+            "KX_TEST_KEY",
+            "--home",
+            str(tmp_path),
+            "--cwd",
+            str(tmp_path),
+            "task",
+        ]
+    )
+    with pytest.raises(ValueError, match="bad mcp"):
+        asyncio.run(cli._run_async(args, "task"))
+    assert seen["key"] is None
+    assert Stub.closed
+
+
+def test_text_output_without_sse_prints_the_reply(capsys):
+    from karox6.cli import _TextRenderer
+    from karox6.core import events as ev
+
+    render = _TextRenderer()
+    render(ev.AssistantMessage(step=1, text="the answer"))
+    render(ev.TextDelta("streamed"))
+    render(ev.AssistantMessage(step=2, text="streamed"))
+    assert capsys.readouterr().out == "the answer\nstreamed\n"
+
+
+def test_max_cost_without_prices_is_refused(tmp_path):
+    from karox6 import cli
+
+    args = cli._parser().parse_args(["run", "--model", "m", "--max-cost", "1", "task"])
+    with pytest.raises(ValueError, match="price"):
+        cli._session_config(args, tmp_path, tmp_path, stream_deltas=False)
