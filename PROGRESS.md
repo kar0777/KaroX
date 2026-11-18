@@ -1083,3 +1083,10 @@ git diff --check
   same 12 tasks and rule, but arm "trio": the three CLIs in ONE job per task (one runner
   IP, 3 concurrent requests, key limit 4; identical conditions for all arms; the three
   task containers share the 4-CPU runner equally), parallel 1. About 12-14 h.
+- User: ReformBoss budget is not a concern; pick the fastest good setup. Concurrency check
+  (run 44332628711, one runner, 8 parallel tiny calls while tbd2 used 3): all 8 answered
+  but only after 17 refusals (429), so the key's limit is about 4 requests in flight in
+  total, not per IP. The key, not the machine, is the bottleneck: one task's trio (3
+  agents) per moment is the most that runs without 429s, and 429 handling differs between
+  the CLIs (DSH ended on provider errors in tbd1), so packing more agents would bias the
+  duel. tbd2 stays as launched (trio, parallel 1).
