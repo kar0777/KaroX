@@ -25,7 +25,20 @@ def write_atomic(path: Path, data: bytes) -> None:
     mode of an existing target is kept."""
     target = Path(os.path.realpath(path)) if path.is_symlink() else path
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    if target.exists():
+        info = target.stat()
+        if not os.access(target, os.W_OK):
+            raise PermissionError(13, "Permission denied", str(target))
+        if info.st_nlink > 1:
+            # A hard link shares the inode; replacing it would split the copies.
+            target.write_bytes(data)
+            return
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=".karox-", suffix=".tmp", dir=target.parent)
+    except OSError:
+        # The directory forbids new files: write in place, as before.
+        target.write_bytes(data)
+        return
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as fh:

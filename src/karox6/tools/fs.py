@@ -39,6 +39,17 @@ def _is_binary(data: bytes) -> bool:
     return b"\0" in data[:BINARY_PROBE]
 
 
+def _shown_text(text: str) -> str:
+    """Text safe to show and log: bytes kept by surrogateescape become U+FFFD."""
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
+def text_lf_count(raw: str, old: str) -> int:
+    """Occurrences of ``old`` once line endings are normalized (a mixed-ending file may
+    hold more copies than an exact search sees)."""
+    return raw.replace("\r\n", "\n").count(old)
+
+
 def _decode(data: bytes) -> str:
     if data.startswith(b"\xef\xbb\xbf"):
         data = data[3:]
@@ -312,7 +323,7 @@ class EditTool:
         replace_all = bool(args.get("replace_all"))
 
         result: tuple[str, int, str] | str
-        if mixed and old_n in raw:
+        if mixed and old_n in raw and raw.count(old_n) == text_lf_count(raw, old_n):
             # Mixed line endings: edit the text as it is, so lines outside the edit keep
             # their own endings.
             result = apply_edit(raw, old_n, new_n, replace_all)
@@ -347,7 +358,9 @@ class EditTool:
         ctx.files.record_write(path, observe=not unsure)
         note = f" (matched {how})" if how != "exactly" else ""
         plural = "s" if count != 1 else ""
-        snippet = changed_snippet(text, updated.replace("\r\n", "\n")) if count == 1 else ""
+        snippet = (
+            _shown_text(changed_snippet(text, updated.replace("\r\n", "\n"))) if count == 1 else ""
+        )
         copies = await _copies_note(ctx, path, old_n, new_n) if ctx.copy_notes else ""
         return ToolResult(
             f"Edited {shown}: replaced {count} occurrence{plural}{note}.{snippet}{copies}",

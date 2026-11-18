@@ -817,7 +817,7 @@ class Session:
             except TimeoutError:
                 return None
         self._account(0, response, emit, measures_context=False)
-        if response.message.tool_calls or response.finish_reason == "length":
+        if response.message.tool_calls or response.finish_reason in ("length", "content_filter"):
             # A preamble before a tool call ("let me check the file") or a summary cut at
             # the token limit is not a checkpoint; replacing the history with it would
             # lose the work it was meant to keep.

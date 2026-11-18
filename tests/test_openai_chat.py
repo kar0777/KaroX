@@ -357,9 +357,27 @@ def test_reset_after_the_reply_finished_keeps_it():
     result, calls = _stream_then_reset(sse(chunk({"content": "ok"}, "stop")))
     assert result.message.content == "ok"
     assert calls == 1
-    no_done = "data: " + json.dumps(chunk({"content": "ok"}, "stop")) + "\n\n"
+    usage = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}}
+    no_done = "".join(
+        "data: " + json.dumps(c) + "\n\n" for c in (chunk({"content": "ok"}, "stop"), usage)
+    )
     result, _ = _stream_then_reset(no_done)
     assert result.message.content == "ok"
+    # Without usage the max_tokens check cannot run: retried, not kept.
+    with pytest.raises(ProviderError):
+        _stream_then_reset("data: " + json.dumps(chunk({"content": "ok"}, "stop")) + "\n\n")
+
+
+def test_done_with_usage_but_no_finish_reason_is_kept():
+    usage = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}}
+    result, _ = run_response(sse(chunk({"content": "whole answer"}), usage))
+    assert result.message.content == "whole answer"
+
+
+def test_gateway_fault_mentioning_the_context_window_is_retried():
+    with pytest.raises(ProviderError) as exc:
+        run_response("failed to load context window configuration", status=503)
+    assert exc.value.code == "server"
 
 
 def test_reset_mid_reply_is_a_transport_error():

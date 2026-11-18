@@ -34,6 +34,16 @@ _CONTEXT_HINTS = (
     "too many tokens",
     "context window",
 )
+# In a 5xx body only explicit overflow wording counts ("failed to load context window
+# configuration" is a gateway fault to retry, not an overflow).
+_OVERFLOW_HINTS = (
+    "context_length_exceeded",
+    "maximum context",
+    "too many tokens",
+    "exceeds the context",
+    "exceed the context",
+    "context length exceeded",
+)
 
 
 @dataclass(slots=True)
@@ -112,14 +122,16 @@ class OpenAIChatProvider:
                             if acc.done:
                                 break  # a reset after [DONE] must not discard the reply
                     except (httpx.TimeoutException, httpx.TransportError):
-                        # The connection dropped after the reply finished (its finish
-                        # reason arrived, only the usage chunk or [DONE] is missing): keep
-                        # it rather than pay for the whole request again.
-                        if acc.finish_reason is None:
+                        # The connection dropped after the reply finished (finish reason
+                        # and usage arrived, only [DONE] is missing): keep it rather than
+                        # pay for the whole request again. Without usage the max_tokens
+                        # check below could not run, so that case is retried.
+                        if acc.finish_reason is None or not acc.usage_seen:
                             raise
-                    if acc.finish_reason is None:
-                        # Also after [DONE]: a proxy may close the stream normally after
-                        # its upstream dropped mid-reply; partial text is not an answer.
+                    if acc.finish_reason is None and not (acc.done and acc.usage_seen):
+                        # A proxy may close the stream with [DONE] after its upstream
+                        # dropped mid-reply; partial text is not an answer. A gateway that
+                        # never sends finish_reason still sends the final usage chunk.
                         raise ProviderError(
                             "transport", "stream ended before the response finished"
                         )
@@ -188,6 +200,7 @@ class _Accumulator:
         self.calls: dict[int, _PartialCall] = {}
         self.finish_reason: str | None = None
         self.usage = Usage(requests=1)
+        self.usage_seen = False
         self.model: str | None = None
         self.done = False
 
@@ -205,13 +218,15 @@ class _Accumulator:
             message = err.get("message") if isinstance(err, dict) else str(err)
             code = err.get("code") if isinstance(err, dict) else None
             kind = err.get("type") if isinstance(err, dict) else None
-            text = str(message) if code is None or str(code).isdigit() else f"{code}: {message}"
+            labels = [str(x) for x in (code, kind) if x is not None and not str(x).isdigit()]
+            text = ": ".join([*labels, str(message)])
             raise _http_error(_sse_error_status(code, kind), text, {})
         self._chunk(chunk, on_delta)
 
     def _chunk(self, chunk: dict[str, Any], on_delta: DeltaCallback | None) -> None:
         self.model = chunk.get("model") or self.model
         if chunk.get("usage"):
+            self.usage_seen = True
             self._usage(chunk["usage"])
         for choice in chunk.get("choices") or []:
             delta = choice.get("delta") or {}
@@ -363,12 +378,14 @@ def _http_error(status: int, text: str, headers: Any) -> ProviderError:
         code = "auth"
     elif status in (408, 504):
         code = "timeout"
-    elif any(hint in lowered for hint in _CONTEXT_HINTS):
-        # Before the 5xx check: gateways wrap an upstream context overflow in a 500/502,
-        # and retrying the same oversized request cannot succeed.
+    elif status >= 500 and any(hint in lowered for hint in _OVERFLOW_HINTS):
+        # Gateways wrap an upstream context overflow in a 500/502; retrying the same
+        # oversized request cannot succeed.
         code = "context_window"
     elif status >= 500 or status == 409:
         code = "server"
+    elif any(hint in lowered for hint in _CONTEXT_HINTS):
+        code = "context_window"
     else:
         code = "bad_request"
     return ProviderError(code, snippet or f"HTTP {status}", status=status, retry_after=retry_after)

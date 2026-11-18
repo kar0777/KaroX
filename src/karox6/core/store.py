@@ -54,7 +54,8 @@ class SessionStore:
     def append(self, kind: str, **data: Any) -> None:
         record = {"kind": kind, "ts": round(time.time(), 3), **data}
         line = json.dumps(record, ensure_ascii=False, default=str)
-        with self.path.open("a", encoding="utf-8", newline="\n") as fh:
+        # errors="replace": a stray surrogate in a tool result must not end the session.
+        with self.path.open("a", encoding="utf-8", errors="replace", newline="\n") as fh:
             fh.write(line + "\n")
 
     def message(self, message: Message) -> None:

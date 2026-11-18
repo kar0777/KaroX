@@ -388,3 +388,13 @@ def test_write_keeps_the_file_mode(ctx):
     read(ctx)
     assert not edit(ctx, "echo hi", "echo bye").is_error
     assert path.stat().st_mode & 0o777 == 0o755
+
+
+def test_edit_next_to_latin1_bytes_shows_and_logs_clean_text(ctx):
+    import json
+
+    (ctx.workspace / "file").write_bytes(b"x = 'caf\xe9'\ny = 1\n")
+    read(ctx)
+    result = edit(ctx, "y = 1", "y = 2")
+    assert not result.is_error
+    json.dumps(result.content, ensure_ascii=False).encode("utf-8")  # no lone surrogate
