@@ -1061,3 +1061,17 @@ git diff --check
   (failures = one misread requirement) stands; a fresh-context same-model reviewer does
   not catch it. Not retried with other prompts: that would be fitting the reviewer to
   these 30 cases.
+- 2026-11-18, user chose the set: first same-model head-to-head tbd1 on Terminal-Bench 4.0
+  tasks KaroX 6 never ran. Fixed before results: 12 of the 41 tb4 tasks picked by sha256 of
+  the task name (first 12): 3 biped-contact-dynamics, 7 data-anonymization,
+  8 embedding-drift-monitor, 16 html-js-filter, 18 ks-solver-cpp,
+  20 layout-config-recreation2, 22 music-harmony, 24 ontology-kg-querying,
+  28 protein-autointerp-disulfide, 30 risk-scorer-replay, 31 rs-archive-clone,
+  35 sound-change-cascade. Arms karox6 (dev17, default flags), opencode_v2,
+  deepseek_harness; ReformBoss DSV4.1F-1017; 1 attempt; parallel 3 (3 runner IPs, key
+  limit 4). No oracle exists for tb4, so a task no arm solves is dropped as uninformative,
+  and per arm a trial that ended on a provider/infra failure (upstream-failed definition
+  of the 22:40 entry) is dropped for every arm on that task. Reading: a gap of 4 or more
+  solved tasks is a win/loss, under 4 a tie (1-attempt noise). Wall minutes and tokens
+  reported, not a gate. No KaroX change during the run; failures studied afterwards only
+  for general causes (no task-specific rules).
