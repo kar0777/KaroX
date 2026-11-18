@@ -1038,3 +1038,13 @@ git diff --check
   task.md + change.diff, read tools, final reply = review; scripts/spec_probe_agent.py,
   diagnose.yml `probe_wheel`). Pilot spec3p (run 44274034133, same 4 cases): if >= 3 of 4
   runs finish with a review, rerun 30 x 2 and apply the spec1 rule unchanged.
+- Pilot spec3p (run 44274034133): 3 of 4 runs finished with a review (509-897 s, 8-18
+  steps; httpx hit the 1200 s limit), no files written. Instrument passes. Early signs are
+  poor: both solved cases got "gaps" (fastapi: nested include_router defaults; koota:
+  Added/Removed predicate transitions), and abs (failed) named a `null` step and slice
+  aliasing, not the failing `s[-1] = "Z"` assignment. Full run spec3 (all 30 cases): 1
+  sample per case, not 2, because 60 agent reviews at 2 parallel exceed the 4 h job limit;
+  4 workers (the key's concurrency limit, nothing else on ReformBoss meanwhile). Rule
+  unchanged: hits >= 5 of 12 failed cases and NO GAPS on >= 50% of solved cases, else the
+  reviewer idea is dropped. A hit = the review names the requirement behind the failing
+  hidden tests (judged against karox6-bench-data/work/spec1_fail_tests.txt).
