@@ -1075,3 +1075,11 @@ git diff --check
   solved tasks is a win/loss, under 4 a tie (1-attempt noise). Wall minutes and tokens
   reported, not a gate. No KaroX change during the run; failures studied afterwards only
   for general causes (no task-specific rules).
+- tbd1 (run 44315897451) cancelled at 14:43 UTC: from 13:45 every ReformBoss call of all
+  three arms failed (85 of 85, litellm "Connection error" after ~130 s; karox6, opencode_v2
+  and deepseek_harness alike), so the run measured nothing. A single-runner ping at 14:55
+  (run 44329395110) answered in 2.6 s. Cause not determined: a provider outage, or the
+  key's IP limit with 3 runners (GitHub runner egress IPs may vary). Rerun tbd2 with the
+  same 12 tasks and rule, but arm "trio": the three CLIs in ONE job per task (one runner
+  IP, 3 concurrent requests, key limit 4; identical conditions for all arms; the three
+  task containers share the 4-CPU runner equally), parallel 1. About 12-14 h.
