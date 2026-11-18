@@ -977,3 +977,9 @@ git diff --check
   Free replay of dev13 (run 44213099117, karox6_basics, hard12 images, task_dir /testbed):
   3/3 green. Earlier replay attempts failed on my inputs (no scenario; Git Bash rewrote
   /testbed), not on the wheel.
+- 2026-11-18, user: ReformBoss runs may be launched without asking. Copy-notes A/B fixed
+  before results (tasks the idea was not built from: dev pool 39, 40, 52, 68, 71; dev13,
+  ReformBoss, 1 attempt, parallel 1 per run; k6cnA = `--copy-notes`, k6cnB = control):
+  `--copy-notes` becomes default-on only if A solves >= B, A's LLM calls <= 110% of B's,
+  and at least one note in A points at a place the reference fix changed; otherwise it
+  stays off. 5 tasks at 1 attempt is a weak signal: a tie with no useful note keeps it off.
