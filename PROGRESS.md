@@ -967,3 +967,13 @@ git diff --check
   Bench fix: "newest karox6 wheel" sorted by name picked dev9 over dev10..13 in replay.yml
   and the hard12 default; earlier replays of dev10-12 therefore ran dev9 (paid runs passed
   the wheel explicitly and were right).
+- Mechanism check k6cn1 (run 44211067172, dev13 `--copy-notes`, ReformBoss, task 13 only;
+  this task is where the idea came from, so it is not evidence): the note fired once, at
+  the right place ("also appear at faststream/confluent/message.py:75"), and the agent did
+  not open that file. The issue names the aiokafka backend; the agent kept to it and
+  lost the same hidden confluent test, 6.7 min, 58 calls. The note stays informational
+  (no "must" wording: making the model obey a heuristic would trade one failure for
+  scope creep elsewhere); it stays off until a run on tasks it was not built from.
+  Free replay of dev13 (run 44213099117, karox6_basics, hard12 images, task_dir /testbed):
+  3/3 green. Earlier replay attempts failed on my inputs (no scenario; Git Bash rewrote
+  /testbed), not on the wheel.
