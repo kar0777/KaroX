@@ -1008,3 +1008,9 @@ git diff --check
   the failing hidden tests (judged from verifier test-stdout). Building an in-loop
   reviewer is worth an agent A/B only if hits >= 5 of 12 failed cases (either sample) and
   "NO GAPS" on >= 50% of samples of the solved cases; otherwise the idea is dropped.
+- Copy-notes A/B result (k6cnA run 44242941939 vs k6cnB control 44242946895, dev13,
+  ReformBoss): 3/5 vs 3/5 (both solve 52, 68, 71; both lose 39 haystack and 40 armi).
+  The note fired 0 times in A's five sessions, so the A/B measured noise only (assistant
+  turns 311 vs 373; B's armi hit a provider rate limit). Pre-registered rule: tie with no
+  useful note -> `--copy-notes` stays off. Kept as an experimental flag; not worth more paid
+  runs until a model-free signal shows it firing on bench-like edits.
