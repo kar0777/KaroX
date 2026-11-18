@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -19,6 +20,7 @@ from pathlib import Path
 WINDOW = 3  # consecutive meaningful lines that make a copy
 MIN_LINE_CHARS = 4  # letters/digits a line needs to count as meaningful
 MIN_WINDOW_CHARS = 30  # letters/digits a whole window needs
+MAX_WINDOWS = 200  # a huge replacement is probed by its first windows only
 MAX_SHOWN = 5
 MAX_FILES = 20_000
 MAX_FILE_BYTES = 1024 * 1024
@@ -44,6 +46,7 @@ _IMPORT = re.compile(
     r"^(import\s|from\s+\S+\s+import\s|#\s*include\b|using\s|use\s|package\s|"
     r"(const|let|var)\s+\S+\s*=\s*require\()"
 )
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _norm(line: str) -> str:
@@ -66,39 +69,49 @@ def _meaningful(lines: list[str]) -> list[tuple[int, str]]:
 
 def replaced_windows(old: str, new: str) -> list[tuple[str, ...]]:
     """Windows of ``WINDOW`` consecutive meaningful lines of ``old`` that contain at least
-    one line the edit removed or changed."""
+    one line the edit removed or changed (first ``MAX_WINDOWS``, in order)."""
     kept = {_norm(line) for line in new.split("\n")}
     seq = [norm for _, norm in _meaningful(old.split("\n"))]
-    windows: list[tuple[str, ...]] = []
+    windows: dict[tuple[str, ...], None] = {}
     for start in range(len(seq) - WINDOW + 1):
         window = tuple(seq[start : start + WINDOW])
         if all(line in kept for line in window):
             continue
         if sum(_weight(line) for line in window) < MIN_WINDOW_CHARS:
             continue
-        if window not in windows:
-            windows.append(window)
-    return windows
+        windows[window] = None
+        if len(windows) >= MAX_WINDOWS:
+            break
+    return list(windows)
 
 
-def _candidates(root: Path, edited: Path, suffix: str, deadline: float) -> list[str]:
-    """Files of the same type, nearest to the edited file first (a sibling backend or
-    module is found before the time budget runs out). Tracked files when ``root`` is a
-    git repository (the index is read, not the working tree); else a bounded walk."""
-    files: list[str] | None = None
+def _git_files(root: Path, deadline: float) -> list[str] | None:
+    """Tracked paths, or None when ``root`` is not a git work tree. A repository whose
+    index cannot be read in time yields no paths rather than its untracked files."""
     try:
         proc = subprocess.run(
             ["git", "ls-files", "-z", "--cached"],
             cwd=root,
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            timeout=max(deadline - time.monotonic(), 0.1),
+            timeout=max(deadline - time.monotonic(), 0.05),
             check=False,
         )
-        if proc.returncode == 0:
-            files = [p for p in proc.stdout.decode("utf-8", "replace").split("\0") if p]
-    except (OSError, subprocess.SubprocessError):
-        files = None
+    except FileNotFoundError:  # no git installed
+        return None
+    except (OSError, subprocess.SubprocessError):  # timed out: no time left to walk either
+        return []
+    if proc.returncode != 0:
+        return None if b"not a git repository" in proc.stderr.lower() else []
+    raw = proc.stdout.split(b"\0")
+    return [os.fsdecode(p).replace("\\", "/") for p in raw if p]
+
+
+def _candidates(root: Path, edited: Path, suffix: str, deadline: float) -> list[str]:
+    """Files of the same type, nearest to the edited file first (a sibling backend or
+    module is found before the time budget runs out)."""
+    suffix = suffix.lower()
+    files = _git_files(root, deadline)
     if files is None:
         files = []
         for dirpath, dirnames, filenames in os.walk(root):
@@ -107,27 +120,43 @@ def _candidates(root: Path, edited: Path, suffix: str, deadline: float) -> list[
             dirnames[:] = [d for d in dirnames if d not in _SKIP_PARTS]
             rel_dir = Path(dirpath).relative_to(root).as_posix()
             for name in filenames:
-                if name.endswith(suffix):
+                if name.lower().endswith(suffix):
                     files.append(name if rel_dir == "." else f"{rel_dir}/{name}")
     try:
-        here = edited.relative_to(root).as_posix().split("/")
+        here = edited.relative_to(root).as_posix().split("/")[:-1]
     except ValueError:
         here = []
-    out = [p for p in files if p.endswith(suffix) and not _SKIP_PARTS.intersection(p.split("/"))][
-        :MAX_FILES
-    ]
+    unique = {
+        p: None
+        for p in files
+        if p.lower().endswith(suffix) and not _SKIP_PARTS.intersection(p.split("/"))
+    }
 
     def distance(rel: str) -> int:
-        parts = rel.split("/")
+        parts = rel.split("/")[:-1]
         common = 0
-        for a, b in zip(parts[:-1], here[:-1], strict=False):
+        for a, b in zip(parts, here, strict=False):
             if a != b:
                 break
             common += 1
-        return (len(parts) - 1 - common) + (len(here) - 1 - common)
+        return (len(parts) - common) + (len(here) - common)
 
-    out.sort(key=distance)
-    return out
+    return sorted(unique, key=distance)[:MAX_FILES]
+
+
+def _read_regular(root: Path, rel: str) -> bytes | None:
+    """Bytes of a regular file inside ``root``; symlinks, FIFOs, devices, large files and
+    paths that leave the workspace are skipped (a read must not block or wander)."""
+    path = root / rel
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+            return None
+        if ".." in Path(rel).parts:
+            return None
+        return path.read_bytes()
+    except OSError:
+        return None
 
 
 def find_copies(
@@ -139,55 +168,56 @@ def find_copies(
     budget_s: float = TIME_BUDGET_S,
 ) -> list[tuple[str, int]]:
     """Places (workspace-relative path, 1-based line) where a replaced window still
-    occurs, the edited file included (its other copies). Empty when nothing qualifies
-    or the time budget runs out first."""
+    occurs, the edited file included (its other copies). Partial or empty when the time
+    budget runs out."""
+    deadline = time.monotonic() + budget_s
     windows = replaced_windows(old, new)
     suffix = edited.suffix
-    if not windows or not suffix:
+    if not windows or not suffix or time.monotonic() > deadline:
         return []
-    deadline = time.monotonic() + budget_s
+    window_set = set(windows)
     # A cheap byte probe per window: its heaviest line as written (stripped). A copy whose
     # line differs only in inner spacing is missed; the probe keeps a large tree in budget.
-    probes = [max(window, key=_weight).encode("utf-8") for window in windows]
+    probes = {max(window, key=_weight).encode("utf-8") for window in windows}
     found: list[tuple[str, int]] = []
     for rel in _candidates(root, edited, suffix, deadline):
         if time.monotonic() > deadline:
             break
-        path = root / rel
-        try:
-            if path.stat().st_size > MAX_FILE_BYTES:
-                continue
-            data = path.read_bytes()
-        except OSError:
+        data = _read_regular(root, rel)
+        if data is None or not any(probe in data for probe in probes):
             continue
-        live = [w for w, probe in zip(windows, probes, strict=True) if probe in data]
-        if not live:
-            continue
-        text = data.decode("utf-8", errors="replace")
+        text = data.decode("utf-8", errors="replace").lstrip("\ufeff")
         seq = _meaningful(text.replace("\r\n", "\n").split("\n"))
         norms = [norm for _, norm in seq]
-        hits: set[int] = set()
+        previous = -2
         for start in range(len(norms) - WINDOW + 1):
-            if tuple(norms[start : start + WINDOW]) in live:
-                hits.add(seq[start][0] + 1)
-        # One location per copy: consecutive windows of the same copy overlap.
-        last = -10
-        for line in sorted(hits):
-            if line - last > WINDOW:
-                found.append((rel, line))
-            last = line
+            if tuple(norms[start : start + WINDOW]) in window_set:
+                # One location per copy: a copy is a run of consecutive matching windows.
+                if start != previous + 1:
+                    found.append((rel, seq[start][0] + 1))
+                previous = start
     return found
 
 
+def _shown_path(rel: str) -> str:
+    return repr(rel) if _CONTROL.search(rel) else rel
+
+
 def copies_note(found: list[tuple[str, int]], seen: set[str]) -> str:
-    """The note for places not reported before in this run (``seen`` is updated)."""
-    fresh = [(rel, line) for rel, line in found if f"{rel}:{line}" not in seen]
+    """The note for places not shown before in this run; only shown places join
+    ``seen``, so a place cut by ``MAX_SHOWN`` can still be shown after a later edit."""
+    fresh: dict[str, None] = {}
+    for rel, line in found:
+        key = f"{_shown_path(rel)}:{line}"
+        if key not in seen:
+            fresh[key] = None
     if not fresh:
         return ""
-    seen.update(f"{rel}:{line}" for rel, line in fresh)
-    shown = ", ".join(f"{rel}:{line}" for rel, line in fresh[:MAX_SHOWN])
-    more = f" and {len(fresh) - MAX_SHOWN} more" if len(fresh) > MAX_SHOWN else ""
+    keys = list(fresh)
+    shown = keys[:MAX_SHOWN]
+    seen.update(shown)
+    more = f" and {len(keys) - MAX_SHOWN} more" if len(keys) > MAX_SHOWN else ""
     return (
-        f"\nThe code this edit replaced also appears at {shown}{more}; "
+        f"\nLines of the code this edit replaced also appear at {', '.join(shown)}{more}; "
         "check whether those places need the same change."
     )

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from karox6.tools.base import ToolContext, ToolResult
-from karox6.tools.clones import copies_note, find_copies
+from karox6.tools.clones import TIME_BUDGET_S, copies_note, find_copies
 
 READ_LIMIT = 2000
 READ_MAX_LINE = 2000
@@ -336,9 +336,15 @@ async def _copies_note(ctx: ToolContext, path: Path, old: str, new: str) -> str:
         path.relative_to(ctx.workspace)
     except ValueError:
         return ""
+    budget = ctx.wait_cap_s(TIME_BUDGET_S)  # never past the run's time limit
+    if budget < 0.2:
+        return ""
     try:
-        found = await asyncio.to_thread(find_copies, ctx.workspace, path, old, new)
-    except Exception:
+        found = await asyncio.wait_for(
+            asyncio.to_thread(find_copies, ctx.workspace, path, old, new, budget_s=budget),
+            timeout=budget + 1.0,
+        )
+    except Exception:  # includes the wait timing out: the edit itself already succeeded
         return ""
     return copies_note(found, ctx.reported_copies)
 
