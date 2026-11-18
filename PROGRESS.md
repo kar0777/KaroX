@@ -1014,3 +1014,19 @@ git diff --check
   turns 311 vs 373; B's armi hit a provider rate limit). Pre-registered rule: tie with no
   useful note -> `--copy-notes` stays off. Kept as an experimental flag; not worth more paid
   runs until a model-free signal shows it firing on bench-like edits.
+- Spec probe spec1 (run 44257996128, 30 cases x 2, ReformBoss): instrument failure, no
+  verdict on the idea. 58 of 60 calls ended at finish_reason `length` with an empty answer:
+  max reasoning used the gateway's fixed 32,768 output tokens (~110-135k reasoning chars,
+  150-220 s each); only arktype (the longest prompt, 64k) answered. The open-ended "list
+  every gap" request makes the model verify without end. The decision rule is unchanged;
+  only the instrument changes. Pilot spec2p (run 44272802521, 4 cases x 1: 2 failed, 2
+  solved): bounded prompt (numbered requirements, at most 15, one OK/GAP line each, final
+  VERDICT line, the shared 32k limit stated). The pilot judges only the instrument: if at
+  least 3 of 4 answers finish with `stop`, rerun all 30 cases x 2 with this prompt and
+  apply the spec1 rule; otherwise the model-only reviewer is not workable on this gateway.
+- dev17 + faa68fa (after codex gpt-6.2-sol review): the API key leaves the environment
+  before external MCP servers start (they inherited it); a resumed session answers calls
+  without a recorded result as "may or may not have run" (a hard kill can land after a
+  side effect), and every interrupted batch is repaired on load, not only the last (a
+  second resume sent an unanswered call mid-history); --no-sse text output prints the
+  reply; --max-cost without prices is refused.
