@@ -50,6 +50,7 @@ class ToolContext:
     env: dict[str, str] = field(default_factory=dict)
     deadline: float | None = None  # time.monotonic() at which the run's time limit ends
     copy_notes: bool = False  # edit lists other copies of the code it replaced
+    command_wait_cap_s: int | None = None  # foreground commands become jobs after this
     reported_copies: set[str] = field(default_factory=set)  # places already listed
 
     def wait_cap_s(self, wanted_s: float) -> float:

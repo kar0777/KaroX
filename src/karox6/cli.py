@@ -289,6 +289,14 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
         action="store_true",
         help="after an edit, list other places that still hold the replaced code (experimental)",
     )
+    p.add_argument(
+        "--command-wait-cap",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="wait at most this long for a foreground command; it then keeps running as a "
+        "background job (experimental; default: the tool's own maximum)",
+    )
     if settings:
         p.set_defaults(**settings)
 
@@ -502,6 +510,7 @@ def _session_config(
         subagents=args.subagents,
         code_mode=args.code_mode,
         copy_notes=args.copy_notes,
+        command_wait_cap_s=_positive(args.command_wait_cap),
         wrap_up_steps=_positive(args.wrap_up_steps),
     )
 

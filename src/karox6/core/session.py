@@ -111,6 +111,7 @@ class SessionConfig:
     subagents: bool = False  # offer the `agent` tool (M5, off until it wins an A/B)
     code_mode: bool = False  # offer `run_code` (M5, off until it wins an A/B)
     copy_notes: bool = False  # edit lists other copies of replaced code (off until A/B)
+    command_wait_cap_s: int | None = None  # foreground wait cap per command (off until A/B)
     wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
@@ -245,6 +246,7 @@ class Session:
             emit=emit,
             deadline=self._deadline,
             copy_notes=self.config.copy_notes,
+            command_wait_cap_s=self.config.command_wait_cap_s,
         )
         emit(
             ev.RunStarted(

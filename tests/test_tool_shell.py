@@ -390,3 +390,23 @@ def test_job_kill_stops_a_child_after_the_shell_exited(ctx):
     assert "stopped" in result.content
     again = asyncio.run(JobKillTool().run({"job_id": job.id}, ctx))
     assert "already finished" in again.content
+
+
+def test_command_wait_cap_turns_a_long_wait_into_a_job(ctx):
+    import dataclasses
+    import time as _time
+
+    capped = dataclasses.replace(ctx, command_wait_cap_s=1)
+
+    async def scenario():
+        began = _time.monotonic()
+        result = await ShellTool(ctx.shell).run(
+            {"command": python("import time; time.sleep(3); print('later')"), "timeout": 60_000},
+            capped,
+        )
+        assert _time.monotonic() - began < 2.5  # not the 60 s the model asked for
+        assert result.meta["timed_out"]
+        output = await JobOutputTool().run({"job_id": result.meta["job_id"], "wait": True}, ctx)
+        assert "later" in output.content
+
+    asyncio.run(scenario())

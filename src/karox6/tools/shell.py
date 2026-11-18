@@ -188,6 +188,10 @@ class ShellTool:
             except (TypeError, ValueError):
                 timeout_ms = DEFAULT_TIMEOUT_MS
         timeout_ms = min(max(timeout_ms, 1_000), MAX_TIMEOUT_MS)
+        if ctx.command_wait_cap_s is not None:
+            # Past the cap the command keeps running as a job: the model gets control back
+            # (to read its output so far, wait more or kill a hang) instead of blocking.
+            timeout_ms = min(timeout_ms, max(ctx.command_wait_cap_s, 1) * 1000)
 
         danger = check_command(command, shell=self.shell.kind, cwd=cwd, workspace=ctx.workspace)
         if danger is not None:

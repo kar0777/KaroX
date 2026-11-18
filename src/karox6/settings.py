@@ -45,6 +45,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "subagents": (bool,),
     "code_mode": (bool,),
     "copy_notes": (bool,),
+    "command_wait_cap": (int,),
 }
 ENV = {"model": "KAROX_MODEL", "provider": "KAROX_PROVIDER", "base_url": "KAROX_BASE_URL"}
 
