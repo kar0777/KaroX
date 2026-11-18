@@ -1030,3 +1030,11 @@ git diff --check
   side effect), and every interrupted batch is repaired on load, not only the last (a
   second resume sent an unanswered call mid-history); --no-sse text output prints the
   reply; --max-cost without prices is refused.
+- Pilot spec2p (run 44272802521): 0 of 4 answers, all `length` at 32,768 reasoning
+  tokens. By the pilot rule the one-call reviewer is not workable on this gateway. Bench
+  sessions show the cap is a one-shot-format problem: of 24,572 agent steps in saved bench
+  sessions, 12 (0.05%) reached 32k output. So the reviewer is retried in the form it would
+  have inside KaroX: `karox run` (dev17, ReformBoss, fresh session, no repository, only
+  task.md + change.diff, read tools, final reply = review; scripts/spec_probe_agent.py,
+  diagnose.yml `probe_wheel`). Pilot spec3p (run 44274034133, same 4 cases): if >= 3 of 4
+  runs finish with a review, rerun 30 x 2 and apply the spec1 rule unchanged.
