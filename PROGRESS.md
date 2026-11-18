@@ -1048,3 +1048,16 @@ git diff --check
   unchanged: hits >= 5 of 12 failed cases and NO GAPS on >= 50% of solved cases, else the
   reviewer idea is dropped. A hit = the review names the requirement behind the failing
   hidden tests (judged against karox6-bench-data/work/spec1_fail_tests.txt).
+- Spec probe spec3 (run 44279804317, agent form, dev17, 30 cases x 1, 4 workers): the
+  independent reviewer idea is DROPPED by the pre-registered rule, on both criteria.
+  Hits 1 of 12 failed cases (rule >= 5): only textual (character=None for non-shift
+  modified printable keys) names the cause of the failing hidden tests. 5 of 12 failed
+  cases gave no review (4 hit the 1200 s limit, abs ended in error); cattrs,
+  claude-code-by-agents and happy-dom answered NO GAPS; csstree, kea and koota-pair listed
+  gaps unrelated to the failing tests. NO GAPS on 3 of 18 solved cases (17%, rule >= 50%):
+  the reviewer raises gaps on most correct solutions, so in the loop it would send the
+  agent after phantom requirements. Reviews took 5-20 min each. Judging sheet:
+  karox6-bench-data/work/judge_spec3.md (spec_judge_sheet.py). The trajectory finding
+  (failures = one misread requirement) stands; a fresh-context same-model reviewer does
+  not catch it. Not retried with other prompts: that would be fitting the reviewer to
+  these 30 cases.
