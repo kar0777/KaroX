@@ -983,3 +983,28 @@ git diff --check
   `--copy-notes` becomes default-on only if A solves >= B, A's LLM calls <= 110% of B's,
   and at least one note in A points at a place the reference fix changed; otherwise it
   stays off. 5 tasks at 1 attempt is a weak signal: a tie with no useful note keeps it off.
+- 2026-11-18, code review round (codex gpt-6.2-astra core+providers, gpt-6.2-sol tools and
+  then the fix diff, agy Gemini 4 Argon loop+cli, OpenCode DeepSeek tools; each finding
+  traced in code by the lead before fixing; dev14-dev16, commits e04deed..): fixed a Python
+  grep hang (no rg in the image + `.*X` on a long minified line is quadratic: 100 KB took
+  4 s), compaction replacing history with a tool-call preamble or a cut summary, a partial
+  reply after a proxy's [DONE] taken as the final answer, a finished reply discarded and
+  re-paid after a late reset, string SSE error codes (rate limit retried as "server"),
+  context overflow inside a 5xx, atomic writes, edit keeping non-UTF-8 bytes and mixed line
+  endings, job_kill for a `server &` child, read of FIFOs/huge files, summary usage
+  overwriting the context estimate, subagent deadline. Not fixed (not on the bench path):
+  resume after a crash mid-batch, API key visible to MCP subprocesses, apply_patch first
+  match (tool off by default). Replays of dev14 and dev15 green.
+- Near-miss trajectory study (agy Gemini 4 Hydrogen, 16 trials, lead checked fastapi):
+  the "no final broad test run" hypothesis is wrong: all 7 near misses that ended on their
+  own ran the broad suite after the last edit and had 6-44 min left. 7 of 9 failures
+  misread or skipped one stated requirement and wrote their own tests around it (fastapi:
+  the task says `operations` matches OpenAPI, i.e. a dict; the agent returned a list).
+  The prompt-level "re-read the statement" audit already lost its A/B (8 vs 4).
+- Pre-registered spec-reviewer probe (model only, no agent; workflow spec-probe.yml,
+  cases probes/spec1: 12 failed and 18 solved DeepSWE KaroX trials, statement + final
+  model.patch, 2 samples each, DSV4.1F via ReformBoss, prompt fixed in
+  scripts/spec_probe.py before results). A hit = a sample names the requirement behind
+  the failing hidden tests (judged from verifier test-stdout). Building an in-loop
+  reviewer is worth an agent A/B only if hits >= 5 of 12 failed cases (either sample) and
+  "NO GAPS" on >= 50% of samples of the solved cases; otherwise the idea is dropped.
