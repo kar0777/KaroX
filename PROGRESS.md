@@ -1143,3 +1143,17 @@ git diff --check
   upstream_failed (time_breakdown.py) are dropped for both arms. Rule: the cap becomes the
   default if B's total agent time on the kept tasks is <= 90% of A's and B solves >= A - 2
   (1-attempt noise); otherwise it stays off. Time split (model / tools) reported for both.
+- Speed A/B kw result (kwA 44370359350, kwB 44370376700; reports in runs/<id>/_report):
+  3 tasks dropped as upstream-failed (dbt-databricks-1749, scipp-plopp-614,
+  pyjanitor-1786); on the 27 kept: A solved 14, B 12; agent time A 28,355 s, B 27,372 s
+  (96.5%, rule <= 90%). The command wait cap stays OFF. Split on ReformBoss: model 66%
+  (A 18,617 s), tools 31% (8,706 s); median TTFT 4.6 s. Per task the same build differs a
+  lot between arms (cyclopts 1,326 vs 287 s, nicegui-6485 277 vs 1,285 s): single-attempt
+  time is as noisy as the solve count.
+  Bench defect found by the new telemetry: 660 ReformBoss refusals over the two runs, all
+  "key used from 4 (or 5) different IP addresses in 10 minutes". Every Harbor job runs on
+  a fresh GitHub runner with a new IP, so even two parallel runs pass 3 IPs within 10
+  minutes as jobs turn over; this, not the 4-request limit, is what killed tbd1. The
+  refusals land on random tasks and their waits count as agent time. Fix next: one runner
+  runs a chunk of tasks sequentially (one IP for hours), and A/B arms run side by side in
+  the same job (identical conditions).
