@@ -1157,3 +1157,11 @@ git diff --check
   refusals land on random tasks and their waits count as agent time. Fix next: one runner
   runs a chunk of tasks sequentially (one IP for hours), and A/B arms run side by side in
   the same job (identical conditions).
+- Bench fix (karox-hard12-bench, karox6-adapter): input `chunk` = tasks per job, run one
+  after another on the same runner (one IP for hours; docker pruned between tasks); arm
+  groups `a+b` run side by side in each Harbor job (`trio` = karox6+opencode_v2+
+  deepseek_harness); a `karox6b` arm (own gateway alias, wheel and flags) for paired A/B
+  under identical conditions; job timeout 355 min. tbd3 = the pre-registered tbd1
+  comparison (same 12 TB4 tasks, same rule), trio, chunk 4, parallel 1 (<= 2 IPs per 10
+  min, 3 requests in flight). tbd2's tasks 3 and 7 are not reused (its runs had runner
+  turnover too).
