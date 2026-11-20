@@ -218,3 +218,70 @@ def test_too_many_wrong_codes_end_the_sign_in(tmp_path):
         assert evil.status_code == 400
 
     serve(tmp_path, steps)
+
+
+def test_sign_in_under_a_shared_path(tmp_path):
+    """Published as https://host/karox6 (port 443 shared with another site): every link
+    the server hands out carries the path, and requests work with or without it (whether
+    or not the proxy strips it)."""
+    manager, _ = make_manager(tmp_path, [])
+    oauth = OAuth(tmp_path / "oauth.json")
+    http = HttpMcp(McpServer(manager), token=TOKEN, oauth=oauth)
+    http.mount = oauth.prefix = "/karox6"
+    host = {"Host": "box.ts.net"}
+
+    async def go():
+        listener = await http.start("127.0.0.1", 0)
+        port = listener.sockets[0].getsockname()[1]
+        async with listener, httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+            r = await client.post("/karox6/mcp", json=INIT, headers=host)
+            assert r.status_code == 401
+            meta_url = "https://box.ts.net/karox6/.well-known/oauth-protected-resource/mcp"
+            assert meta_url in r.headers["www-authenticate"]
+            for prefix in ("/karox6", ""):
+                res = await client.get(
+                    f"{prefix}/.well-known/oauth-protected-resource/mcp", headers=host
+                )
+                assert res.json()["resource"] == "https://box.ts.net/karox6/mcp"
+            meta = (
+                await client.get("/karox6/.well-known/openid-configuration", headers=host)
+            ).json()
+            assert meta["issuer"] == "https://box.ts.net/karox6"
+            assert meta["token_endpoint"] == "https://box.ts.net/karox6/oauth/token"
+            reg = await client.post("/karox6/oauth/register", json={"redirect_uris": [REDIRECT]})
+            verifier, challenge = pkce()
+            query = urlencode(
+                {
+                    "response_type": "code",
+                    "client_id": reg.json()["client_id"],
+                    "redirect_uri": REDIRECT,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                }
+            )
+            page = await client.get(f"/karox6/oauth/authorize?{query}", headers=host)
+            assert "action=authorize>" in page.text  # relative: stays under /karox6
+            request_id = re.search(r"name=request_id value='([^']+)'", page.text).group(1)
+            ok = await client.post(
+                "/karox6/oauth/authorize",
+                content=urlencode({"request_id": request_id, "code": oauth.pin}),
+                headers=FORM,
+            )
+            code = parse_qs(urlsplit(ok.headers["location"]).query)["code"][0]
+            tok = await client.post(
+                "/karox6/oauth/token",
+                content=urlencode(
+                    {
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": REDIRECT,
+                        "code_verifier": verifier,
+                    }
+                ),
+                headers=FORM,
+            )
+            bearer = {"Authorization": f"Bearer {tok.json()['access_token']}"}
+            assert (await client.post("/karox6/mcp", json=INIT, headers=bearer)).status_code == 200
+            assert (await client.post(f"/karox6/mcp/{TOKEN}", json=INIT)).status_code == 200
+
+    asyncio.run(go())

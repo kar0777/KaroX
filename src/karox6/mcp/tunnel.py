@@ -89,8 +89,11 @@ def open_tailscale(
     local_host: str = "127.0.0.1",
     exe: str | None = None,
     run: Runner = run_cli,
+    mount: str = "/karox6",
 ) -> Tunnel:
-    """Route ``https://<this machine>.ts.net[:port]/`` to ``http://<local_host>:<local_port>``."""
+    """Route ``https://<this machine>.ts.net[:port][/mount]/`` to
+    ``http://<local_host>:<local_port>``; ``Tunnel.url`` ends with the mount when one was
+    needed (the local server then accepts paths with and without it)."""
     exe = exe or find_tailscale()
     if not exe:
         raise TunnelError(
@@ -123,16 +126,39 @@ def open_tailscale(
     target = f"http://{shown}:{local_port}"
     # Never guess: a config we could not read may hold another program's routes.
     config = _serve_config(exe, run)
-    port = free_port(config, host, target, public=public)
-    if port is None:
+    # Hosted connectors (ChatGPT) only reach the standard port 443. When another program
+    # serves the root of 443, KaroX adds its own path there (`mount`) and leaves that
+    # program's routes as they are; 8443 and 10000 are the last resort.
+    found: int | None = 443
+    path = "/"
+    if not usable(config, host, 443, target, public=public):
+        if mount and mount_free(config, host, mount, target, public=public):
+            path = mount
+        else:
+            found = free_port(config, host, target, public=public)
+    if found is None:
         raise TunnelError(
             "the HTTPS ports Tailscale can publish (443, 8443, 10000) all serve something "
             "else already (see `tailscale serve status`); free one with "
             "`tailscale funnel --https=<port> off`"
         )
+    port = found
     kind = "funnel" if public else "serve"
     url = f"https://{host}" if port == 443 else f"https://{host}:{port}"
+    url += "" if path == "/" else path
     publish = [exe, kind, "--bg", "--yes", f"--https={port}", target]
+    if path != "/":
+        publish[-1:-1] = [f"--set-path={path}"]
+
+    def present(now: dict[str, Any]) -> bool:
+        routes = _routes(now, host, port)
+        return isinstance(routes, dict) and routes.get(path) == {"Proxy": target}
+
+    def still_usable(now: dict[str, Any]) -> bool:
+        if path == "/":
+            return usable(now, host, port, target, public=public)
+        return mount_free(now, host, path, target, public=public)
+
     # stop and keep run in threads: once stop has run, a keep still in flight or a later
     # one must not put the route back.
     lock = threading.Lock()
@@ -148,9 +174,10 @@ def open_tailscale(
                 now = _serve_config(exe, run)
             except TunnelError:
                 return
-            if _routes(now, host, port) == {"/": {"Proxy": target}}:
+            mine = present(now) and (path != "/" or len(_routes(now, host, port)) == 1)
+            if mine:
                 with contextlib.suppress(TunnelError):
-                    run([exe, kind, f"--https={port}", "--set-path=/", target, "off"], 30)
+                    run([exe, kind, f"--https={port}", f"--set-path={path}", target, "off"], 30)
 
     def keep() -> str | None:
         with lock:
@@ -158,12 +185,12 @@ def open_tailscale(
                 return None
             try:
                 now = _serve_config(exe, run)
-                if not usable(now, host, port, target, public=public):
+                if not still_usable(now):
                     return (
                         f"the Tailscale route on port {port} now serves something else; "
                         "KaroX leaves it alone, so the connector URL does not reach KaroX"
                     )
-                if port in _ports(now):
+                if present(now):
                     return None  # still ours
                 code, out = run(publish, 60)
             except TunnelError as exc:
@@ -216,6 +243,21 @@ def usable(config: dict[str, Any], host: str, port: int, target: str, *, public:
     ours = _routes(config, host, port) == {"/": {"Proxy": target}}
     funnel = _section(config, "AllowFunnel")
     return ours and bool(funnel.get(f"{host}:{port}")) == public
+
+
+def mount_free(config: dict[str, Any], host: str, mount: str, target: str, *, public: bool) -> bool:
+    """Port 443 already serves web routes with the same visibility and ``mount`` on it is
+    unused or already routes to ``target``: KaroX may add (or reuse) that one path."""
+    for session in _section(config, "Foreground").values():
+        if isinstance(session, dict) and 443 in _ports(session):
+            return False
+    tcp = _section(config, "TCP").get("443")
+    routes = _routes(config, host, 443)
+    if not isinstance(tcp, dict) or not tcp.get("HTTPS") or not isinstance(routes, dict):
+        return False  # not a web listener (raw TCP forward) or not in a shape we know
+    if bool(_section(config, "AllowFunnel").get(f"{host}:443")) != public:
+        return False
+    return routes.get(mount) in (None, {"Proxy": target})
 
 
 def _ports(config: dict[str, Any]) -> set[int]:

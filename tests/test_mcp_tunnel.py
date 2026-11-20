@@ -44,6 +44,15 @@ class FakeTailscale:
         if args == ["serve", "status", "--json"]:
             return self.serve_status or (0, json.dumps(self.serve))
         port = int(next(a for a in args if a.startswith("--https="))[8:])
+        path = next((a[11:] for a in args if a.startswith("--set-path=")), "/")
+        key = f"{HOST}:{port}"
+        handlers = self.serve.get("Web", {}).get(key, {}).get("Handlers", {})
+        if path != "/":  # one path on a listener: the other routes stay
+            if args[-1] == "off":
+                handlers.pop(path, None)
+            elif self.applied:
+                handlers[path] = {"Proxy": args[-1]}
+            return (0, "") if args[-1] == "off" else self.publish
         if args[-1] == "off":
             for part in ("TCP", "Web", "AllowFunnel"):
                 self.serve.get(part, {}).pop(str(port), None)
@@ -82,14 +91,48 @@ def test_funnel_on_the_first_free_port_and_stop_removes_only_it() -> None:
     assert fake.calls[-1] == ["funnel", "--https=443", "--set-path=/", TARGET, "off"]
 
 
-def test_routes_of_other_programs_are_left_alone() -> None:
-    """Another program (here: a KaroX 5 bridge) holds 443 and 8443: KaroX takes 10000."""
-    fake = FakeTailscale(serve=merged(busy(443, "http://127.0.0.1:9000"), busy(8443, TARGET[:-1])))
+def test_a_site_on_443_gets_a_karox_path_beside_it() -> None:
+    """Another site serves the root of 443 (hosted connectors reach only 443): KaroX adds
+    /karox6 there, keeps it while it runs and removes only that path."""
+    site = {"/": {"Proxy": "http://127.0.0.1:3001"}}
+    fake = FakeTailscale(serve=merged(busy(443, "http://127.0.0.1:3001"), busy(8443, TARGET[:-1])))
     tunnel = open_tailscale(8765, exe="ts", run=fake)
-    assert tunnel.url == f"https://{HOST}:10000"
+    assert tunnel.url == f"https://{HOST}/karox6"
+    assert fake.calls[-1] == [
+        "funnel",
+        "--bg",
+        "--yes",
+        "--https=443",
+        "--set-path=/karox6",
+        TARGET,
+    ]
+    routes = fake.serve["Web"][f"{HOST}:443"]["Handlers"]
+    assert routes == {**site, "/karox6": {"Proxy": TARGET}}
+    before = len(fake.calls)
+    assert tunnel.keep() is None  # intact: nothing re-published
+    assert len(fake.calls) == before + 1
+    del routes["/karox6"]  # vanished (tailscale restarted): put back
+    assert "put it back" in (tunnel.keep() or "")
+    assert routes["/karox6"] == {"Proxy": TARGET}
     tunnel.stop()
     offs = [c for c in fake.calls if c[-1] == "off"]
-    assert offs == [["funnel", "--https=10000", "--set-path=/", TARGET, "off"]]
+    assert offs == [["funnel", "--https=443", "--set-path=/karox6", TARGET, "off"]]
+    assert routes == site  # the site's own route untouched
+
+
+def test_443_that_is_no_web_listener_is_left_alone() -> None:
+    """Raw TCP on 443, or a private listener when the bridge is public: next free port."""
+    tcp = {"TCP": {"443": {"TCPForward": "127.0.0.1:22"}}}
+    assert (
+        open_tailscale(8765, exe="ts", run=FakeTailscale(serve=tcp)).url == f"https://{HOST}:8443"
+    )
+    private = busy(443, "http://127.0.0.1:3001", funnel=False)
+    tunnel = open_tailscale(8765, exe="ts", run=FakeTailscale(serve=private))
+    assert tunnel.url == f"https://{HOST}:8443"
+    taken = busy(443, "http://127.0.0.1:3001")
+    taken["Web"][f"{HOST}:443"]["Handlers"]["/karox6"] = {"Proxy": "http://127.0.0.1:1"}
+    tunnel = open_tailscale(8765, exe="ts", run=FakeTailscale(serve=taken))
+    assert tunnel.url == f"https://{HOST}:8443"
 
 
 def test_a_route_left_by_a_killed_karox_is_reused() -> None:
@@ -109,7 +152,10 @@ def test_no_free_port() -> None:
     config = merged(*(busy(p, "http://127.0.0.1:1") for p in (443, 8443, 10000)))
     assert free_port(config, HOST, TARGET, public=True) is None
     with pytest.raises(TunnelError, match="already"):
-        open_tailscale(8765, exe="ts", run=FakeTailscale(serve=config))
+        open_tailscale(8765, exe="ts", run=FakeTailscale(serve=config), mount="")
+    # with a path allowed (the default), the 443 listener still takes one
+    tunnel = open_tailscale(8765, exe="ts", run=FakeTailscale(serve=config))
+    assert tunnel.url == f"https://{HOST}/karox6"
 
 
 @pytest.mark.parametrize(

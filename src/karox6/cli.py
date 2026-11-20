@@ -14,6 +14,7 @@ import sys
 from collections.abc import Coroutine, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from karox6.core.events import Event
@@ -556,8 +557,6 @@ def _session_config(
 
 def _local_url(url: str | None) -> bool:
     """A model server on this machine (Ollama, LM Studio, ...) usually needs no key."""
-    from urllib.parse import urlsplit
-
     host = urlsplit(url or "").hostname or ""
     return host in ("localhost", "127.0.0.1", "::1")
 
@@ -702,6 +701,9 @@ async def _mcp_async(args: argparse.Namespace) -> None:
             if args.tunnel:
                 tunnel = await _open_tunnel(bound, host, public=args.tunnel == "tailscale")
                 keeper = asyncio.ensure_future(_keep_tunnel(tunnel))
+                # published under a path (port 443 shared with another site): links the
+                # server hands out must carry it
+                http.mount = oauth.prefix = urlsplit(tunnel.url).path.rstrip("/")
             where = "public internet" if tunnel and tunnel.public else "your tailnet"
             mode = "  direct tools" if args.direct else ""
             sys.stderr.write(

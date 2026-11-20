@@ -180,6 +180,9 @@ class HttpMcp:
         self._open = 0
         self.oauth = oauth
         self.access_log = access_log
+        # A path the HTTPS proxy publishes this server under (Tailscale `--set-path`, set
+        # once the tunnel is open). Requests may arrive with or without it.
+        self.mount = ""
 
     async def start(self, host: str, port: int) -> asyncio.Server:
         return await asyncio.start_server(self._connection, host, port, limit=64 * 1024)
@@ -195,6 +198,7 @@ class HttpMcp:
                 if head is None:
                     break
                 method, target, headers = head
+                target = self.unmount(target)
                 keep = headers.get("connection", "").lower() != "close"
                 # Refuse before reading the body, so an unauthenticated client cannot make
                 # the server buffer large uploads: a small body is dropped, a large one
@@ -360,6 +364,13 @@ class HttpMcp:
             return 202, {**cors, **extra}, b""
         payload = replies if batch else replies[0]
         return _json(200, payload, {**cors, **extra})
+
+    def unmount(self, target: str) -> str:
+        if self.mount and (
+            target == self.mount or target.startswith((self.mount + "/", self.mount + "?"))
+        ):
+            return target[len(self.mount) :] or "/"
+        return target
 
     def _authorized(self, path: str, headers: dict[str, str]) -> bool:
         if path.startswith(self.path + "/"):

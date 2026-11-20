@@ -87,6 +87,7 @@ class OAuth:
 
     state_path: Path
     mcp_path: str = "/mcp"
+    prefix: str = ""  # the public path this server is published under, e.g. "/karox6"
     pin: str = field(default_factory=new_pin)
     on_event: Any = None  # callable(str): one line per sign-in step, for the log
     _pending: dict[str, _Pending] = field(default_factory=dict)
@@ -134,7 +135,7 @@ class OAuth:
         host = headers.get("x-forwarded-host") or headers.get("host") or "localhost"
         local = host.split(":")[0] in ("localhost", "127.0.0.1", "[::1]")
         proto = headers.get("x-forwarded-proto") or ("http" if local else "https")
-        return f"{proto}://{host}"
+        return f"{proto}://{host}{self.prefix}"
 
     def challenge_header(self, headers: dict[str, str]) -> dict[str, str]:
         meta = f"{self.base_url(headers)}/.well-known/oauth-protected-resource{self.mcp_path}"
@@ -419,7 +420,7 @@ def _approval_page(request_id: str, client: str, error: str) -> Response:
         f"<h1>Connect {html.escape(client)} to KaroX</h1>"
         "<p>It will be able to read, edit and run commands in your project on this computer. "
         "Type the approval code shown in your KaroX terminal.</p>"
-        f"{err}<form method=post action=/oauth/authorize>"
+        f"{err}<form method=post action=authorize>"
         f"<input type=hidden name=request_id value='{html.escape(request_id, quote=True)}'>"
         "<input name=code autocomplete=off autofocus placeholder='ABCD-EFGH' maxlength=12>"
         "<button type=submit>Approve</button></form></main>"
