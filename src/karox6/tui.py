@@ -370,8 +370,9 @@ class ChatApp:
         elif name == "/key":
             await self._set_key()
         elif name == "/model":
-            if arg:
+            if arg and arg != self.config.model:
                 self.config.model = arg
+                self.session.forget_model_state(provider_changed=False)
             self.write(f"model: {self.config.model}\n")
         elif name == "/setup":
             await self._setup()
@@ -409,6 +410,8 @@ class ChatApp:
         old = self.provider
         self.provider = make_provider(choice.provider, base_url=choice.base_url, api_key=key)
         self.session.provider = self.provider
+        switched = choice.provider != self.config.provider_name
+        self.session.forget_model_state(provider_changed=switched)
         self.config.model = choice.model
         self.config.provider_name = choice.provider
         with contextlib.suppress(Exception):

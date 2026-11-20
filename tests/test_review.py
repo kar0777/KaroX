@@ -141,3 +141,29 @@ def test_step_notices_arrive_after_their_step(tmp_path):
     notes = [m for m in session.messages if m.meta.get("kind") == "step"]
     assert [m.content for m in notes] == ["report now"]
     assert session.messages.index(notes[0]) < len(session.messages) - 3
+
+
+def test_switching_models_forgets_what_the_old_one_taught(tmp_path):
+    from karox6.core.messages import Message, ToolCall
+
+    session = Session(
+        SessionConfig(model="m", workspace=tmp_path, home=tmp_path / "home"),
+        ScriptedProvider([]),
+        messages=[
+            Message("user", "task"),
+            Message(
+                "assistant",
+                "",
+                tool_calls=[ToolCall("c1", "glob", "{}", extra={"thought_signature": "s"})],
+                extra={"thinking_blocks": ["signed"]},
+            ),
+        ],
+    )
+    session._learned_window = 1000
+    session.forget_model_state(provider_changed=False)
+    assert session._learned_window is None
+    assert session.messages[1].extra  # same provider: signatures stay
+    session.forget_model_state(provider_changed=True)
+    assert session.messages[1].extra == {}
+    assert session.messages[1].tool_calls[0].extra == {}
+    assert [m.role for m in session.messages] == ["user", "assistant"]  # history stays

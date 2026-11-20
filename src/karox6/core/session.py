@@ -813,6 +813,20 @@ class Session:
         emit(ev.Notice(kind="review", text=note))
         return found
 
+    def forget_model_state(self, *, provider_changed: bool) -> None:
+        """After /model or /setup: what the session learned about the old model (its
+        smaller context window, the size of the last request) does not apply to the new
+        one; after a provider switch, provider-native data in the history (thinking
+        signatures, encrypted reasoning items, the reasoning field's name) is dropped,
+        since another API rejects or misreads it. The conversation itself stays."""
+        self._learned_window = None
+        self._last_input_tokens = 0
+        if provider_changed:
+            for message in self.messages:
+                message.extra = {}
+                for call in message.tool_calls:
+                    call.extra = {}
+
     def _subagent_seconds(self) -> float:
         """A subagent's time limit: its own cap, and never past the parent's deadline."""
         limit = float(min(self.config.max_seconds or SUBAGENT_MAX_SECONDS, SUBAGENT_MAX_SECONDS))
