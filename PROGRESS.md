@@ -1190,3 +1190,18 @@ git diff --check
   arms. The notice can only matter in trials that reach max_seconds - 600. Rule (a
   low-risk notice, so a no-harm test): the notice becomes the default if B solves >= A and
   B's hidden tests passed (sum over kept trials) >= A's; otherwise it stays off.
+- A/B dln result (44667288694, runs/dln): dropped as upstream_failed fin-saccr-rwa,
+  telecom-entity-resolution, hof-topology-interpenetration; on the 13 kept A solved 5, B 4,
+  hidden tests 268 / 268. Rule (B >= A) fails: the deadline notice stays OFF. The notice
+  fired in 7 B trials; in 4 of them the model wrote its final summary within 15-240 s
+  (batched-eval-parity, hof, mp-checkpoint-consolidation, vf2), leaving 350-550 s unused;
+  batched-eval-parity and mp-checkpoint-consolidation were solved by A only. The wording
+  ("make sure each deliverable exists ... then keep improving") read as "wrap up".
+- dev21: the notice reworded ("Time check ... This is not a signal to stop or to
+  summarize: keep working. Only if a required output file does not exist yet, write your
+  best current result now"). Pre-registered A/B dl2: karox6 = dev21 default, karox6b =
+  dev21 + `--deadline-notice 300`; the 13 TB4 tasks used in neither tbd3 nor dln (4,5,11,
+  12,13,19,25,29,32,34,37,39,40), 1 attempt, chunk 4, parallel 1, ReformBoss, nothing else
+  running on the key. Same drop and decision rule as dln (B solves >= A and hidden tests
+  >= A), plus a mechanism check: in B trials that got the notice, the share that ended
+  "completed" within 300 s of it must not exceed the share in dln (4 of 7).

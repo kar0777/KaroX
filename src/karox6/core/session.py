@@ -78,10 +78,10 @@ WRAP_UP_NOTICE = (
     "can name."
 )
 DEADLINE_NOTICE = (
-    "About {left} minutes remain of this run's {total}-minute time limit. The run is stopped "
-    "at the limit, with no chance to reply. If the task asks for output files or other "
-    "deliverables, make sure each one exists now and holds your best current result (a "
-    "partial result beats none); then keep improving it while time remains."
+    "Time check: about {left} minutes remain of this run's {total}-minute time limit. This "
+    "is not a signal to stop or to summarize: keep working on the task. Only if an output "
+    "file the task requires does not exist yet, write your best current result to it now "
+    "(the run is cut off at the limit, and a partial result beats none)."
 )
 FINAL_NOTICE = (
     "This run has taken {steps} steps. Stop now: reply with your final summary (what you "

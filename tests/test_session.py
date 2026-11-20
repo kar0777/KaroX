@@ -492,7 +492,9 @@ def test_deadline_notice_comes_once_near_the_time_limit(tmp_path, monkeypatch):
     events = run(Session(cfg, Ticking(turns)))
     notices = [e for e in events if e.type == "notice" and e.kind == "deadline"]
     assert len(notices) == 1
-    assert notices[0].text.startswith("About 12 minutes remain of this run's 17-minute time limit")
+    assert notices[0].text.startswith(
+        "Time check: about 12 minutes remain of this run's 17-minute time limit"
+    )
     assert finish(events).status == "completed"
     quiet = Session(config(tmp_path, max_seconds=1000.0), Ticking(list(turns)))
     assert not [e for e in run(quiet) if e.type == "notice"]
