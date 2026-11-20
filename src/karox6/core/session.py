@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
@@ -32,6 +33,18 @@ from karox6.core import events as ev
 from karox6.core.loopguard import LoopGuard
 from karox6.core.messages import Message, Price, ToolCall, Usage
 from karox6.core.prompt import build_system_prompt
+from karox6.core.review import (
+    REVIEW_APPEND,
+    REVIEW_MAX_SECONDS,
+    REVIEW_MAX_STEPS,
+    Finding,
+    FindingTool,
+    Guard,
+    git_diff,
+    review_prompt,
+    verified,
+)
+from karox6.core.review import notice as review_notice
 from karox6.core.snapshot import write_snapshot
 from karox6.core.store import (
     CANCELLED_RESULT,
@@ -57,7 +70,7 @@ from karox6.tools.base import (
     deny_all,
     parse_arguments,
 )
-from karox6.tools.files import FileTracker
+from karox6.tools.files import FileTracker, _git_dirty
 from karox6.tools.jobs import JobManager
 from karox6.tools.registry import build_tools, tool_specs
 from karox6.tools.shell import ShellInfo, detect_shell
@@ -120,6 +133,7 @@ class SessionConfig:
     command_wait_cap_s: int | None = None  # foreground wait cap per command (off until A/B)
     wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)
     deadline_notice_s: int | None = None  # warn this long before max_seconds (off until A/B)
+    review: bool = False  # independent review before finishing (core/review.py; off until A/B)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def effective_window(self, learned: int | None = None) -> int:
@@ -272,6 +286,7 @@ class Session:
         truncations = 0
         reminded = 0  # wrap-up notices sent (a truncated step may skip the exact count)
         warned = False  # deadline notice sent
+        reviewed = False  # the independent review ran (once per run)
         status, reason, final_text = "completed", "", ""
         try:
             while True:
@@ -320,6 +335,14 @@ class Session:
                     if response.finish_reason == "content_filter":
                         # The provider cut the reply; it is not the model's final answer.
                         status, reason = "error", "the provider stopped the reply (content_filter)"
+                        break
+                    if self.config.review and not reviewed:
+                        reviewed = True
+                        found = await self._review(started, ctx, emit)
+                        if found:
+                            self._notice("review", review_notice(found), emit)
+                            final_text = ""
+                            continue
                     break
                 stop = await self._run_calls(message.tool_calls, ctx, emit)
                 if stop:
@@ -714,6 +737,77 @@ class Session:
             meta=meta,
         )
 
+    async def _review(
+        self, started: float, ctx: ToolContext, emit: Callable[[ev.Event], None]
+    ) -> list[Finding]:
+        """Run the independent review (core/review.py); the reproduced findings."""
+        from karox6.tools.fs import ReadTool
+        from karox6.tools.search import GlobTool, GrepTool
+        from karox6.tools.shell import ShellTool
+
+        files = await asyncio.to_thread(self.files.changed_files)
+        seconds = REVIEW_MAX_SECONDS
+        if self.config.max_seconds is not None:
+            left = self.config.max_seconds - (time.monotonic() - started)
+            if left < 300:
+                return []  # no time to review and then fix
+            seconds = min(seconds, left * 0.4)
+        if not files:
+            return []
+        dirty = await asyncio.to_thread(_git_dirty, self.workspace)
+        guard = Guard(self.workspace)
+        await asyncio.to_thread(guard.save, files, dirty)
+        diff = await asyncio.to_thread(git_diff, self.workspace, files)
+        prompt = review_prompt([m.content for m in _user_turns(self.messages)], diff, files)
+        reporter = FindingTool()
+        cfg = self.config
+        config = replace(
+            cfg,
+            subagents=False,
+            review=False,
+            snapshot_on_finish=False,
+            stream_deltas=False,
+            max_steps=REVIEW_MAX_STEPS,
+            max_seconds=seconds,
+            max_cost_usd=None,
+            system_append="\n\n".join(p for p in (cfg.system_append, REVIEW_APPEND) if p),
+        )
+        child = Session(
+            config,
+            self.provider,
+            shell=self.shell,
+            tools=[ShellTool(self.shell), ReadTool(), GrepTool(), GlobTool(), reporter],
+            session_id=f"{self.session_id}.review",
+        )
+        emit(ev.Notice(kind="review", text=f"independent review of {len(files)} changed files"))
+        try:
+            async for event in child.run(prompt):
+                if isinstance(event, ev.ToolStarted | ev.ToolFinished):
+                    tagged = f"review:{event.call_id}"
+                    emit(replace(event, call_id=tagged, name=f"review/{event.name}"))
+                elif isinstance(event, ev.Retry):
+                    emit(event)
+        finally:
+            restored = await asyncio.to_thread(
+                guard.restore, await asyncio.to_thread(_git_dirty, self.workspace)
+            )
+            self.usage.add(child.usage)
+            self.cost_usd += child.cost_usd
+            with contextlib.suppress(Exception):
+                self.store.append(
+                    "usage",
+                    step=0,
+                    usage=child.usage.to_dict(),
+                    cost_usd=child.cost_usd,
+                    source="review",
+                )
+        found = verified(reporter.findings, _shell_runs(child.messages))
+        note = f"review: {len(reporter.findings)} reported, {len(found)} reproduced"
+        if restored:
+            note += f"; put back {len(restored)} file(s) the review touched"
+        emit(ev.Notice(kind="review", text=note))
+        return found
+
     def _subagent_seconds(self) -> float:
         """A subagent's time limit: its own cap, and never past the parent's deadline."""
         limit = float(min(self.config.max_seconds or SUBAGENT_MAX_SECONDS, SUBAGENT_MAX_SECONDS))
@@ -967,6 +1061,23 @@ class _CallTiming:
             "total_s": round(end - self.start, 2),
             "retries": self.retries,
         }
+
+
+def _shell_runs(messages: list[Message]) -> list[tuple[str, str]]:
+    """(command, output) of every shell call in ``messages``."""
+    results = {m.tool_call_id: m.content for m in messages if m.role == "tool"}
+    out = []
+    for m in messages:
+        for call in m.tool_calls if m.role == "assistant" else []:
+            if call.name not in ("bash", "pwsh"):
+                continue
+            try:
+                command = str(json.loads(call.arguments or "{}").get("command") or "")
+            except (ValueError, AttributeError):
+                continue
+            if command and call.id in results:
+                out.append((command, results[call.id]))
+    return out
 
 
 def _user_turns(messages: list[Message]) -> list[Message]:

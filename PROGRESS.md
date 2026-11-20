@@ -1250,3 +1250,14 @@ git diff --check
   cap in 62 of 63 calls at effort max, high AND low (the effort field has no visible
   effect). A standalone no-tools reviewer call is not viable on DSV4.1F; dropped in that
   form. (KaroX's own no-tools call, the summary retry, never ran in 481 saved sessions.)
+- dev28: `--review` (off by default). When the agent answers after changing files, a
+  child session with a fresh context gets the user's messages + the diff (not the agent's
+  reasoning), writes checks outside the project and reports problems with a `finding`
+  tool; the harness forwards only findings whose command ran in the review and whose
+  quoted output it printed (no opinions; finish1 showed unconditional checks do not
+  discriminate). One round; skipped with < 300 s left; files the review touched in the
+  project are put back. Run rev1 (pre-registered): karox6b = dev28 --review, ReformBoss,
+  the 6 rival-solved KaroX failures (kysely, textual, cattrs, drift, koota, opa), 1
+  attempt. Read per trial: findings reproduced, whether they match the hidden-test
+  failure, false alarms, review time. Keep developing it only if reproduced findings hit
+  real failures in >= 2 tasks and false alarms <= 1.

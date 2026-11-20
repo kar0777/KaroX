@@ -288,6 +288,12 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
         help="offer the agent tool: delegate investigations to child sessions (experimental)",
     )
     p.add_argument(
+        "--review",
+        action="store_true",
+        help="before finishing, an independent reviewer checks the change against the task "
+        "and the agent fixes what it reproduced (experimental)",
+    )
+    p.add_argument(
         "--code-mode",
         action="store_true",
         help="offer run_code: one Python program makes several tool calls (experimental)",
@@ -549,6 +555,7 @@ def _session_config(
         system_prompt=system_prompt,
         system_append=args.append_system_prompt,
         subagents=args.subagents,
+        review=args.review,
         code_mode=args.code_mode,
         copy_notes=args.copy_notes,
         command_wait_cap_s=_positive(args.command_wait_cap),
