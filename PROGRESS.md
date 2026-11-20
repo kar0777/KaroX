@@ -1271,3 +1271,16 @@ git diff --check
   history, hidden tests), told to report each problem right after the check that shows
   it, 45 steps / 600 s, reminders at steps 28 and 40 (SessionConfig.step_notices). Run
   rev2 = rev1 again with dev29. Read: findings per task, real vs false alarms.
+- rev2 (44824911750): 4/6 again (kysely, cattrs, drift, opa; textual and koota failed;
+  drift flipped to solved, textual flipped to failed: per-task outcomes are coin flips).
+  The reviewer now reports: 7 findings in 3 tasks (textual 2, koota 1, opa 4), all with
+  printed evidence; read by hand they are real defects (textual: plain up-arrow
+  "\x1b[A" now parsed as alt+[ then A; alternate key 0 taken as a key), but none is the
+  hidden test that failed. The evidence gate forwarded only opa's 2 of 4 (task still
+  passed): reviewers quote one check out of a longer command line. dev30: the gate
+  accepts a quoted command that is part of the one that ran or shares >= 80% of its
+  words; rescoring rev2 offline: 7 of 7 forwarded.
+- Run ab1 (pre-registered): a+b, karox6 = dev30, karox6b = dev30 --review, ReformBoss,
+  disc tasks 1-12 (fastest discriminating), 1 attempt, parallel 2 (4 agents on the key).
+  Keep --review going if B solves >= A + 2; drop it if B < A; otherwise inconclusive
+  (then read the reviews for harm/help).

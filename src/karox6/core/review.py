@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -130,11 +131,23 @@ def _norm(text: str) -> str:
 
 
 def verified(findings: list[Finding], ran: list[tuple[str, str]]) -> list[Finding]:
-    """Findings whose command was run in the review and whose quoted output it printed
-    (whitespace-insensitive; at least one quoted line must match)."""
+    """Findings whose quoted output a command of the review really printed, that command
+    being the one quoted (whitespace-insensitive). Reviewers quote one check out of a
+    longer command line that ran several at once (rev2), so the quoted command counts as
+    the one that ran when it is part of it, or shares most of its words."""
     out = []
     for item in findings:
-        outputs = [o for c, o in ran if _norm(c) == _norm(item.command)]
+        wanted = _norm(item.command)
+        words = set(re.findall(r"\w+", wanted))
+        outputs = [
+            o
+            for c, o in ran
+            if wanted
+            and (
+                wanted in _norm(c)
+                or (len(words) >= 3 and len(words & set(re.findall(r"\w+", c))) >= 0.8 * len(words))
+            )
+        ]
         if not outputs:
             continue
         lines = [_norm(line) for line in item.observed.splitlines() if len(line.strip()) >= 4]

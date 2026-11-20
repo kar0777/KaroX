@@ -118,6 +118,11 @@ def test_verified_matches_command_and_output_loosely():
     assert verified([item], [("pytest -q t.py", "E   assert   1 == 2")])
     assert not verified([item], [("pytest -q t.py", "all passed")])
     assert not verified([item], [("pytest t.py", "assert 1 == 2")])
+    # one check out of a longer command line that ran several
+    part = Finding("r", "p", "python -c 'print(f(1))'", "f(1)=2.5")
+    both = "python -c 'print(f(0))'; python -c 'print(f(1))'"
+    assert verified([part], [(both, "f(0)=0.0\nf(1)=2.5\n")])
+    assert not verified([part], [(both, "f(0)=0.0\nf(1)=3.5\n")])
 
 
 def test_step_notices_arrive_after_their_step(tmp_path):
