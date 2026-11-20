@@ -21,6 +21,8 @@ from pathlib import Path
 from karox6.lifetime import bind_to_karox, join_karox_job
 
 URL_RE = re.compile(r"Connector URL \(([^)]*)\): (\S+)")
+OAUTH_RE = re.compile(r"OAuth URL: (\S+)")
+PIN_RE = re.compile(r"Approval code: (\S+)")
 START_TIMEOUT_S = 120.0
 STOP_TIMEOUT_S = 15.0
 
@@ -118,6 +120,26 @@ class Bridge:
             with contextlib.suppress(OSError):
                 process.kill()
             process.wait(5)
+
+    @property
+    def oauth_url(self) -> str | None:
+        found = OAUTH_RE.findall(self._log())
+        return found[-1] if found else None
+
+    @property
+    def pin(self) -> str | None:
+        """The approval code of the server running now (each restart makes a new one)."""
+        found = PIN_RE.findall(self._log())
+        return found[-1] if found else None
+
+    def activity(self, lines: int = 15) -> list[str]:
+        """The server's recent notes: requests it answered, sign-in steps, tunnel repairs."""
+        notes = [
+            ln[len("karox mcp: ") :]
+            for ln in self._log().splitlines()
+            if ln.startswith("karox mcp: ")
+        ]
+        return notes[-lines:]
 
     def log_tail(self, lines: int = 8) -> str:
         text = self._log().strip().splitlines()

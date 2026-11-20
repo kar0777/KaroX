@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -42,7 +43,7 @@ HELP = """Commands:
   /bridge [agent]           connect ChatGPT (web), Claude etc.: start the MCP server with a
                             Tailscale Funnel link (default: the chat model works through
                             KaroX's tools; agent: they hand tasks to KaroX's own model)
-  /bridge stop              stop it (it also stops when you leave the chat)
+  /bridge url | log | stop  the secret no-auth link, recent requests, stop (also on exit)
   /quit                     leave (Ctrl+D works too)
 Ctrl+C stops the running turn. End a line with \\ to continue on the next line."""
 
@@ -65,7 +66,30 @@ def _glyphs(encoding: str | None) -> dict[str, str]:
         "".join(fancy.values()).encode(encoding or "ascii")
     except (LookupError, UnicodeEncodeError):
         return {"tool": "*", "ok": "ok", "fail": "x", "prompt": "> ", "more": ". ", "dot": " | "}
+    try:
+        "".join(_BOX_FANCY).encode(encoding or "ascii")
+        fancy["box"] = "fancy"
+    except (LookupError, UnicodeEncodeError):
+        fancy["box"] = "ascii"
     return fancy
+
+
+_BOX_FANCY = ("╭", "╮", "╰", "╯", "─", "│")
+_BOX_ASCII = ("+", "+", "+", "+", "-", "|")
+_ANSI = re.compile("\x1b\\[[0-9;]*m")
+
+
+def _box(title: str, rows: list[tuple[str, str]], fancy: bool) -> str:
+    """A framed panel: label column, then values (ANSI colors do not count as width)."""
+    tl, tr, bl, br, h, v = _BOX_FANCY if fancy else _BOX_ASCII
+    wide = max((len(k) for k, _ in rows), default=0)
+    lines = [(f"{k:<{wide}}  {val}" if wide else val) for k, val in rows]
+    seen = [len(_ANSI.sub("", ln)) for ln in lines]
+    width = max([*seen, len(title) + 2]) + 2
+    out = [tl + h + f" {title} " + h * (width - len(title) - 3) + tr]
+    out += [f"{v} {ln}{' ' * (width - n - 1)}{v}" for ln, n in zip(lines, seen, strict=True)]
+    out.append(bl + h * width + br)
+    return "\n".join(out)
 
 
 class ChatApp:
@@ -353,11 +377,25 @@ class ChatApp:
             await asyncio.to_thread(b.stop)
             self.write("bridge stopped (its Tailscale route is removed)\n")
             return
+        if arg in ("url", "log"):
+            if not b.running():
+                self.write("the bridge is not running: /bridge starts it\n")
+            elif arg == "url":
+                self.write(
+                    "Secret link for clients set to 'No authentication' (anyone with it can "
+                    "use KaroX here):\n  " + self.paint("cyan", b.url or "") + "\n"
+                )
+            else:
+                notes = b.activity()
+                self.write(
+                    "\n".join(f"  {n}" for n in notes) + "\n" if notes else "  no requests yet\n"
+                )
+            return
         if b.running() and b.url:
             self._bridge_card()
             return
         if arg not in ("", "direct", "agent"):
-            self.write("usage: /bridge [agent] | /bridge stop\n")
+            self.write("usage: /bridge [agent] | /bridge url | /bridge log | /bridge stop\n")
             return
         mode = "agent" if arg == "agent" else "direct"
         if mode == "agent" and not self.bridge_agent_args:
@@ -379,22 +417,32 @@ class ChatApp:
 
     def _bridge_card(self) -> None:
         b = self.bridge
+        pin = b.pin or ""
+        pin = f"{pin[:4]}-{pin[4:]}" if len(pin) == 8 else pin
         how = (
-            "the chat's own model works through KaroX's tools (no API key used)"
+            "ChatGPT's model uses KaroX tools"
             if b.mode == "direct"
-            else f"tasks run on KaroX's model ({self.config.model})"
+            else (f"tasks go to {self.config.model}")
         )
-        self.write(
-            self.paint("bold", "Bridge is up") + f" ({b.where})\n"
-            f"  Connector URL: {self.paint('cyan', b.url or '')}\n"
-            "  ChatGPT web: Settings > Apps & Connectors > Advanced: Developer mode on >\n"
-            "    Create: paste the URL, Authentication: No authentication. Then enable\n"
-            "    the connector in a chat (+ > Developer mode).\n"
-            "  Claude: Settings > Connectors > Add custom connector, paste the URL.\n"
-            f"  Mode: {b.mode} - {how}. Root: {b.root}\n"
-            "  The token inside the URL is the only key: keep it secret. The URL stays the\n"
-            f"  same next time. Log: {b.log_path}. /bridge stop ends it.\n"
-        )
+        rows: list[tuple[str, str]] = [
+            (
+                "",
+                self.paint("green", self.glyph["tool"] + " online")
+                + f"  {b.where} · {b.mode} ({how})",
+            ),
+            ("", ""),
+            ("URL", self.paint("cyan", b.oauth_url or "")),
+            ("Auth", "OAuth"),
+            ("Code", self.paint("bold", pin) + self.paint("dim", "  type it on the KaroX page")),
+            ("", ""),
+            ("ChatGPT", "Settings > Apps > Advanced: Developer mode > Create app:"),
+            ("", "paste the URL, choose OAuth, Create; approve with the code"),
+            ("Claude", "Settings > Connectors > Add custom connector: the URL"),
+            ("", ""),
+            ("Project", str(b.root)),
+            ("", self.paint("dim", "/bridge url secret no-auth link · /bridge log · /bridge stop")),
+        ]
+        self.write(_box("KaroX bridge", rows, self.glyph.get("box", "ascii") == "fancy") + "\n")
 
     def _show_status(self) -> None:
         s = self.session

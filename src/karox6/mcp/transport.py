@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from karox6.mcp.oauth import OAuth
 from karox6.mcp.protocol import LATEST, McpServer, parse_error
 
 MAX_BODY = 4 * 1024 * 1024
@@ -165,6 +166,8 @@ class HttpMcp:
         token: str,
         path: str = "/mcp",
         allowed_origins: Iterable[str] = DEFAULT_ORIGINS,
+        oauth: OAuth | None = None,
+        access_log: Callable[[str], None] | None = None,
     ) -> None:
         if len(token) < 16:
             raise ValueError("the access token must be at least 16 characters")
@@ -175,6 +178,8 @@ class HttpMcp:
         self.sessions: dict[str, str] = {}  # MCP session id -> negotiated protocol version
         self.ended: dict[str, None] = {}  # ids the client ended with DELETE, oldest first
         self._open = 0
+        self.oauth = oauth
+        self.access_log = access_log
 
     async def start(self, host: str, port: int) -> asyncio.Server:
         return await asyncio.start_server(self._connection, host, port, limit=64 * 1024)
@@ -202,6 +207,7 @@ class HttpMcp:
                 limit = MAX_BODY if early is None else DRAIN_LIMIT
                 body = await asyncio.wait_for(_read_body(reader, headers, limit), BODY_TIMEOUT_S)
                 status, out, payload = early or await self.respond(method, target, headers, body)
+                self._log_request(method, target, status, headers)
                 _write_response(writer, status, out, payload, keep_alive=keep)
                 await writer.drain()
                 if not keep:
@@ -225,6 +231,8 @@ class HttpMcp:
         path = urlsplit(target).path.rstrip("/") or "/"
         if path == "/healthz" and method == "GET":
             return 200, {"Content-Type": "text/plain"}, b"ok\n"
+        if self.oauth is not None and self.oauth.handles(path):
+            return None  # sign-in endpoints: answered in respond()
         origin = headers.get("origin")
         authorized = self._authorized(path, headers)
         endpoint = path == self.path or path.startswith(self.path + "/")
@@ -253,6 +261,9 @@ class HttpMcp:
                 b"",
             )
         if not authorized:
+            if path.startswith(self.path) and self.oauth is not None:
+                challenge = self.oauth.challenge_header(headers)
+                return _json(401, {"error": "unauthorized"}, {**cors, **challenge})
             return _json(401 if path.startswith(self.path) else 404, {"error": "not found"}, cors)
         return None
 
@@ -262,6 +273,10 @@ class HttpMcp:
         early = self.precheck(method, target, headers)
         if early is not None:
             return early
+        path = urlsplit(target).path.rstrip("/") or "/"
+        if self.oauth is not None and self.oauth.handles(path):
+            # in a thread: a client metadata document may be fetched over the network
+            return await asyncio.to_thread(self.oauth.respond, method, target, headers, body)
         cors = self._cors(headers.get("origin"))
         session_id = headers.get("mcp-session-id")
         if method == "DELETE":
@@ -351,8 +366,19 @@ class HttpMcp:
             return hmac.compare_digest(path[len(self.path) + 1 :].encode(), self.token.encode())
         auth = headers.get("authorization", "")
         if path == self.path and auth.lower().startswith("bearer "):
-            return hmac.compare_digest(auth[7:].strip().encode(), self.token.encode())
+            given = auth[7:].strip()
+            if hmac.compare_digest(given.encode(), self.token.encode()):
+                return True
+            return self.oauth is not None and self.oauth.valid_access(given)
         return False
+
+    def _log_request(self, method: str, target: str, status: int, headers: dict[str, str]) -> None:
+        """One line per request (no query, no token, no body): shows what a client tried."""
+        if self.access_log is None:
+            return
+        path = urlsplit(target).path.replace(self.token, "<token>")
+        agent = headers.get("user-agent", "")[:60]
+        self.access_log(f"{method} {path[:120]} -> {status}  {agent}")
 
     def _origin_ok(self, origin: str) -> bool:
         origin = origin.rstrip("/").lower()
@@ -497,6 +523,7 @@ _REASONS = {
     200: "OK",
     202: "Accepted",
     204: "No Content",
+    302: "Found",
     400: "Bad Request",
     401: "Unauthorized",
     403: "Forbidden",

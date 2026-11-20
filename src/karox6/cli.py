@@ -596,6 +596,7 @@ async def _mcp_async(args: argparse.Namespace) -> None:
 
     from karox6.core.store import default_home
     from karox6.mcp.direct import DirectTools
+    from karox6.mcp.oauth import OAuth
     from karox6.mcp.protocol import McpServer
     from karox6.mcp.redact import Redactor
     from karox6.mcp.runs import RunManager
@@ -654,7 +655,15 @@ async def _mcp_async(args: argparse.Namespace) -> None:
         if redactor is not None:
             redactor.add(token, "KaroX access token")
         origins = [*DEFAULT_ORIGINS, *args.allow_origin]
-        http = HttpMcp(server, token=token, allowed_origins=origins)
+
+        def note(line: str) -> None:
+            sys.stderr.write(f"karox mcp: {line}\n")
+            sys.stderr.flush()
+
+        # OAuth sign-in for clients that require it (ChatGPT's connector form defaults to
+        # it); the token-in-URL access keeps working beside it.
+        oauth = OAuth(home / "mcp" / "oauth.json", on_event=lambda s: note(f"sign-in: {s}"))
+        http = HttpMcp(server, token=token, allowed_origins=origins, oauth=oauth, access_log=note)
         listener = await http.start(host, int(port))
         bound = listener.sockets[0].getsockname()[1]
         shown = host if host not in ("0.0.0.0", "::") else "127.0.0.1"
@@ -670,8 +679,10 @@ async def _mcp_async(args: argparse.Namespace) -> None:
                 f"KaroX MCP (Streamable HTTP) on http://{shown}:{bound}/mcp  root={root}{mode}\n"
                 + (
                     f"  Connector URL ({where}, Tailscale): {tunnel.url}/mcp/{path_token}\n"
-                    "  Paste it into ChatGPT (Settings > Connectors), Claude (Settings >\n"
-                    "  Connectors > Add custom connector) or any MCP client; no sign-in.\n"
+                    f"  OAuth URL: {tunnel.url}/mcp\n"
+                    f"  Approval code: {oauth.pin}\n"
+                    "  Paste the connector URL into ChatGPT or Claude with no authentication,\n"
+                    "  or the OAuth URL with OAuth and type the approval code when asked.\n"
                     if tunnel
                     else "  URL for clients that only take a URL (ChatGPT connector, behind an\n"
                     f"  HTTPS tunnel): http://{shown}:{bound}/mcp/{path_token}\n"

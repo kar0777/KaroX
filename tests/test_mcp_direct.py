@@ -416,7 +416,7 @@ def test_cli_masks_its_own_secrets(tmp_path, monkeypatch, capsys):
     servers = []
 
     class StopAtStart:
-        def __init__(self, server, *, token, allowed_origins):
+        def __init__(self, server, *, token, allowed_origins, **_):
             servers.append((server, token))
 
         async def start(self, host, port):

@@ -62,9 +62,9 @@ def test_bridge_that_fails_to_start_shows_why(tmp_path):
     assert "--model m" in (tmp_path / "argv.txt").read_text(encoding="utf-8")
 
 
-def test_chat_bridge_command_shows_the_link_and_stops_on_exit(tmp_path):
+def test_chat_bridge_command_shows_the_card_and_stops_on_exit(tmp_path):
     out: list[str] = []
-    lines = iter(["/bridge", "/bridge", "/quit"])
+    lines = iter(["/bridge", "/bridge", "/bridge url", "/quit"])
 
     async def read_line(_prompt):
         return next(lines)
@@ -75,16 +75,20 @@ def test_chat_bridge_command_shows_the_link_and_stops_on_exit(tmp_path):
         read_line=read_line,
         write=out.append,
     )
+    oauth_url = URL.rsplit("/", 1)[0]
     app.bridge.launcher = stand_in(
         tmp_path,
         f"""
-        print("  Connector URL (public internet, Tailscale): {URL}", file=sys.stderr, flush=True)
+        print("  Connector URL (public internet, Tailscale): {URL}", file=sys.stderr)
+        print("  OAuth URL: {oauth_url}", file=sys.stderr)
+        print("  Approval code: ABCDEFGH", file=sys.stderr, flush=True)
         time.sleep(60)
         """,
     )
     asyncio.run(app.run())
     text = "".join(out)
-    assert text.count(URL) == 2  # started once, then shown again
-    assert "No authentication" in text
+    assert text.count(oauth_url + " ") == 2  # the card: on start, then again
+    assert text.count("ABCD-EFGH") == 2
+    assert text.count(URL) == 1  # the secret link only on /bridge url
     assert "stopping the bridge" in text
     assert not app.bridge.running()
