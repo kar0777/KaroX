@@ -1241,3 +1241,12 @@ git diff --check
   statement + final model.patch, no agent reasoning; 11 failed + 10 passed KaroX patches,
   3 samples, GLM. Worth building only if FIX rate on failed - on passed >= 30 points and
   on passed <= 40%; else dropped like finish1.
+- dev27: second GPT review, verified and fixed: later user turns kept verbatim through
+  summaries; a failed summary falls back to the model-free cut (no 2 calls per step);
+  402/429 quota errors not retried; unknown finish reasons (Dahl "abort") retried, not a
+  final answer; complete tool calls kept when only usage was lost.
+- Probe audit1 result: no data. Dahl free tier answered 503 "at capacity" to all calls;
+  on ReformBoss the bench model, asked to review with no tools, reasoned to the 32768-token
+  cap in 62 of 63 calls at effort max, high AND low (the effort field has no visible
+  effect). A standalone no-tools reviewer call is not viable on DSV4.1F; dropped in that
+  form. (KaroX's own no-tools call, the summary retry, never ran in 481 saved sessions.)
