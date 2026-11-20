@@ -25,8 +25,17 @@ from karox6.tools.base import ToolContext, ToolResult
 
 MAX_DIFF_CHARS = 40_000
 MAX_SAVED_BYTES = 4_000_000
-REVIEW_MAX_STEPS = 40
-REVIEW_MAX_SECONDS = 900.0
+REVIEW_MAX_STEPS = 45
+REVIEW_MAX_SECONDS = 600.0
+# Reminders by step: rev1 reviewers found real failures but ran out of steps before
+# reporting any of them.
+REVIEW_STEP_NOTICES = {
+    28: (
+        "You have used 28 of 45 steps. Report every problem you have already shown with "
+        "`finding` now; then check at most one or two more requirements."
+    ),
+    40: "Stop checking now: report what you have shown with `finding`, then reply.",
+}
 
 REVIEW_APPEND = (
     "You are an independent reviewer. Another agent changed this project for the task "
@@ -39,11 +48,16 @@ REVIEW_APPEND = (
     "test) in a scratch directory OUTSIDE the project, e.g. under /tmp/karox-review/, and "
     "run it against the project code. Prefer inputs the task names and the boundaries "
     "around them. Never modify, create or delete files inside the project, and do not "
-    "install anything.\n"
+    "install anything. Look only at the project and your scratch directory: do not "
+    "search the rest of the filesystem, read logs or shell history, or look for hidden "
+    "tests; judge the code against the task text alone.\n"
     "4. For every requirement your check shows is NOT met, call the `finding` tool: the "
     "requirement as the task states it, the problem, the exact command you ran and the "
     "lines of its output that show the problem. Do not report style, missing comments, "
-    "or suspicions you could not demonstrate with a command.\n"
+    "or suspicions you could not demonstrate with a command. Report each problem right "
+    "after the check that shows it, before you check the next requirement: you have "
+    "about 30 tool calls, so start with the requirements the change most likely misses "
+    "(exact constraints, must-nots, edge cases the task names).\n"
     "When you are done, reply with one short line: how many requirements you checked and "
     "how many findings you reported."
 )

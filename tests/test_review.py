@@ -118,3 +118,21 @@ def test_verified_matches_command_and_output_loosely():
     assert verified([item], [("pytest -q t.py", "E   assert   1 == 2")])
     assert not verified([item], [("pytest -q t.py", "all passed")])
     assert not verified([item], [("pytest t.py", "assert 1 == 2")])
+
+
+def test_step_notices_arrive_after_their_step(tmp_path):
+    provider = ScriptedProvider(
+        [
+            Turn(calls=[("glob", {"pattern": "*"})]),
+            Turn(calls=[("glob", {"pattern": "*"})]),
+            Turn(text="ok"),
+        ]
+    )
+    config = SessionConfig(
+        model="m", workspace=tmp_path, home=tmp_path / "home", step_notices={1: "report now"}
+    )
+    session = Session(config, provider)
+    run(session, "task")
+    notes = [m for m in session.messages if m.meta.get("kind") == "step"]
+    assert [m.content for m in notes] == ["report now"]
+    assert session.messages.index(notes[0]) < len(session.messages) - 3

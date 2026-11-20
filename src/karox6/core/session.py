@@ -37,6 +37,7 @@ from karox6.core.review import (
     REVIEW_APPEND,
     REVIEW_MAX_SECONDS,
     REVIEW_MAX_STEPS,
+    REVIEW_STEP_NOTICES,
     Finding,
     FindingTool,
     Guard,
@@ -134,6 +135,7 @@ class SessionConfig:
     wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)
     deadline_notice_s: int | None = None  # warn this long before max_seconds (off until A/B)
     review: bool = False  # independent review before finishing (core/review.py; off until A/B)
+    step_notices: dict[int, str] = field(default_factory=dict)  # step -> notice (the review)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def effective_window(self, learned: int | None = None) -> int:
@@ -348,6 +350,8 @@ class Session:
                 if stop:
                     status, reason = "loop", stop
                     break
+                if steps in self.config.step_notices:
+                    self._notice("step", self.config.step_notices[steps], emit)
                 if not warned and self._deadline_near(started):
                     self._notice("deadline", self._deadline_text(started), emit)
                     warned = True
@@ -768,6 +772,7 @@ class Session:
             snapshot_on_finish=False,
             stream_deltas=False,
             max_steps=REVIEW_MAX_STEPS,
+            step_notices=REVIEW_STEP_NOTICES,
             max_seconds=seconds,
             max_cost_usd=None,
             system_append="\n\n".join(p for p in (cfg.system_append, REVIEW_APPEND) if p),
