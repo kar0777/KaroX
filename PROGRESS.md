@@ -1231,3 +1231,13 @@ git diff --check
   is a 12-task sample of tasks mostly nobody solves, not evidence that KaroX is behind.
 - dev22: `/bridge` in the chat (MCP server + Tailscale Funnel beside the chat, link shown;
   live-checked). Next run: trio on data/sets/disc 1-16 (fastest discriminating tasks).
+- dev25: bridge on 443 under /karox6 when another site holds the root (ChatGPT never
+  reached :10000; live-checked by the user: connected). dev26: GPT audit items verified in
+  code and fixed (resume bound to its project, OAuth lock + public-only metadata fetch,
+  snapshots skip links). Dev lane switched to Dahl GLM-5.3-Flash (3 concurrent), GitHub
+  only. Neon failure mining (7 rival-solved KaroX failures): 4 are spec violations with
+  positive-only self-tests (kysely, textual, cattrs, drift), 2 not harness-fixable (opa,
+  koota), 1 timeout (sound). Probe audit1 (pre-registered): fresh-context reviewer = task
+  statement + final model.patch, no agent reasoning; 11 failed + 10 passed KaroX patches,
+  3 samples, GLM. Worth building only if FIX rate on failed - on passed >= 30 points and
+  on passed <= 40%; else dropped like finish1.
