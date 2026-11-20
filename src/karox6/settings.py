@@ -106,3 +106,34 @@ def requested_profile(argv: list[str]) -> str | None:
         if arg.startswith("--profile="):
             return arg.split("=", 1)[1]
     return None
+
+
+def save_settings(updates: dict[str, Any], path: Path | None = None) -> Path:
+    """Set top-level keys in the config file (other keys and profiles stay as they are)."""
+    path = path or config_path()
+    data: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise SettingsError(f"cannot read {path}: {exc}") from exc
+    data.update(updates)
+    profiles = data.pop("profiles", None)
+    lines = [f"{k} = {_toml_value(v)}" for k, v in data.items()]
+    if isinstance(profiles, dict):
+        for name, table in profiles.items():
+            lines += ["", f"[profiles.{name}]"]
+            lines += [f"{k} = {_toml_value(v)}" for k, v in table.items()]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    import json
+
+    return json.dumps(str(value), ensure_ascii=False)  # a JSON string is a TOML basic string

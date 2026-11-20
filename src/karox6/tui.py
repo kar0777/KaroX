@@ -40,6 +40,9 @@ HELP = """Commands:
   /resume [ID|last]         continue a saved session
   /approve ask|allow|deny   dangerous commands: ask, run, or refuse (now: {mode})
   /reasoning                show or hide the model's reasoning
+  /key                      paste the API key (hidden; saved encrypted for your user)
+  /model [NAME]             show or change the model
+  /setup                    choose provider, model and key again
   /bridge [agent]           connect ChatGPT (web), Claude etc.: start the MCP server with a
                             Tailscale Funnel link (default: the chat model works through
                             KaroX's tools; agent: they hand tasks to KaroX's own model)
@@ -108,6 +111,7 @@ class ChatApp:
         session_kwargs: dict[str, Any] | None = None,
         bridge_agent_args: list[str] | None = None,
         bridge_env: dict[str, str] | None = None,
+        read_secret: ReadLine | None = None,
     ) -> None:
         if approval_mode not in APPROVAL_MODES:
             raise ValueError(f"approval mode must be one of {APPROVAL_MODES}")
@@ -127,6 +131,7 @@ class ChatApp:
         self.bridge = Bridge(config.home)
         self.bridge_agent_args = list(bridge_agent_args or [])
         self.bridge_env = dict(bridge_env or {})
+        self.read_secret = read_secret or self.read_answer
 
     # -- lifecycle ------------------------------------------------------------------
 
@@ -359,6 +364,14 @@ class ChatApp:
             if arg in APPROVAL_MODES:
                 self.approval_mode = arg
             self.write(f"dangerous commands: {self.approval_mode}\n")
+        elif name == "/key":
+            await self._set_key()
+        elif name == "/model":
+            if arg:
+                self.config.model = arg
+            self.write(f"model: {self.config.model}\n")
+        elif name == "/setup":
+            await self._setup()
         elif name == "/bridge":
             await self._bridge(arg)
         elif name == "/reasoning":
@@ -367,6 +380,37 @@ class ChatApp:
         else:
             self.write(f"unknown command {name}; /help lists commands\n")
         return None
+
+    async def _set_key(self) -> None:
+        from karox6.credentials import save_key
+
+        key = (await self.read_secret("API key (hidden; Enter keeps the current one): ")).strip()
+        if not key:
+            self.write("key unchanged\n")
+            return
+        where = save_key(self.config.home, key)
+        if hasattr(self.provider, "api_key"):
+            self.provider.api_key = key
+        if self.bridge_env:
+            self.bridge_env = {name: key for name in self.bridge_env}
+        self.write(f"key saved (encrypted for your user) in {where}; in use now\n")
+
+    async def _setup(self) -> None:
+        from karox6.providers import make_provider
+        from karox6.setup import run_setup
+
+        choice = await run_setup(self.read_answer, self.read_secret, self.write, self.config.home)
+        if choice is None:
+            return
+        key = choice.key or getattr(self.provider, "api_key", None)
+        old = self.provider
+        self.provider = make_provider(choice.provider, base_url=choice.base_url, api_key=key)
+        self.session.provider = self.provider
+        self.config.model = choice.model
+        self.config.provider_name = choice.provider
+        with contextlib.suppress(Exception):
+            await old.aclose()
+        self.write(f"now using {choice.model}\n")
 
     async def _bridge(self, arg: str) -> None:
         b = self.bridge
@@ -574,6 +618,29 @@ def terminal_io(history: Path | None) -> tuple[ReadLine, ReadLine]:
             return await answers.prompt_async(prompt)
 
     return read_line, read_answer
+
+
+def secret_reader() -> ReadLine:
+    """A prompt that hides what is typed (API keys)."""
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            from prompt_toolkit import PromptSession
+
+            session: Any = PromptSession()
+
+            async def hidden(prompt: str) -> str:
+                return str(await session.prompt_async(prompt, is_password=True))
+
+            return hidden
+        except ImportError:
+            pass
+
+    async def fallback(prompt: str) -> str:
+        import getpass
+
+        return await asyncio.to_thread(getpass.getpass, prompt)
+
+    return fallback
 
 
 async def _plain_read(prompt: str) -> str:

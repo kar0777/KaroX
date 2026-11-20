@@ -427,9 +427,9 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
 
 
 def _chat(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-
-    if not args.model:
-        parser.error("--model is required (or set KAROX_MODEL)")
+    # No model yet: the chat starts with its setup (provider, model, key) instead.
+    if not args.model and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        parser.error("--model is required (or set KAROX_MODEL, or run `karox6` in a terminal)")
     try:
         return run_async(_chat_async(args))
     except KeyboardInterrupt:
@@ -441,16 +441,31 @@ def _chat(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
 async def _chat_async(args: argparse.Namespace) -> int:
     from karox6.core.store import default_home, resume_kwargs
-    from karox6.tui import ChatApp, color_enabled, stdout_write, terminal_io
+    from karox6.credentials import save_key
+    from karox6.setup import run_setup
+    from karox6.tui import ChatApp, color_enabled, secret_reader, stdout_write, terminal_io
 
     home = (args.home or default_home()).expanduser().resolve()
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
     if not workspace.is_dir():
         raise ValueError(f"workspace {workspace} is not a directory")
+    read_line, read_answer = terminal_io(home / "chat_history")
+    read_secret = secret_reader()
+    if not args.model:
+        choice = await run_setup(read_answer, read_secret, stdout_write, home)
+        if choice is None:
+            return 2
+        args.provider, args.base_url, args.model = choice.provider, choice.base_url, choice.model
     config = _session_config(args, workspace, home, stream_deltas=True)
     session_kwargs = resume_kwargs(home, args.resume) if args.resume else {}
-    read_line, read_answer = terminal_io(home / "chat_history")
     provider = _provider(args)
+    if not getattr(provider, "api_key", None) and not _local_url(args.base_url):
+        stdout_write("No API key for this model yet.\n")
+        typed = (await read_secret("API key (hidden; Enter to skip): ")).strip()
+        if typed:
+            save_key(home, typed)
+            provider.api_key = typed
+            stdout_write("key saved (encrypted for your user); /key changes it\n")
     mcp_handles: list[Any] = []
     # `/bridge agent` runs `karox mcp` on the chat's model: same provider flags, and the
     # key (already dropped from this environment) handed to that child alone.
@@ -477,6 +492,7 @@ async def _chat_async(args: argparse.Namespace) -> int:
             session_kwargs=session_kwargs,
             bridge_agent_args=bridge_args,
             bridge_env=bridge_env,
+            read_secret=read_secret,
         )
         return await app.run()
     finally:
@@ -538,6 +554,14 @@ def _session_config(
     )
 
 
+def _local_url(url: str | None) -> bool:
+    """A model server on this machine (Ollama, LM Studio, ...) usually needs no key."""
+    from urllib.parse import urlsplit
+
+    host = urlsplit(url or "").hostname or ""
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
 def _positive[N: (int, float)](value: N | None) -> N | None:
     return value if value is not None and value > 0 else None
 
@@ -548,6 +572,11 @@ def _provider(args: argparse.Namespace) -> Any:
     # Read the key once, then drop it: the agent's shell commands (and their output in
     # transcripts) inherit this process's environment.
     api_key = os.environ.pop(args.api_key_env, None) if args.api_key_env else None
+    if not api_key:  # the key the chat's setup saved (`/key`), if any
+        from karox6.core.store import default_home
+        from karox6.credentials import load_key
+
+        api_key = load_key((args.home or default_home()).expanduser())
     return make_provider(
         args.provider,
         base_url=args.base_url,
