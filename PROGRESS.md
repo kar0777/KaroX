@@ -1205,3 +1205,18 @@ git diff --check
   running on the key. Same drop and decision rule as dln (B solves >= A and hidden tests
   >= A), plus a mechanism check: in B trials that got the notice, the share that ended
   "completed" within 300 s of it must not exceed the share in dln (4 of 7).
+- Time audit (2026-11-20, all 725 saved trials, 138 tasks): 48% of agent-hours (114 of 237)
+  went to tasks no trial ever solved, 11% to tasks every trial solved; single-attempt A/Bs
+  of small features need 8-12 h and cannot resolve 1-2 tasks; the key ran 2-3 agents of
+  its 4 requests; runners ~90% idle. Changes: (1) replay probe (bench
+  scripts/replay_probe.py, diagnose.yml, probes/<dir>/.replay): cut real KaroX
+  trajectories, inject a variant, sample the next step with the frozen profile - mechanism
+  questions in about an hour; (2) data/sets/disc: 47 tasks with mixed outcomes, fastest
+  first, for outcome A/Bs; (3) keep 4 agents on the key. dl2 cancelled for this.
+- Probe notice1 (44757479686): 17 long trials cut 300 s before the limit, none / v1 / v2,
+  4 samples: the next step is a tool call in 197 of 198 samples for every variant (one v1
+  stop). Both notices change WHAT the next call does (vf2: from fixing graph.py to
+  rewriting __init__.py; hof: checking output.json) - finalizing; dln's stops came a few
+  steps later, which a one-step probe cannot see. The notice idea is dropped (stays off,
+  dev21 flag kept): its upside (2 of 12 tbd3 tasks lacked a file, rivals too) does not
+  justify more runs.
