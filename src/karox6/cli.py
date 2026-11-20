@@ -452,6 +452,16 @@ async def _chat_async(args: argparse.Namespace) -> int:
     read_line, read_answer = terminal_io(home / "chat_history")
     provider = _provider(args)
     mcp_handles: list[Any] = []
+    # `/bridge agent` runs `karox mcp` on the chat's model: same provider flags, and the
+    # key (already dropped from this environment) handed to that child alone.
+    bridge_args = ["--provider", args.provider, "--model", args.model]
+    if args.base_url:
+        bridge_args += ["--base-url", args.base_url]
+    key = getattr(provider, "api_key", None)
+    bridge_env = {"KAROX_BRIDGE_API_KEY": key} if key else {}
+    if key:
+        bridge_args += ["--api-key-env", "KAROX_BRIDGE_API_KEY"]
+    app: ChatApp | None = None
     try:
         mcp_tools, mcp_handles = await _mcp_tools(args, home)
         app = ChatApp(
@@ -465,9 +475,14 @@ async def _chat_async(args: argparse.Namespace) -> int:
             encoding=getattr(sys.stdout, "encoding", None),
             extra_tools=mcp_tools,
             session_kwargs=session_kwargs,
+            bridge_agent_args=bridge_args,
+            bridge_env=bridge_env,
         )
         return await app.run()
     finally:
+        if app is not None:
+            with contextlib.suppress(Exception):
+                await app.close()
         await provider.aclose()
         await _close_mcp(mcp_handles)
 

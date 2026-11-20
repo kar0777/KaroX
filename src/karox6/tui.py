@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from karox6 import __version__
+from karox6.bridge import Bridge, BridgeError
 from karox6.core import events as ev
 from karox6.core.digest import brief, outcome
 from karox6.core.session import Session, SessionConfig
@@ -38,6 +39,10 @@ HELP = """Commands:
   /resume [ID|last]         continue a saved session
   /approve ask|allow|deny   dangerous commands: ask, run, or refuse (now: {mode})
   /reasoning                show or hide the model's reasoning
+  /bridge [agent]           connect ChatGPT (web), Claude etc.: start the MCP server with a
+                            Tailscale Funnel link (default: the chat model works through
+                            KaroX's tools; agent: they hand tasks to KaroX's own model)
+  /bridge stop              stop it (it also stops when you leave the chat)
   /quit                     leave (Ctrl+D works too)
 Ctrl+C stops the running turn. End a line with \\ to continue on the next line."""
 
@@ -77,6 +82,8 @@ class ChatApp:
         encoding: str | None = "utf-8",
         extra_tools: list[Tool] | None = None,
         session_kwargs: dict[str, Any] | None = None,
+        bridge_agent_args: list[str] | None = None,
+        bridge_env: dict[str, str] | None = None,
     ) -> None:
         if approval_mode not in APPROVAL_MODES:
             raise ValueError(f"approval mode must be one of {APPROVAL_MODES}")
@@ -93,6 +100,9 @@ class ChatApp:
         self._stream: str | None = None  # "text" | "reasoning" while a delta stream is open
         self._streamed_text = False
         self.session = self._new_session(**(session_kwargs or {}))
+        self.bridge = Bridge(config.home)
+        self.bridge_agent_args = list(bridge_agent_args or [])
+        self.bridge_env = dict(bridge_env or {})
 
     # -- lifecycle ------------------------------------------------------------------
 
@@ -121,8 +131,15 @@ class ChatApp:
                     break
                 continue
             await self.turn(text)
+        await self.close()
         self.write("\n")
         return 0
+
+    async def close(self) -> None:
+        """Stop what the chat started beside it (the bridge and its Tailscale route)."""
+        if self.bridge.running():
+            self.write("stopping the bridge...\n")
+            await asyncio.to_thread(self.bridge.stop)
 
     async def _read_prompt(self) -> str:
         lines: list[str] = []
@@ -318,12 +335,66 @@ class ChatApp:
             if arg in APPROVAL_MODES:
                 self.approval_mode = arg
             self.write(f"dangerous commands: {self.approval_mode}\n")
+        elif name == "/bridge":
+            await self._bridge(arg)
         elif name == "/reasoning":
             self.show_reasoning = not self.show_reasoning
             self.write(f"reasoning {'shown' if self.show_reasoning else 'hidden'}\n")
         else:
             self.write(f"unknown command {name}; /help lists commands\n")
         return None
+
+    async def _bridge(self, arg: str) -> None:
+        b = self.bridge
+        if arg == "stop":
+            if not b.running():
+                self.write("the bridge is not running\n")
+                return
+            await asyncio.to_thread(b.stop)
+            self.write("bridge stopped (its Tailscale route is removed)\n")
+            return
+        if b.running() and b.url:
+            self._bridge_card()
+            return
+        if arg not in ("", "direct", "agent"):
+            self.write("usage: /bridge [agent] | /bridge stop\n")
+            return
+        mode = "agent" if arg == "agent" else "direct"
+        if mode == "agent" and not self.bridge_agent_args:
+            self.write(self.paint("red", "agent mode needs the chat's provider settings") + "\n")
+            return
+        self.write(self.paint("dim", "starting the bridge (Tailscale Funnel)...") + "\n")
+        try:
+            await asyncio.to_thread(
+                b.start,
+                mode=mode,
+                root=self.session.workspace,
+                agent_args=self.bridge_agent_args,
+                env=self.bridge_env,
+            )
+        except (BridgeError, OSError) as exc:
+            self.write(self.paint("red", str(exc)) + "\n")
+            return
+        self._bridge_card()
+
+    def _bridge_card(self) -> None:
+        b = self.bridge
+        how = (
+            "the chat's own model works through KaroX's tools (no API key used)"
+            if b.mode == "direct"
+            else f"tasks run on KaroX's model ({self.config.model})"
+        )
+        self.write(
+            self.paint("bold", "Bridge is up") + f" ({b.where})\n"
+            f"  Connector URL: {self.paint('cyan', b.url or '')}\n"
+            "  ChatGPT web: Settings > Apps & Connectors > Advanced: Developer mode on >\n"
+            "    Create: paste the URL, Authentication: No authentication. Then enable\n"
+            "    the connector in a chat (+ > Developer mode).\n"
+            "  Claude: Settings > Connectors > Add custom connector, paste the URL.\n"
+            f"  Mode: {b.mode} - {how}. Root: {b.root}\n"
+            "  The token inside the URL is the only key: keep it secret. The URL stays the\n"
+            f"  same next time. Log: {b.log_path}. /bridge stop ends it.\n"
+        )
 
     def _show_status(self) -> None:
         s = self.session
@@ -340,6 +411,8 @@ class ChatApp:
         ]
         if self.config.price:
             lines.append(f"cost       ${s.cost_usd:.4f}")
+        if self.bridge.running():
+            lines.append(f"bridge     {self.bridge.mode} {self.bridge.url}")
         self.write("\n".join(lines) + "\n")
 
     async def _show_diff(self) -> None:

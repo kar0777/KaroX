@@ -6,6 +6,14 @@ the task in the chat, the assistant starts a KaroX run on your machine, follows 
 progress and shows the diff. To let the chat's own model do the work instead, with no
 second model or API key, see [Direct mode](#direct-mode-no-second-model).
 
+## From the KaroX chat (simplest)
+
+In `karox chat` type `/bridge`: KaroX starts the server with Tailscale Funnel beside the
+chat and shows the connector URL and where to paste it. The default is direct mode (the
+ChatGPT/Claude model does the work, no API key); `/bridge agent` hands tasks to the chat's
+own model (same provider and key). `/bridge` again shows the URL, `/bridge stop` stops
+it; leaving the chat stops it too and removes its route.
+
 ## 1. Start the server
 
 ```bash
