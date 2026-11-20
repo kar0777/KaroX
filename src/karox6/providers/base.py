@@ -24,6 +24,7 @@ ErrorCode = Literal[
     "empty_response",
     "context_window",
     "auth",
+    "quota",  # balance or daily allowance used up: waiting does not help
     "bad_request",
     "cancelled",
 ]

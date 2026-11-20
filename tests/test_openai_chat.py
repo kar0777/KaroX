@@ -6,6 +6,7 @@ import pytest
 
 from karox6.core.messages import Message, ToolCall
 from karox6.providers.base import (
+    RETRYABLE,
     ModelRequest,
     ProviderError,
     RetryPolicy,
@@ -416,3 +417,38 @@ def test_reasoning_only_reply_has_string_content_on_the_wire():
     from karox6.providers.openai_chat import to_wire
 
     assert to_wire(Message("assistant", ""))["content"] == ""
+
+
+def test_reset_after_complete_tool_calls_keeps_them_without_usage():
+    call = {"index": 0, "id": "c1", "function": {"name": "read", "arguments": '{"path": "a"}'}}
+    result, calls = _stream_then_reset(
+        "data: " + json.dumps(chunk({"tool_calls": [call]}, "tool_calls")) + "\n\n"
+    )
+    assert calls == 1  # not paid for twice
+    assert json.loads(result.message.tool_calls[0].arguments) == {"path": "a"}
+    cut = {"index": 0, "id": "c1", "function": {"name": "read", "arguments": '{"path": "a'}}
+    with pytest.raises(ProviderError):  # incomplete arguments: not a finished reply
+        _stream_then_reset(
+            "data: " + json.dumps(chunk({"tool_calls": [cut]}, "tool_calls")) + "\n\n"
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (429, '{"error": {"code": "insufficient_quota", "message": "available tokens exhausted"}}'),
+        (402, '{"error": {"message": "Insufficient Balance"}}'),
+        (429, '{"error": {"code": "daily_usage_exceeded"}}'),
+    ],
+)
+def test_used_up_quota_is_not_waited_out(status, body):
+    with pytest.raises(ProviderError) as exc:
+        run_response(body, status=status)
+    assert exc.value.code == "quota"
+    assert exc.value.code not in RETRYABLE
+
+
+def test_a_reply_the_server_aborted_is_not_a_final_answer():
+    with pytest.raises(ProviderError) as exc:
+        run_response(sse(chunk({"content": "Now I will fix the"}, "abort")))
+    assert exc.value.code == "server"  # retried like any server error

@@ -772,12 +772,18 @@ class Session:
                 return
             before = after
         try:
-            await self._summarize(before, emit)
+            summarized = await self._summarize(before, emit)
         except ProviderError as exc:
             # Even the summary request is too big for the model: shrink without it.
             if exc.code != "context_window":
                 raise
             await self._recover_overflow(emit)
+            return
+        out_of_time = self._deadline is not None and time.monotonic() >= self._deadline
+        if not summarized and not out_of_time:
+            # No usable checkpoint (e.g. the model spent its output on reasoning twice):
+            # shrink without the model, or every next step would pay for two more tries.
+            await self._drop_head(before, emit)
 
     def _threshold(self) -> int:
         return self.config.compaction_threshold(self._learned_window)
@@ -879,7 +885,9 @@ class Session:
         head, tail = split_for_summary(self.messages, retain)
         if not head:
             return False
-        cut: list[Message] = []  # user turns trimmed from the head: kept verbatim
+        # The user's own messages in the head are kept verbatim beside the checkpoint: a
+        # later requirement ("keep the public API") must not depend on the summary.
+        cut = [m for m in _user_turns(head) if m is not first_user]
         if head_budget is not None:
             # Keep the newest part of the head that fits; older tool work is lost, but the
             # user's own messages are kept as they are and the checkpoint lists the changed
@@ -893,6 +901,7 @@ class Session:
                 return False
             kept = {id(m) for m in head}
             cut = [m for m in _user_turns(full) if id(m) not in kept and m is not first_user]
+            cut += [m for m in _user_turns(head) if m is not first_user]
         request = self._request()
         request.messages = self._replay_view([*head, Message("user", COMPACTION_INSTRUCTION)])
         # Tool schemas stay in the first try so the cached prefix is reused; a model that

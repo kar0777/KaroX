@@ -126,7 +126,7 @@ class OpenAIChatProvider:
                         # and usage arrived, only [DONE] is missing): keep it rather than
                         # pay for the whole request again. Without usage the max_tokens
                         # check below could not run, so that case is retried.
-                        if acc.finish_reason is None or not acc.usage_seen:
+                        if not acc.finished_cleanly():
                             raise
                     if acc.finish_reason is None and not (acc.done and acc.usage_seen):
                         # A proxy may close the stream with [DONE] after its upstream
@@ -306,6 +306,23 @@ class _Accumulator:
             requests=1,
         )
 
+    def finished_cleanly(self) -> bool:
+        """The reply is complete although the connection dropped before its end: with usage
+        seen, or tool calls with a terminal finish reason other than a cut ("length") whose
+        arguments are all complete JSON. Retrying it would pay for the same reply again."""
+        if self.finish_reason is None:
+            return False
+        if self.usage_seen:
+            return True
+        if not self.calls or _normalize_finish(self.finish_reason, False) != "stop":
+            return False  # a text reply may be one cut at max_tokens that says "stop"
+        for call in self.calls.values():
+            try:
+                json.loads("".join(call.arguments) or "{}")
+            except ValueError:
+                return False
+        return True
+
     def result(self) -> ModelResponse:
         calls = []
         for n, index in enumerate(sorted(self.calls)):
@@ -331,6 +348,12 @@ class _Accumulator:
             extra=extra,
         )
         finish = _normalize_finish(self.finish_reason, bool(calls))
+        if finish == "other":
+            # "abort", "error", ...: the server stopped generating; partial text is not
+            # the model's final answer (it would end the run as completed).
+            raise ProviderError(
+                "server", f"the reply stopped early (finish_reason={self.finish_reason})"
+            )
         return ModelResponse(
             message=message, usage=self.usage, finish_reason=finish, model=self.model
         )
@@ -361,6 +384,21 @@ def _normalize_finish(raw: str | None, has_calls: bool) -> str:
     return "stop" if raw in (None, "stop", "end_turn", "tool_calls", "function_call") else "other"
 
 
+# A 429/402 that means "out of money or allowance", not "too fast": retrying for minutes
+# only hides the reason from the user.
+_QUOTA_HINTS = (
+    "insufficient_quota",
+    "insufficient balance",
+    "insufficient_balance",
+    "exceeded your current quota",
+    "quota exceeded",
+    "daily_usage_exceeded",
+    "billing",
+    "top up your balance",
+    "credit balance is too low",
+)
+
+
 def _http_error(status: int, text: str, headers: Any) -> ProviderError:
     snippet = " ".join(text.split())[:500]
     retry_after: float | None = None
@@ -372,7 +410,9 @@ def _http_error(status: int, text: str, headers: Any) -> ProviderError:
             retry_after = None
     code: ErrorCode
     lowered = snippet.lower()
-    if status == 429:
+    if status in (402, 429) and any(hint in lowered for hint in _QUOTA_HINTS):
+        code = "quota"
+    elif status == 429:
         code = "rate_limit"
     elif status in (401, 403):
         code = "auth"

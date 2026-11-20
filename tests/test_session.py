@@ -854,3 +854,37 @@ def test_events_carry_time_and_usage_carries_call_timing(tmp_path):
     assert usage.retries == 1
     assert 0.04 <= usage.ttft_s < usage.latency_s <= usage.total_s
     assert usage.total_s >= usage.latency_s + 0.04  # the retry wait counts only in total
+
+
+def test_summary_keeps_every_user_requirement_verbatim(tmp_path):
+    later = Message("user", "Do not change the public API; support Python 3.12.")
+    messages = (
+        [Message("user", "original")]
+        + [Message("assistant", "x" * 400) for _ in range(4)]
+        + [later]
+        + [Message("assistant", "y" * 400) for _ in range(5)]
+    )
+    provider = ScriptedProvider([Turn(text="checkpoint that forgets it"), Turn(text="done")])
+    session = Session(config(tmp_path, compact_at_tokens=100), provider, messages=messages)
+    run(session, "continue")
+    assert any(m.meta.get("kind") == "compaction" for m in session.messages)
+    contents = [m.content for m in session.messages if m.role == "user"]
+    assert "original" in contents
+    assert later.content in contents
+
+
+def test_a_failed_summary_shrinks_without_the_model(tmp_path):
+    messages = [Message("user", "original")] + [Message("assistant", "x" * 400) for _ in range(9)]
+    provider = ScriptedProvider(
+        [
+            Turn(text="", reasoning="r" * 50, finish_reason="length"),
+            Turn(text="", reasoning="r" * 50, finish_reason="length"),
+            Turn(text="done"),
+        ]
+    )
+    session = Session(config(tmp_path, compact_at_tokens=100), provider, messages=messages)
+    events = run(session, "continue")
+    assert finish(events).status == "completed"
+    assert len(provider.requests) == 3  # two summary tries, then the task: no third try
+    assert any(m.meta.get("kind") == "compaction" for m in session.messages)
+    assert session.messages[0].content == "original"
