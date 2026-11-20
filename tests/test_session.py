@@ -466,6 +466,38 @@ def test_wrap_up_notices_on_long_runs(tmp_path, monkeypatch):
     assert not [e for e in run(quiet) if e.type == "notice"]
 
 
+def test_deadline_notice_comes_once_near_the_time_limit(tmp_path, monkeypatch):
+    import time as real_time
+
+    from karox6.core import session as session_module
+
+    clock = [1000.0]
+
+    class FakeTime:  # the session's clock only; the event loop keeps the real one
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        def monotonic(self):
+            return clock[0]
+
+    monkeypatch.setattr(session_module, "time", FakeTime())
+
+    class Ticking(ScriptedProvider):
+        async def complete(self, request, on_delta=None):
+            clock[0] += 100.0  # every model call takes 100 s
+            return await super().complete(request, on_delta)
+
+    turns = [Turn(calls=[("read", {"file_path": f"f{i}"})]) for i in range(5)] + [Turn(text="done")]
+    cfg = config(tmp_path, max_seconds=1000.0, deadline_notice_s=750)
+    events = run(Session(cfg, Ticking(turns)))
+    notices = [e for e in events if e.type == "notice" and e.kind == "deadline"]
+    assert len(notices) == 1
+    assert notices[0].text.startswith("About 12 minutes remain of this run's 17-minute time limit")
+    assert finish(events).status == "completed"
+    quiet = Session(config(tmp_path, max_seconds=1000.0), Ticking(list(turns)))
+    assert not [e for e in run(quiet) if e.type == "notice"]
+
+
 def test_step_limits_by_command(tmp_path):
     from karox6 import cli
 
@@ -484,6 +516,8 @@ def test_step_limits_by_command(tmp_path):
     assert built("run", "t", "--wrap-up-steps", "0").wrap_up_steps is None
     assert built("run", "t", "--max-steps", "-1").max_steps is None
     assert built("run", "t", "--wrap-up-steps", "-5").wrap_up_steps is None
+    assert built("run", "t").deadline_notice_s is None
+    assert built("run", "t", "--deadline-notice", "600").deadline_notice_s == 600
 
 
 def test_context_limit_caps_the_model_window(tmp_path):

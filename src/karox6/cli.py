@@ -230,6 +230,13 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
         "steps later (default: never)",
     )
     p.add_argument("--max-seconds", type=float, default=None)
+    p.add_argument(
+        "--deadline-notice",
+        type=int,
+        default=None,
+        help="with --max-seconds: tell the model this many seconds before the limit to "
+        "make sure its deliverables exist (default: never)",
+    )
     p.add_argument("--max-cost", type=float, default=None, help="USD, needs --price-*")
     p.add_argument(
         "--context-window",
@@ -512,6 +519,7 @@ def _session_config(
         copy_notes=args.copy_notes,
         command_wait_cap_s=_positive(args.command_wait_cap),
         wrap_up_steps=_positive(args.wrap_up_steps),
+        deadline_notice_s=_positive(args.deadline_notice),
     )
 
 

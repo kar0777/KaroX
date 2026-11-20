@@ -77,6 +77,12 @@ WRAP_UP_NOTICE = (
     "and reply with your final summary. Continue past that only for a concrete fix you "
     "can name."
 )
+DEADLINE_NOTICE = (
+    "About {left} minutes remain of this run's {total}-minute time limit. The run is stopped "
+    "at the limit, with no chance to reply. If the task asks for output files or other "
+    "deliverables, make sure each one exists now and holds your best current result (a "
+    "partial result beats none); then keep improving it while time remains."
+)
 FINAL_NOTICE = (
     "This run has taken {steps} steps. Stop now: reply with your final summary (what you "
     "changed, what is verified, what remains) without calling more tools."
@@ -113,6 +119,7 @@ class SessionConfig:
     copy_notes: bool = False  # edit lists other copies of replaced code (off until A/B)
     command_wait_cap_s: int | None = None  # foreground wait cap per command (off until A/B)
     wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)
+    deadline_notice_s: int | None = None  # warn this long before max_seconds (off until A/B)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def effective_window(self, learned: int | None = None) -> int:
@@ -264,6 +271,7 @@ class Session:
         steps = 0
         truncations = 0
         reminded = 0  # wrap-up notices sent (a truncated step may skip the exact count)
+        warned = False  # deadline notice sent
         status, reason, final_text = "completed", "", ""
         try:
             while True:
@@ -317,6 +325,9 @@ class Session:
                 if stop:
                     status, reason = "loop", stop
                     break
+                if not warned and self._deadline_near(started):
+                    self._notice("deadline", self._deadline_text(started), emit)
+                    warned = True
                 wrap = self.config.wrap_up_steps
                 if wrap and reminded == 0 and steps >= wrap:
                     self._notice("wrap_up", WRAP_UP_NOTICE.format(steps=steps), emit)
@@ -363,6 +374,17 @@ class Session:
             with contextlib.suppress(Exception):
                 self.store.append("event", event=finished.to_dict())
             emit(finished)
+
+    def _deadline_near(self, started: float) -> bool:
+        cfg = self.config
+        if not cfg.deadline_notice_s or cfg.max_seconds is None:
+            return False
+        return cfg.max_seconds - (time.monotonic() - started) <= cfg.deadline_notice_s
+
+    def _deadline_text(self, started: float) -> str:
+        total = self.config.max_seconds or 0.0
+        left = max(total - (time.monotonic() - started), 0.0)
+        return DEADLINE_NOTICE.format(left=max(round(left / 60), 1), total=round(total / 60))
 
     def _limit_reached(self, steps: int, started: float) -> str | None:
         cfg = self.config

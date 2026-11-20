@@ -32,6 +32,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "max_output_tokens": (int,),
     "max_steps": (int,),
     "wrap_up_steps": (int,),
+    "deadline_notice": (int,),
     "max_seconds": (int, float),
     "max_cost": (int, float),
     "reasoning_effort": (str,),
