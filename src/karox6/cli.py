@@ -412,7 +412,9 @@ async def _run_async(args: argparse.Namespace, task: str) -> int:
     try:
         mcp_tools, mcp_handles = await _mcp_tools(args, home)
         approver = _approver(args.approve_dangerous, json_mode=args.json)
-        session_kwargs = resume_kwargs(home, args.resume) if args.resume else {}
+        session_kwargs = (
+            resume_kwargs(home, args.resume, workspace=workspace) if args.resume else {}
+        )
         session = Session(
             config, provider, approver=approver, extra_tools=mcp_tools, **session_kwargs
         )
@@ -458,7 +460,7 @@ async def _chat_async(args: argparse.Namespace) -> int:
             return 2
         args.provider, args.base_url, args.model = choice.provider, choice.base_url, choice.model
     config = _session_config(args, workspace, home, stream_deltas=True)
-    session_kwargs = resume_kwargs(home, args.resume) if args.resume else {}
+    session_kwargs = resume_kwargs(home, args.resume, workspace=workspace) if args.resume else {}
     provider = _provider(args)
     if not getattr(provider, "api_key", None) and not _local_url(args.base_url):
         stdout_write("No API key for this model yet.\n")

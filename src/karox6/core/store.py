@@ -96,14 +96,24 @@ class SessionStore:
         return loaded
 
     @staticmethod
-    def latest(home: Path, exclude: str | None = None) -> str | None:
+    def latest(home: Path, exclude: str | None = None, workspace: Path | None = None) -> str | None:
         """The most recently active session that has messages (not ``exclude``)."""
-        ids = active_sessions(home, exclude=exclude)
+        ids = active_sessions(home, exclude=exclude, workspace=workspace)
         return ids[0] if ids else None
 
 
-def active_sessions(home: Path, exclude: str | None = None) -> list[str]:
-    """Session ids with at least one message, most recently active first."""
+def _same_dir(a: str, b: Path) -> bool:
+    try:
+        return Path(a).resolve() == b.resolve()
+    except OSError:
+        return False
+
+
+def active_sessions(
+    home: Path, exclude: str | None = None, workspace: Path | None = None
+) -> list[str]:
+    """Session ids with at least one message, most recently active first (only those of
+    ``workspace`` when given)."""
     root = home / "sessions"
     if not root.is_dir():
         return []
@@ -114,13 +124,23 @@ def active_sessions(home: Path, exclude: str | None = None) -> list[str]:
             continue
         try:
             with path.open("rb") as fh:
-                fh.readline()  # meta
+                meta = fh.readline()
                 if not fh.readline().strip():
                     continue  # created but never used
+            if workspace is not None and not _same_dir(_meta_workspace(meta), workspace):
+                continue
             found.append((path.stat().st_mtime_ns, entry.name))
         except OSError:
             continue
     return [name for _, name in sorted(found, reverse=True)]
+
+
+def _meta_workspace(line: bytes) -> str:
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return ""
+    return str(record.get("workspace") or "") if isinstance(record, dict) else ""
 
 
 CANCELLED_RESULT = "[cancelled by the user before this call finished]"
@@ -166,12 +186,27 @@ def close_dangling_calls(messages: list[Message]) -> list[Message]:
     return out
 
 
-def resume_kwargs(home: Path, ref: str, *, exclude: str | None = None) -> dict[str, Any]:
-    """Session keyword arguments that continue saved session ``ref`` (an id or 'last')."""
-    session_id = SessionStore.latest(home, exclude=exclude) if ref == "last" else ref
+def resume_kwargs(
+    home: Path, ref: str, *, exclude: str | None = None, workspace: Path | None = None
+) -> dict[str, Any]:
+    """Session keyword arguments that continue saved session ``ref`` (an id or 'last').
+
+    With ``workspace``, 'last' means the last session of that project, and a session of
+    another project is refused: its history (paths, edits, results) describes other files.
+    """
+    if ref == "last":
+        session_id = SessionStore.latest(home, exclude=exclude, workspace=workspace)
+    else:
+        session_id = ref
     if not session_id:
-        raise ValueError(f"no session to resume under {home}")
+        where = f" for {workspace}" if workspace is not None else f" under {home}"
+        raise ValueError(f"no session to resume{where}")
     loaded = SessionStore.load(home, session_id)
+    origin = str(loaded.meta.get("workspace") or "")
+    if workspace is not None and origin and not _same_dir(origin, workspace):
+        raise ValueError(
+            f"session {session_id} belongs to {origin}; run karox6 there to continue it"
+        )
     return {
         "session_id": session_id,
         "messages": loaded.messages,
@@ -180,11 +215,13 @@ def resume_kwargs(home: Path, ref: str, *, exclude: str | None = None) -> dict[s
     }
 
 
-def recent_sessions(home: Path, limit: int = 10) -> list[tuple[str, str]]:
+def recent_sessions(
+    home: Path, limit: int = 10, workspace: Path | None = None
+) -> list[tuple[str, str]]:
     """(session id, first line of its first task), most recently active first."""
     root = home / "sessions"
     out: list[tuple[str, str]] = []
-    for session_id in active_sessions(home)[:limit]:
+    for session_id in active_sessions(home, workspace=workspace)[:limit]:
         title = ""
         try:
             with (root / session_id / "session.jsonl").open(encoding="utf-8") as fh:

@@ -23,7 +23,7 @@ from typing import Any
 from karox6.core.digest import event_line
 from karox6.core.events import Event
 from karox6.core.session import Session, SessionConfig
-from karox6.core.store import SessionStore
+from karox6.core.store import resume_kwargs
 from karox6.providers.base import Provider
 from karox6.tools.base import ApprovalRequest, Tool
 from karox6.tools.files import is_generated
@@ -164,15 +164,9 @@ class RunManager:
             if any(r.running and r.session.session_id == session_id for r in self.runs.values()):
                 raise RunError(f"session {session_id} is already running")
             try:
-                loaded = SessionStore.load(config.home, session_id)
-            except FileNotFoundError as exc:
+                kwargs = resume_kwargs(config.home, session_id, workspace=workspace)
+            except (FileNotFoundError, ValueError) as exc:
                 raise RunError(str(exc)) from None
-            kwargs = {
-                "session_id": session_id,
-                "messages": loaded.messages,
-                "usage": loaded.usage,
-                "cost_usd": loaded.cost_usd,
-            }
         self._seq += 1
         run_id = f"run-{self._seq}-{secrets.token_hex(3)}"
         holder: list[Run] = []

@@ -285,3 +285,35 @@ def test_sign_in_under_a_shared_path(tmp_path):
             assert (await client.post(f"/karox6/mcp/{TOKEN}", json=INIT)).status_code == 200
 
     asyncio.run(go())
+
+
+def test_parallel_registrations_are_all_kept(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    oauth = OAuth(tmp_path / "oauth.json")
+    body = json.dumps({"redirect_uris": [REDIRECT]}).encode()
+
+    def register(_):
+        status, _, payload = oauth.respond("POST", "/oauth/register", {"host": "h"}, body)
+        assert status == 201
+        return json.loads(payload)["client_id"]
+
+    with ThreadPoolExecutor(8) as pool:
+        ids = set(pool.map(register, range(40)))
+    saved = json.loads((tmp_path / "oauth.json").read_text(encoding="utf-8"))
+    assert ids <= set(saved["clients"])
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_client_metadata_is_never_fetched_from_private_addresses():
+    from karox6.mcp import oauth as mod
+
+    for url in (
+        "https://127.0.0.1/client.json",
+        "https://localhost/client.json",
+        "https://169.254.169.254/latest",
+        "https://10.0.0.5/c",
+        "http://example.com/c",
+    ):
+        assert not mod._public_https(url), url
+        assert mod._fetch_client_metadata(url) is None

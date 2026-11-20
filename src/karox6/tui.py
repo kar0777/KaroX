@@ -343,7 +343,7 @@ class ChatApp:
             self.session = self._new_session()
             self.write(f"new session {self.session.session_id}\n")
         elif name == "/sessions":
-            rows = recent_sessions(self.config.home)
+            rows = recent_sessions(self.config.home, workspace=self.config.workspace)
             if not rows:
                 self.write("no saved sessions\n")
             for session_id, title in rows:
@@ -352,7 +352,10 @@ class ChatApp:
         elif name == "/resume":
             try:
                 kwargs = resume_kwargs(
-                    self.config.home, arg or "last", exclude=self.session.session_id
+                    self.config.home,
+                    arg or "last",
+                    exclude=self.session.session_id,
+                    workspace=self.config.workspace,
                 )
             except (ValueError, FileNotFoundError) as exc:
                 self.write(self.paint("red", str(exc)) + "\n")

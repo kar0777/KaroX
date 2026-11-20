@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from karox6.core import snapshot
 from karox6.core.snapshot import write_snapshot
 
@@ -53,3 +55,17 @@ def test_snapshot_skips_outside_and_large_files(tmp_path: Path, monkeypatch) -> 
     assert manifest["files"] == {"b.txt": manifest["files"]["b.txt"]}
     assert sorted(manifest["skipped"]) == sorted(["pkg/a.py", "../x.py", "/etc/passwd", "pkg"])
     assert not (target / "files" / "pkg").exists()
+
+
+def test_snapshot_never_follows_a_link_out_of_the_project(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    secret = tmp_path / "outside.txt"
+    secret.write_text("private\n", encoding="utf-8")
+    try:
+        (ws / "link.txt").symlink_to(secret)
+    except OSError:
+        pytest.skip("symlinks need privileges here")
+    target = write_snapshot(tmp_path / "s", ws, ["link.txt", "b.txt"], step=1, status="x")
+    manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["skipped"] == ["link.txt"]
+    assert not (target / "files" / "link.txt").exists()

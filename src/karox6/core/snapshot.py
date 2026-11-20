@@ -34,6 +34,9 @@ def write_snapshot(
             skipped.append(rel)
             continue
         src = workspace / rel
+        if src.is_symlink() or not _inside(src, workspace):
+            skipped.append(rel)  # a link could copy files from outside the project
+            continue
         if not src.exists():
             files[rel] = None
             continue
@@ -55,3 +58,11 @@ def write_snapshot(
     target.mkdir(parents=True, exist_ok=True)
     (target / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
     return target
+
+
+def _inside(path: Path, workspace: Path) -> bool:
+    """``path`` really lies in ``workspace`` (links and junctions in its parents resolved)."""
+    try:
+        return path.resolve().is_relative_to(workspace.resolve())
+    except OSError:
+        return False

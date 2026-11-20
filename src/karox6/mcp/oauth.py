@@ -17,9 +17,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import secrets
+import socket
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -93,6 +96,9 @@ class OAuth:
     _pending: dict[str, _Pending] = field(default_factory=dict)
     _codes: dict[str, _Code] = field(default_factory=dict)
     _data: dict[str, Any] = field(default_factory=dict)
+    # respond() runs in worker threads (transport: asyncio.to_thread): one request at a
+    # time reads and changes the state, so concurrent sign-ins and refreshes lose nothing.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         try:
@@ -111,6 +117,10 @@ class OAuth:
         return any(name in path for name in DISCOVERY) and ".well-known" in path
 
     def respond(self, method: str, target: str, headers: dict[str, str], body: bytes) -> Response:
+        with self._lock:
+            return self._respond(method, target, headers, body)
+
+    def _respond(self, method: str, target: str, headers: dict[str, str], body: bytes) -> Response:
         split = urlsplit(target)
         path = split.path.rstrip("/") or "/"
         base = self.base_url(headers)
@@ -351,7 +361,9 @@ class OAuth:
 
     def _save(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.state_path.with_name(self.state_path.name + f".{os.getpid()}.tmp")
+        tmp = self.state_path.with_name(
+            f"{self.state_path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        )
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(self._data, fh)
@@ -371,10 +383,34 @@ def _redirect_ok(uri: object) -> bool:
     return parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1")
 
 
+class _Refuse(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None  # a redirect could lead to an address _public_https refused
+
+
+_NO_REDIRECTS = urllib.request.build_opener(_Refuse)
+
+
+def _public_https(url: str) -> bool:
+    """An https URL whose host resolves only to public addresses: the server never fetches
+    from this machine, the LAN or cloud metadata endpoints on a client's behalf."""
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(parts.hostname, parts.port or 443, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return False
+    addresses = {info[4][0] for info in infos}
+    return bool(addresses) and all(ipaddress.ip_address(a).is_global for a in addresses)
+
+
 def _fetch_client_metadata(url: str) -> dict[str, Any] | None:
     """A client ID metadata document: the client_id is an https URL serving its metadata."""
+    if not _public_https(url):
+        return None
     try:
-        with urllib.request.urlopen(url, timeout=METADATA_TIMEOUT_S) as resp:
+        with _NO_REDIRECTS.open(url, timeout=METADATA_TIMEOUT_S) as resp:
             raw = resp.read(METADATA_MAX_BYTES + 1)
         if len(raw) > METADATA_MAX_BYTES:
             return None
