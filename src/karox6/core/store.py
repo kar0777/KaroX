@@ -7,7 +7,6 @@ compaction), ``event`` (run_finished). Loading replays them in order.
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 import time
@@ -16,13 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from karox6.core.messages import Message, Usage
+from karox6.settings import default_home as default_home  # noqa: PLC0414
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}")
-
-
-def default_home() -> Path:
-    env = os.environ.get("KAROX_HOME")
-    return Path(env).expanduser() if env else Path.home() / ".karox6"
 
 
 def new_session_id() -> str:

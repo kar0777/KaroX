@@ -824,6 +824,38 @@ class Session:
         self._append(Message("user", text, meta={"kind": kind}))
         emit(ev.Notice(kind=kind, text=text))
 
+    async def compact(self, emit: Callable[[ev.Event], None] | None = None) -> list[ev.Event]:
+        """Compact conversation history on demand using the existing prune + summary pipeline."""
+        events: list[ev.Event] = []
+
+        def record(event: ev.Event) -> None:
+            events.append(event)
+            if emit is not None:
+                emit(event)
+
+        if len(self.messages) < 3:
+            return events
+        self._close_dangling_calls()
+        before = self._prune_for_compaction(self.context_tokens(), record)
+        pruned = bool(events)
+        msg_tokens = estimate_tokens(self.messages)
+        retain = min(int(self._threshold() * 0.2), max(msg_tokens // 4, 1))
+        # An explicit compaction has its own time budget after the previous turn ended.
+        previous_deadline = self._deadline
+        self._deadline = (
+            time.monotonic() + self.config.max_seconds
+            if self.config.max_seconds is not None
+            else None
+        )
+        try:
+            summarized = await self._summarize(before, record, retain_tokens=retain)
+            out_of_time = self._deadline is not None and time.monotonic() >= self._deadline
+            if not summarized and not pruned and not out_of_time:
+                await self._drop_head(before, record, retain_tokens=retain)
+        finally:
+            self._deadline = previous_deadline
+        return events
+
     def context_tokens(self) -> int:
         if self._last_input_tokens:
             return self._last_input_tokens + int(self._chars_since_measure / 3.5)
@@ -834,15 +866,9 @@ class Session:
         before = self.context_tokens()
         if before < threshold:
             return
-        removed = prune_tool_results(self.messages)
-        if removed:
-            after = max(before - int(removed / 3.5), 0)
-            self._last_input_tokens, self._chars_since_measure = after, 0
-            self.store.reset(self.messages)
-            emit(ev.Compacted(mode="prune", tokens_before=before, tokens_after=after))
-            if after < threshold:
-                return
-            before = after
+        before = self._prune_for_compaction(before, emit)
+        if before < threshold:
+            return
         try:
             summarized = await self._summarize(before, emit)
         except ProviderError as exc:
@@ -856,6 +882,16 @@ class Session:
             # No usable checkpoint (e.g. the model spent its output on reasoning twice):
             # shrink without the model, or every next step would pay for two more tries.
             await self._drop_head(before, emit)
+
+    def _prune_for_compaction(self, before: int, emit: Callable[[ev.Event], None]) -> int:
+        removed = prune_tool_results(self.messages)
+        if not removed:
+            return before
+        after = max(before - int(removed / 3.5), 0)
+        self._last_input_tokens, self._chars_since_measure = after, 0
+        self.store.reset(self.messages)
+        emit(ev.Compacted(mode="prune", tokens_before=before, tokens_after=after))
+        return after
 
     def _threshold(self) -> int:
         return self.config.compaction_threshold(self._learned_window)
@@ -896,9 +932,11 @@ class Session:
         # Retry when anything was cut; the retry itself shows whether it now fits.
         return bool(removed or summarized or dropped)
 
-    async def _drop_head(self, before: int, emit: Callable[[ev.Event], None]) -> bool:
+    async def _drop_head(
+        self, before: int, emit: Callable[[ev.Event], None], *, retain_tokens: int | None = None
+    ) -> bool:
         """Model-free fallback: keep the task message, a checkpoint and the recent tail."""
-        retain = int(self._threshold() * 0.2)
+        retain = int(self._threshold() * 0.2) if retain_tokens is None else retain_tokens
         first_user = next((m for m in self.messages if m.role == "user"), None)
         head, tail = split_for_summary(self.messages, retain)
         if not head:
@@ -914,6 +952,7 @@ class Session:
         self.messages = [*rebuilt, checkpoint_message(note, files), *tail]
         self.store.reset(self.messages)
         after = estimate_tokens(self.messages, self.system_prompt)
+        self._last_input_tokens, self._chars_since_measure = after, 0
         emit(ev.Compacted(mode="drop", tokens_before=before, tokens_after=after))
         return True
 
@@ -948,11 +987,15 @@ class Session:
         return response.message.content.strip()
 
     async def _summarize(
-        self, before: int, emit: Callable[[ev.Event], None], head_budget: int | None = None
+        self,
+        before: int,
+        emit: Callable[[ev.Event], None],
+        head_budget: int | None = None,
+        retain_tokens: int | None = None,
     ) -> bool:
         """Replace the older history with a model-written checkpoint; True on success."""
         began = time.monotonic()
-        retain = int(self._threshold() * 0.2)
+        retain = int(self._threshold() * 0.2) if retain_tokens is None else retain_tokens
         first_user = next((m for m in self.messages if m.role == "user"), None)
         head, tail = split_for_summary(self.messages, retain)
         if not head:

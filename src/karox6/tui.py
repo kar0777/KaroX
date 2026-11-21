@@ -11,19 +11,29 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
+import stat
 import sys
 import time
-from collections.abc import Awaitable, Callable, Iterable
-from pathlib import Path
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from dataclasses import dataclass
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
 from karox6 import __version__
 from karox6.core import events as ev
-from karox6.core.digest import brief, outcome
+from karox6.core.digest import brief, is_tool_failure, outcome
 
 if TYPE_CHECKING:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.completion import Completer
+    from prompt_toolkit.history import History
+    from prompt_toolkit.input import Input
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.output import Output
+
     from karox6.bridge import Bridge
     from karox6.core.config import SessionConfig
     from karox6.core.session import Session
@@ -35,26 +45,134 @@ Write = Callable[[str], None]
 DisplayFactory = Callable[[Write, Callable[[], str], Callable[[], None]], "TurnDisplay | None"]
 
 APPROVAL_MODES = ("ask", "allow", "deny")
-_EARLY_COMMANDS = frozenset(("/help", "/approve", "/reasoning", "/q", "/quit", "/exit"))
+_SESSION_COMMANDS = frozenset(
+    (
+        "/diff",
+        "/status",
+        "/cost",
+        "/compact",
+        "/new",
+        "/sessions",
+        "/resume",
+        "/key",
+        "/model",
+        "/setup",
+        "/bridge",
+    )
+)
 DIFF_CAP = 40_000
-HELP = """Commands:
-  /help                     this help
-  /diff                     workspace changes (git diff and untracked files)
-  /status                   session, model, tokens and cost
-  /new                      start a fresh session
-  /sessions                 recent sessions
-  /resume [ID|last]         continue a saved session
-  /approve ask|allow|deny   dangerous commands: ask, run, or refuse (now: {mode})
-  /reasoning                show or hide the model's reasoning
-  /key                      paste the API key (hidden; saved encrypted for your user)
-  /model [NAME]             show or change the model
-  /setup                    choose provider, model and key again
-  /bridge [agent]           connect ChatGPT (web), Claude etc.: start the MCP server with a
-                            Tailscale Funnel link (default: the chat model works through
-                            KaroX's tools; agent: they hand tasks to KaroX's own model)
-  /bridge url | log | stop  the secret no-auth link, recent requests, stop (also on exit)
-  /quit                     leave (Ctrl+D works too)
-Esc or Ctrl+C stops the running turn. End a line with \\ to continue on the next line."""
+_CLEAR_SCREEN = "\x1b[2J\x1b[H"
+MENTION_MAX_BYTES = 64 * 1024
+MENTION_TOTAL_BYTES = 128 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class CommandSpec:
+    name: str
+    usage: str
+    summary: str
+    group: str
+
+
+COMMANDS: tuple[CommandSpec, ...] = (
+    CommandSpec("/new", "/new", "start a fresh session", "Session"),
+    CommandSpec("/clear", "/clear", "clear the screen (keeps current session)", "Session"),
+    CommandSpec("/sessions", "/sessions", "list recent sessions for this workspace", "Session"),
+    CommandSpec("/resume", "/resume [ID|last]", "continue a saved session", "Session"),
+    CommandSpec("/quit", "/quit", "leave the chat (/exit, /q, Ctrl+D)", "Session"),
+    CommandSpec(
+        "/diff",
+        "/diff",
+        "coloured workspace changes (git diff and untracked)",
+        "Workspace & Context",
+    ),
+    CommandSpec(
+        "/status", "/status", "session, model, tokens, context fill and cost", "Workspace & Context"
+    ),
+    CommandSpec(
+        "/cost", "/cost", "detailed token breakdown and session cost", "Workspace & Context"
+    ),
+    CommandSpec(
+        "/compact",
+        "/compact",
+        "compact conversation history to free context",
+        "Workspace & Context",
+    ),
+    CommandSpec("/model", "/model [NAME]", "show or change the model", "Model & Setup"),
+    CommandSpec(
+        "/reasoning", "/reasoning [show|hide]", "show or hide model reasoning", "Model & Setup"
+    ),
+    CommandSpec("/key", "/key", "paste the API key (hidden; saved encrypted)", "Model & Setup"),
+    CommandSpec("/setup", "/setup", "choose provider, model and key again", "Model & Setup"),
+    CommandSpec(
+        "/approve",
+        "/approve ask|allow|deny",
+        "dangerous commands: ask, allow, or deny",
+        "Tools & Bridge",
+    ),
+    CommandSpec(
+        "/bridge",
+        "/bridge [agent|url|log|stop]",
+        "connect ChatGPT/Claude via Tailscale Funnel MCP bridge",
+        "Tools & Bridge",
+    ),
+    CommandSpec("/help", "/help", "show commands and keyboard shortcuts", "Tools & Bridge"),
+)
+
+_COMMAND_ALIASES: dict[str, str] = {
+    "/exit": "leave the chat (same as /quit)",
+    "/q": "leave the chat (same as /quit)",
+}
+
+_APPROVE_ARGS: tuple[tuple[str, str], ...] = (
+    ("ask", "ask before running dangerous commands"),
+    ("allow", "run dangerous commands without asking"),
+    ("deny", "refuse dangerous commands automatically"),
+)
+
+_BRIDGE_ARGS: tuple[tuple[str, str], ...] = (
+    ("direct", "let the client model use KaroX tools"),
+    ("agent", "hand tasks to KaroX's own model"),
+    ("url", "show the secret no-auth connector link"),
+    ("log", "show recent bridge requests"),
+    ("stop", "stop the bridge and remove its Tailscale route"),
+)
+
+_REASONING_ARGS: tuple[tuple[str, str], ...] = (
+    ("show", "display model reasoning as it streams"),
+    ("hide", "hide model reasoning output"),
+)
+
+_HELP_GROUPS = ("Session", "Workspace & Context", "Model & Setup", "Tools & Bridge")
+
+
+_HELP_SHORTCUTS: tuple[tuple[str, str], ...] = (
+    ("@path", "mention a workspace file to attach it to your message"),
+    ("Enter / Alt+Enter", "send message / insert newline (Ctrl+J or trailing \\ also work)"),
+    ("Tab", "complete /commands, arguments and @file paths"),
+    ("Ctrl+R", "search persistent input history"),
+    ("Esc or Ctrl+C", "stop the running turn"),
+    ("Ctrl+D", "exit chat at an empty prompt"),
+)
+
+
+def _format_help(paint: Palette, mode: str) -> str:
+    width = max(len(c.usage) for c in COMMANDS) + 2
+    sections: list[str] = []
+    for group in _HELP_GROUPS:
+        rows = [paint("bold", group)]
+        for cmd in COMMANDS:
+            if cmd.group != group:
+                continue
+            note = f"{cmd.summary} (now: {mode})" if cmd.name == "/approve" else cmd.summary
+            rows.append(f"  {paint('cyan', f'{cmd.usage:<{width}}')}{note}")
+        sections.append("\n".join(rows))
+    shortcuts = [paint("bold", "Input & Shortcuts")]
+    for key, desc in _HELP_SHORTCUTS:
+        shortcuts.append(f"  {paint('cyan', f'{key:<{width}}')}{desc}")
+    sections.append("\n".join(shortcuts))
+    return "\n\n".join(sections)
+
 
 _CODES = {"dim": "2", "bold": "1", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
 
@@ -111,6 +229,170 @@ def _box(title: str, rows: list[tuple[str, str]], fancy: bool) -> str:
     return "\n".join(out)
 
 
+_MENTION_RE = re.compile(r'(?:^|(?<=[\s(\[{]))@(?:"([^"]+)"|([^\s"]+))')
+_MENTION_PREFIX_RE = re.compile(r'(?:^|(?<=[\s(\[{]))@(?:"([^"]*)|([^\s"]*))$')
+_MENTION_BINARY_PROBE = 8_000
+_TRAILING_PUNCT = ",.;:)]}?!"
+
+
+@dataclass(slots=True)
+class MentionResult:
+    text: str
+    attached: list[tuple[str, Path, int, bool]]  # (rel_path, abs_path, bytes, truncated)
+    warnings: list[str]
+
+
+def _format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def _resolve_mention(raw: str, root: Path, *, quoted: bool) -> tuple[Path | None, str | None]:
+    """Return (path, warning) for a raw ``@path`` token; (None, None) to ignore."""
+    candidates = [raw]
+    stripped = raw.rstrip(_TRAILING_PUNCT)
+    if not quoted and stripped and stripped != raw:
+        candidates.append(stripped)
+    for cand in candidates:
+        norm = cand.replace("\\", "/")
+        path = Path(norm)
+        if PureWindowsPath(norm).anchor or ".." in path.parts or (os.name == "nt" and ":" in norm):
+            return None, f"skipped @{cand} (outside workspace)"
+        try:
+            resolved = (root / path).resolve()
+            if not resolved.is_relative_to(root):
+                return None, f"skipped @{cand} (outside workspace)"
+            if resolved.exists():
+                return resolved, None
+        except (OSError, ValueError) as exc:
+            return None, f"skipped @{cand} ({exc})"
+    return None, None
+
+
+def expand_file_mentions(text: str, workspace: Path) -> MentionResult:
+    """Attach referenced workspace files (``@path`` or ``@"path with spaces"``) to ``text``."""
+    from html import escape
+
+    root = workspace.resolve()
+    seen: set[str] = set()
+    blocks: list[str] = []
+    attached: list[tuple[str, Path, int, bool]] = []
+    warnings: list[str] = []
+    remaining = MENTION_TOTAL_BYTES
+
+    for match in _MENTION_RE.finditer(text):
+        quoted = match.group(1)
+        raw = quoted if quoted is not None else match.group(2)
+        resolved, warning = _resolve_mention(raw, root, quoted=quoted is not None)
+        if warning:
+            warnings.append(warning)
+            continue
+        if resolved is None:
+            continue
+        rel = resolved.relative_to(root).as_posix()
+        key = os.path.normcase(rel)
+        if key in seen:
+            continue
+        seen.add(key)
+        if remaining <= 0:
+            warnings.append(f"skipped @{rel} (attachment budget reached)")
+            continue
+        cap = min(MENTION_MAX_BYTES, remaining)
+        try:
+            info = resolved.stat()
+            if stat.S_ISDIR(info.st_mode):
+                warnings.append(f"skipped @{rel} (directory)")
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                warnings.append(f"skipped @{rel} (not a regular file)")
+                continue
+            with resolved.open("rb") as stream:
+                size = os.fstat(stream.fileno()).st_size
+                data = stream.read(max(cap + 1, _MENTION_BINARY_PROBE))
+        except OSError as exc:
+            warnings.append(f"skipped @{rel} ({exc})")
+            continue
+        if b"\0" in data[:_MENTION_BINARY_PROBE]:
+            warnings.append(f"skipped @{rel} (binary file)")
+            continue
+        size = max(size, len(data))
+        truncated = len(data) > cap
+        chunk = data[:cap]
+        remaining -= len(chunk)
+        included = len(chunk)
+        if chunk.startswith(b"\xef\xbb\xbf"):
+            chunk = chunk[3:]
+        body = chunk.decode("utf-8", errors="replace").replace("\r\n", "\n")
+        note = (
+            f"\n... [truncated to {_format_bytes(included)} of {_format_bytes(size)}; "
+            "use read tool for the rest]"
+            if truncated
+            else ""
+        )
+        path_attr = escape(rel, quote=True)
+        blocks.append(f'<attached_file path="{path_attr}">\n{body}{note}\n</attached_file>')
+        attached.append((rel, resolved, size, truncated))
+
+    if not blocks:
+        return MentionResult(text=text, attached=[], warnings=warnings)
+    return MentionResult(
+        text=text.rstrip() + "\n\n" + "\n\n".join(blocks),
+        attached=attached,
+        warnings=warnings,
+    )
+
+
+def _edit_diff_stats(name: str, arguments: str) -> tuple[int, int] | None:
+    """Return (added_lines, removed_lines) for edit/apply_patch calls when parseable."""
+    base = name.rsplit("/", 1)[-1]
+    try:
+        data = json.loads(arguments)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if base == "edit":
+        old = data.get("old_string")
+        new = data.get("new_string")
+        if isinstance(old, str) and isinstance(new, str):
+            removed = len(old.splitlines()) if old else 0
+            added = len(new.splitlines()) if new else 0
+            return added, removed
+    if base == "apply_patch":
+        patch = data.get("patch") or data.get("input")
+        if isinstance(patch, str):
+            added = sum(
+                1 for ln in patch.splitlines() if ln.startswith("+") and not ln.startswith("+++")
+            )
+            removed = sum(
+                1 for ln in patch.splitlines() if ln.startswith("-") and not ln.startswith("---")
+            )
+            return added, removed
+    return None
+
+
+def _diff_summary(diff_text: str) -> tuple[int, int, int]:
+    """Return (files_changed, added_lines, removed_lines) from a unified git diff."""
+    files = 0
+    added = 0
+    removed = 0
+    in_hunk = False
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            files += 1
+            in_hunk = False
+        elif line.startswith("@@ "):
+            in_hunk = True
+        elif in_hunk and line.startswith("+"):
+            added += 1
+        elif in_hunk and line.startswith("-"):
+            removed += 1
+    return files, added, removed
+
+
 class _PromptInterrupt(KeyboardInterrupt):
     def __init__(self, empty: bool) -> None:
         self.empty = empty
@@ -159,7 +441,8 @@ class ChatApp:
         self._display: TurnDisplay | None = None
         self._turn_started = 0.0
         self._phase = ""
-        self._active_tools: dict[str, str] = {}
+        self._active_tools: dict[str, ev.ToolStarted] = {}
+        self._had_tools = False
         self.session: Session
         if initialize is None:
             self.session = self._new_session(**(session_kwargs or {}))
@@ -226,8 +509,6 @@ class ChatApp:
             if not text:
                 continue
             if text.startswith("/"):
-                if text.partition(" ")[0].lower() not in _EARLY_COMMANDS:
-                    await self._ensure_session()
                 if await self.command(text) == "quit":
                     break
                 continue
@@ -274,16 +555,21 @@ class ChatApp:
     # -- turns ----------------------------------------------------------------------
 
     async def turn(self, text: str) -> str:
-        """Run one user turn; Ctrl+C (cancellation of the caller) stops only this turn."""
+        """Run one user turn with interruptible terminal output."""
+        phase = "Preparing session" if self._initialize is not None else "Model thinking"
+        return await self._run_with_display(lambda: self._consume(text), phase)
+
+    async def _run_with_display(self, action: Callable[[], Awaitable[str]], phase: str) -> str:
         self._turn_started = time.monotonic()
-        self._phase = "Preparing session" if self._initialize is not None else "Model thinking"
+        self._phase = phase
         self._active_tools.clear()
+        self._had_tools = False
         self._streamed_text = False
         ready = asyncio.Event()
 
         async def consume() -> str:
             await ready.wait()
-            return await self._consume(text)
+            return await action()
 
         worker = asyncio.create_task(consume())
 
@@ -339,7 +625,11 @@ class ChatApp:
         spinner = "|/-\\"[int(elapsed * 8) % 4]
         phase = self._phase
         if self._active_tools:
-            phase = "Running " + ", ".join(dict.fromkeys(self._active_tools.values()))
+            names = (
+                " ".join(_plain_text(call.name).split())[:80]
+                for call in self._active_tools.values()
+            )
+            phase = "Running " + ", ".join(dict.fromkeys(names))
         return f"{spinner} {elapsed:.1f}s  {phase}"
 
     async def _consume(self, text: str) -> str:
@@ -347,6 +637,19 @@ class ChatApp:
         if self._before_turn is not None:
             await self._before_turn(self)
             self._before_turn = None
+        if _MENTION_RE.search(text):
+            mention = await asyncio.to_thread(expand_file_mentions, text, self.session.workspace)
+            for warning in mention.warnings:
+                self.write(self.paint("yellow", f"  {_plain_text(warning)}") + "\n")
+            items = []
+            for rel, path, size, truncated in mention.attached:
+                if not truncated:
+                    self.session.files.observe(path)
+                size_label = f"{_format_bytes(size)}{', truncated' if truncated else ''}"
+                items.append(f"{_plain_text(rel)} ({size_label})")
+            if items:
+                self.write(self.paint("dim", "  attached: " + ", ".join(items)) + "\n")
+            text = mention.text
         self._phase = "Model thinking"
         status = "error"
         count = 0
@@ -384,8 +687,9 @@ class ChatApp:
             return
         if isinstance(event, ev.AssistantMessage):
             if event.text and not self._streamed_text:
-                self._end_stream()
+                self._open("text")
                 self.write(_plain_text(event.text).rstrip() + "\n")
+                self._stream_newline = True
             self._streamed_text = False
             self._end_stream()
             return
@@ -395,20 +699,9 @@ class ChatApp:
             return
         self._end_stream()
         if isinstance(event, ev.ToolStarted):
-            name = " ".join(_plain_text(event.name).split())[:80]
-            self._active_tools[event.call_id] = name
-            pad = "    " if "/" in event.name else ""  # a subagent's call, under its agent line
-            self.write(
-                f"{pad}{p('cyan', g['tool'])} {p('bold', name)} "
-                f"{_plain_text(brief(event.arguments))}\n"
-            )
+            self._active_tools[event.call_id] = event
         elif isinstance(event, ev.ToolFinished):
-            self._active_tools.pop(event.call_id, None)
-            self._phase = "Model thinking"
-            pad = "    " if "/" in event.name else ""
-            mark = p("red", g["fail"]) if event.is_error else p("green", g["ok"])
-            secs = f"{event.duration_ms / 1000:.1f}s"
-            self.write(f"{pad}  {mark} {p('dim', secs)} {p('dim', _plain_text(outcome(event)))}\n")
+            self._render_tool_finished(event)
         elif isinstance(event, ev.Retry):
             self._streamed_text = False
             self._phase = f"Retrying model (attempt {event.attempt})"
@@ -432,10 +725,37 @@ class ChatApp:
                 + "\n"
             )
         elif isinstance(event, ev.ErrorEvent):
-            self.write(p("red", f"error: {_plain_text(event.message)}") + "\n")
+            self.write(p("red", f"{g['fail']} error: {_plain_text(event.message)}") + "\n")
         elif isinstance(event, ev.RunFinished):
             self._phase = "Finishing"
             self.write(self._footer(event) + "\n")
+
+    def _render_tool_finished(self, event: ev.ToolFinished) -> None:
+        start = self._active_tools.pop(event.call_id, None)
+        self._phase = "Model thinking"
+        self._had_tools = True
+        p, g = self.paint, self.glyph
+        name = " ".join(_plain_text(event.name).split())[:80]
+        target = _plain_text(brief(start.arguments)) if start is not None else ""
+        pad = "    " if "/" in name else ""  # a subagent's call
+        head = f"{pad}{p('cyan', g['tool'])} {p('bold', name)}" + (f" {target}" if target else "")
+        failed = is_tool_failure(event)
+        mark = p("red", g["fail"]) if failed else p("green", g["ok"])
+        stats = (
+            _edit_diff_stats(event.name, start.arguments)
+            if start is not None and not failed
+            else None
+        )
+        if stats is None:
+            summary = _plain_text(outcome(event)).replace(" · ", g["dot"])
+            detail = p("red" if failed else "dim", summary)
+        else:
+            detail = self._paint_diff_stats(*stats)
+        took = p("dim", f"({event.duration_ms / 1000:.1f}s)")
+        self.write(f"{head}  {mark}" + (f" {detail}" if detail else "") + f" {took}\n")
+
+    def _paint_diff_stats(self, added: int, removed: int) -> str:
+        return f"{self.paint('green', f'+{added}')} {self.paint('red', f'-{removed}')}"
 
     def _footer(self, event: ev.RunFinished) -> str:
         usage = event.usage
@@ -458,6 +778,9 @@ class ChatApp:
     def _open(self, kind: str) -> None:
         if self._stream != kind:
             self._end_stream()
+            if kind == "text" and self._had_tools:
+                self.write("\n")
+                self._had_tools = False
             self._stream = kind
             if kind == "reasoning":
                 self.write(self.paint("dim", "thinking: "))
@@ -521,23 +844,31 @@ class ChatApp:
     # -- commands -------------------------------------------------------------------
 
     async def command(self, line: str) -> str | None:
-        from karox6.core.store import recent_sessions, resume_kwargs
-
         name, _, rest = line.partition(" ")
         arg = rest.strip()
         name = name.lower()
+        if name in _SESSION_COMMANDS:
+            await self._ensure_session()
         if name in ("/quit", "/exit", "/q"):
             return "quit"
         if name == "/help":
-            self.write(HELP.format(mode=self.approval_mode) + "\n")
+            self.write(_format_help(self.paint, self.approval_mode) + "\n")
+        elif name == "/clear":
+            self._clear_screen()
         elif name == "/diff":
             await self._show_diff()
         elif name == "/status":
             self._show_status()
+        elif name == "/cost":
+            self._show_cost()
+        elif name == "/compact":
+            await self._compact()
         elif name == "/new":
             self.session = self._new_session()
             self.write(f"new session {self.session.session_id}\n")
         elif name == "/sessions":
+            from karox6.core.store import recent_sessions
+
             rows = recent_sessions(self.config.home, workspace=self.config.workspace)
             if not rows:
                 self.write("no saved sessions\n")
@@ -545,6 +876,8 @@ class ChatApp:
                 mark = "*" if session_id == self.session.session_id else " "
                 self.write(f"{mark} {session_id}  {self.paint('dim', title)}\n")
         elif name == "/resume":
+            from karox6.core.store import resume_kwargs
+
             try:
                 kwargs = resume_kwargs(
                     self.config.home,
@@ -574,11 +907,51 @@ class ChatApp:
         elif name == "/bridge":
             await self._bridge(arg)
         elif name == "/reasoning":
-            self.show_reasoning = not self.show_reasoning
+            low = arg.lower()
+            if low in ("on", "show", "true", "1"):
+                self.show_reasoning = True
+            elif low in ("off", "hide", "false", "0"):
+                self.show_reasoning = False
+            else:
+                self.show_reasoning = not self.show_reasoning
             self.write(f"reasoning {'shown' if self.show_reasoning else 'hidden'}\n")
         else:
             self.write(f"unknown command {name}; /help lists commands\n")
         return None
+
+    def _clear_screen(self) -> None:
+        self._end_stream()
+        # Clear only the visible screen (not scrollback) and keep the active session.
+        self.write(_CLEAR_SCREEN + self._banner())
+        if self._initialize is None and self.session.messages:
+            self.write(
+                self.paint(
+                    "dim",
+                    f"session {self.session.session_id} kept "
+                    f"({len(self.session.messages)} messages); /new starts fresh",
+                )
+                + "\n"
+            )
+
+    async def _compact(self) -> None:
+        if len(self.session.messages) < 3:
+            self.write("nothing to compact yet\n")
+            return
+        await self._run_with_display(self._compact_history, "compacting context")
+
+    async def _compact_history(self) -> str:
+        from karox6.providers.base import ProviderError
+
+        try:
+            events = await self.session.compact(emit=self.render)
+        except ProviderError as exc:
+            reason = _plain_text(str(exc))
+            message = f"{self.glyph['fail']} compaction failed: {reason}"
+            self.write(self.paint("red", message) + "\n")
+            return "error"
+        if not events:
+            self.write("nothing to compact\n")
+        return "completed"
 
     async def _set_key(self) -> None:
         from karox6.credentials import save_key
@@ -691,6 +1064,15 @@ class ChatApp:
         ]
         self.write(_box("KaroX bridge", rows, self.glyph.get("box", "ascii") == "fancy") + "\n")
 
+    def _context_summary(self, *, with_threshold: bool = False) -> str:
+        used = self.session.context_tokens()
+        window = self.config.effective_window(self.session._learned_window)
+        pct = min(round(used / window * 100), 100) if window else 0
+        base = f"{_k(used)} / {_k(window)} ({pct}%)"
+        if with_threshold:
+            return f"{base}, compacts at {_k(self.session._threshold())}"
+        return base
+
     def _show_status(self) -> None:
         s = self.session
         usage = s.usage.to_dict()
@@ -699,15 +1081,38 @@ class ChatApp:
             f"model      {self.config.model} ({self.config.provider_name})",
             f"workspace  {s.workspace}",
             f"messages   {len(s.messages)}",
+            f"context    {self._context_summary()}",
             f"tokens     {usage.get('input_tokens', 0)} in "
-            f"({usage.get('cached_input_tokens', 0)} cached) / "
+            f"({usage.get('cached_tokens', 0)} cached) / "
             f"{usage.get('output_tokens', 0)} out",
             f"dangerous  {self.approval_mode}",
         ]
         if self.config.price:
             lines.append(f"cost       ${s.cost_usd:.4f}")
-        if self.bridge.running():
-            lines.append(f"bridge     {self.bridge.mode} {self.bridge.url}")
+        bridge = self._bridge_instance
+        if bridge is not None and bridge.running():
+            lines.append(f"bridge     {bridge.mode} {bridge.url}")
+        self.write("\n".join(lines) + "\n")
+
+    def _show_cost(self) -> None:
+        s = self.session
+        u = s.usage
+        total = u.input_tokens + u.output_tokens
+        lines = [
+            f"model      {self.config.model} ({self.config.provider_name})",
+            f"requests   {u.requests}",
+            f"input      {u.input_tokens:,} ({u.cached_tokens:,} cached)",
+            f"output     {u.output_tokens:,} ({u.reasoning_tokens:,} reasoning)",
+            f"total      {total:,} tokens",
+            f"context    {self._context_summary(with_threshold=True)}",
+        ]
+        if self.config.price:
+            lines.append(f"cost       ${s.cost_usd:.4f}")
+        else:
+            lines.append(
+                "cost       "
+                + self.paint("dim", "not configured (set --price-input / --price-output)")
+            )
         self.write("\n".join(lines) + "\n")
 
     async def _show_diff(self) -> None:
@@ -719,23 +1124,32 @@ class ChatApp:
             changed = await asyncio.to_thread(self.session.files.changed_files)
             self.write("not a git repository; files changed this session:\n")
             for path in changed or ["(none)"]:
-                self.write(f"  {path}\n")
+                self.write(f"  {_plain_text(path)}\n")
             return
         if not text.strip() and not untracked:
             self.write("no changes\n")
             return
+        if text.strip():
+            files, added, removed = _diff_summary(text)
+            label = f"{files} file{'s' if files != 1 else ''} changed"
+            self.write(f"{self.paint('dim', label)}  {self._paint_diff_stats(added, removed)}\n")
         shown = text[:DIFF_CAP]
+        in_hunk = False
         for line in shown.splitlines():
-            self.write(self._diff_line(line) + "\n")
+            if line.startswith("diff --git "):
+                in_hunk = False
+            elif line.startswith("@@ "):
+                in_hunk = True
+            self.write(self._diff_line(_plain_text(line), in_hunk=in_hunk) + "\n")
         if len(text) > DIFF_CAP:
             self.write(self.paint("dim", f"... {len(text) - DIFF_CAP} more characters") + "\n")
         if untracked:
             self.write(self.paint("bold", "untracked:") + "\n")
             for path in untracked[:50]:
-                self.write(self.paint("green", f"  {path}") + "\n")
+                self.write(self.paint("green", f"  {_plain_text(path)}") + "\n")
 
-    def _diff_line(self, line: str) -> str:
-        if line.startswith(("+++", "---", "diff --git", "index ")):
+    def _diff_line(self, line: str, *, in_hunk: bool) -> str:
+        if not in_hunk and line.startswith(("+++ ", "--- ", "diff --git ", "index ")):
             return self.paint("bold", line)
         if line.startswith("+"):
             return self.paint("green", line)
@@ -805,17 +1219,193 @@ def terminal_display(
     return TurnDisplay(write, status, interrupt)
 
 
-def terminal_io(history: Path | None) -> tuple[ReadLine, ReadLine]:
-    """Prompt readers: prompt_toolkit (history, editing) if installed, else input()."""
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return _plain_read, _plain_read  # piped input: no line editor
-    try:
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.history import FileHistory, History, InMemoryHistory, ThreadedHistory
-        from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
-        from prompt_toolkit.patch_stdout import patch_stdout
-    except ImportError:
-        return _plain_read, _plain_read
+class _WorkspaceFiles:
+    """Short-lived cache of workspace files for responsive ``@path`` completion."""
+
+    def __init__(self, workspace: Path, ttl_s: float = 2.0) -> None:
+        self.workspace = workspace
+        self.ttl_s = ttl_s
+        self._files: list[str] = []
+        self._expires = 0.0
+
+    def list(self) -> list[str]:
+        now = time.monotonic()
+        if now >= self._expires:
+            from karox6.tools.search import _list_files
+
+            try:
+                self._files = sorted(_list_files(self.workspace, include_ignored=False))
+            except OSError:
+                self._files = []
+            self._expires = time.monotonic() + self.ttl_s
+        return self._files
+
+
+def _match_workspace_files(files: list[str], fragment: str, limit: int = 25) -> list[str]:
+    needle = fragment.replace("\\", "/").lower()
+    if not needle:
+        return files[:limit]
+    prefix: list[str] = []
+    base_prefix: list[str] = []
+    substr: list[str] = []
+    for rel in files:
+        low = rel.lower()
+        base = low.rsplit("/", 1)[-1]
+        if low.startswith(needle):
+            prefix.append(rel)
+        elif base.startswith(needle):
+            base_prefix.append(rel)
+        elif needle in low:
+            substr.append(rel)
+    return (prefix + base_prefix + substr)[:limit]
+
+
+def build_completer(*, workspace: Path | None = None, home: Path | None = None) -> Completer:
+    """Inline prompt_toolkit completer for ``/commands``, command arguments and ``@files``."""
+    from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+    from prompt_toolkit.document import Document
+
+    ws = workspace or Path.cwd()
+    file_cache = _WorkspaceFiles(ws)
+
+    class _ChatCompleter(Completer):
+        def get_completions(
+            self, document: Document, complete_event: CompleteEvent
+        ) -> Iterator[Completion]:
+            before = document.text_before_cursor
+            if "\n" not in before and before.startswith("/"):
+                yield from self._complete_command(before)
+                return
+            yield from self._complete_mention(before)
+
+        def _complete_command(self, before: str) -> Iterator[Completion]:
+            if " " not in before:
+                prefix = before.lower()
+                for spec in COMMANDS:
+                    if spec.name.startswith(prefix):
+                        yield Completion(
+                            spec.name,
+                            start_position=-len(before),
+                            display=spec.name,
+                            display_meta=spec.summary,
+                        )
+                for alias, desc in _COMMAND_ALIASES.items():
+                    if alias.startswith(prefix) and prefix != "/":
+                        yield Completion(
+                            alias,
+                            start_position=-len(before),
+                            display=alias,
+                            display_meta=desc,
+                        )
+                return
+            cmd, _, rest = before.partition(" ")
+            cmd = cmd.lower()
+            if " " in rest.lstrip():
+                return
+            arg = rest.lstrip()
+            low = arg.lower()
+            choices: list[tuple[str, str]] = []
+            if cmd == "/approve":
+                choices = list(_APPROVE_ARGS)
+            elif cmd == "/bridge":
+                choices = list(_BRIDGE_ARGS)
+            elif cmd == "/reasoning":
+                choices = list(_REASONING_ARGS)
+            elif cmd == "/resume":
+                choices = [("last", "most recent saved session")]
+                if home is not None:
+                    from karox6.core.store import recent_sessions
+
+                    for sid, title in recent_sessions(home, limit=15, workspace=ws):
+                        choices.append((sid, title or "saved session"))
+            for value, desc in choices:
+                if value.lower().startswith(low):
+                    yield Completion(
+                        value,
+                        start_position=-len(arg),
+                        display=value,
+                        display_meta=desc,
+                    )
+
+        def _complete_mention(self, before: str) -> Iterator[Completion]:
+            match = _MENTION_PREFIX_RE.search(before)
+            if not match:
+                return
+            quoted = match.group(1) is not None
+            fragment = match.group(1) if quoted else (match.group(2) or "")
+            token_len = len(fragment) + (2 if quoted else 1)  # includes @ and optional "
+            root = ws.resolve()
+            for rel in _match_workspace_files(file_cache.list(), fragment):
+                if '"' in rel or "\n" in rel or "\r" in rel:
+                    continue
+                resolved, _ = _resolve_mention(rel, root, quoted=True)
+                if resolved is None:
+                    continue
+                inserted = f'@"{rel}"' if quoted or any(c.isspace() for c in rel) else f"@{rel}"
+                meta = ""
+                with contextlib.suppress(OSError):
+                    meta = _format_bytes(resolved.stat().st_size)
+                yield Completion(
+                    inserted,
+                    start_position=-token_len,
+                    display=f"@{rel}",
+                    display_meta=meta,
+                )
+
+    return _ChatCompleter()
+
+
+def build_key_bindings() -> KeyBindings:
+    """Inline chat bindings: Enter submits, Alt+Enter / Ctrl+J insert a newline."""
+    from prompt_toolkit.filters import is_searching
+    from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
+
+    keys = KeyBindings()
+
+    @keys.add("c-c", eager=True)
+    @keys.add("<sigint>", eager=True)
+    def interrupt(event: KeyPressEvent) -> None:
+        event.app.exit(
+            exception=_PromptInterrupt(empty=not event.current_buffer.text),
+            style="class:aborting",
+        )
+
+    @keys.add("escape", "enter", filter=~is_searching)
+    def _alt_enter(event: KeyPressEvent) -> None:
+        event.current_buffer.insert_text("\n")
+
+    @keys.add("c-j", filter=~is_searching)
+    def _ctrl_j(event: KeyPressEvent) -> None:
+        event.current_buffer.insert_text("\n")
+
+    @keys.add("enter", filter=~is_searching)
+    def _enter(event: KeyPressEvent) -> None:
+        buf = event.current_buffer
+        state = buf.complete_state
+        if state is not None and state.current_completion is not None:
+            buf.apply_completion(state.current_completion)
+            return
+        if buf.document.text_before_cursor.endswith("\\") and not buf.document.text_after_cursor:
+            buf.delete_before_cursor(1)
+            buf.insert_text("\n")
+            return
+        buf.validate_and_handle()
+
+    return keys
+
+
+def build_prompt_session(
+    *,
+    history: Path | History | None = None,
+    workspace: Path | None = None,
+    home: Path | None = None,
+    encoding: str | None = None,
+    input: Input | None = None,
+    output: Output | None = None,
+) -> PromptSession[str]:
+    """Create a configured inline PromptSession (testable with PipeInput + DummyOutput)."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import FileHistory, InMemoryHistory, ThreadedHistory
 
     class ChatHistory(FileHistory):
         def load_history_strings(self) -> Iterable[str]:
@@ -827,18 +1417,40 @@ def terminal_io(history: Path | None) -> tuple[ReadLine, ReadLine]:
                 Path(os.fsdecode(self.filename)).parent.mkdir(parents=True, exist_ok=True)
                 super().store_string(string)
 
-    store: History = ThreadedHistory(ChatHistory(history)) if history else InMemoryHistory()
-    keys = KeyBindings()
+    store: History
+    if isinstance(history, Path):
+        store = ThreadedHistory(ChatHistory(history))
+    else:
+        store = history if history is not None else InMemoryHistory()
+    more = _glyphs(encoding or getattr(sys.stdout, "encoding", None))["more"]
+    resolved_home = home or (history.parent if isinstance(history, Path) else None)
+    return PromptSession(
+        history=store,
+        multiline=True,
+        prompt_continuation=lambda _w, _n, _wrap: more,
+        key_bindings=build_key_bindings(),
+        completer=build_completer(workspace=workspace, home=resolved_home),
+        complete_while_typing=True,
+        complete_in_thread=True,
+        reserve_space_for_menu=6,
+        input=input,
+        output=output,
+    )
 
-    @keys.add("c-c", eager=True)
-    @keys.add("<sigint>", eager=True)
-    def interrupt(event: KeyPressEvent) -> None:
-        event.app.exit(
-            exception=_PromptInterrupt(empty=not event.current_buffer.text),
-            style="class:aborting",
-        )
 
-    main: PromptSession[str] = PromptSession(history=store, key_bindings=keys)
+def terminal_io(
+    history: Path | None, *, workspace: Path | None = None, home: Path | None = None
+) -> tuple[ReadLine, ReadLine]:
+    """Prompt readers: prompt_toolkit (history, editing) if installed, else input()."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return _plain_read, _plain_read  # piped input: no line editor
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.patch_stdout import patch_stdout
+    except ImportError:
+        return _plain_read, _plain_read
+
+    main = build_prompt_session(history=history, workspace=workspace, home=home)
     answers: PromptSession[str] | None = None
 
     async def read_line(prompt: str) -> str:
@@ -920,10 +1532,17 @@ def stdout_write(text: str) -> None:
         if sys.stdout is sys.__stdout__:
             try:
                 from prompt_toolkit import print_formatted_text
+                from prompt_toolkit.application import get_app_session
                 from prompt_toolkit.formatted_text import ANSI
             except ImportError:
                 pass
             else:
+                if text.startswith(_CLEAR_SCREEN):
+                    output = get_app_session().output
+                    output.erase_screen()
+                    output.cursor_goto(0, 0)
+                    output.flush()
+                    text = text.removeprefix(_CLEAR_SCREEN)
                 print_formatted_text(ANSI(text), end="")
                 return
         text = _plain_text(text)

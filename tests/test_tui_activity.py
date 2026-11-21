@@ -64,6 +64,63 @@ def test_live_status_and_partial_text_leave_clean_scrollback():
     asyncio.run(go())
 
 
+def test_parallel_tools_finish_once_in_scrollback_with_live_status(tmp_path):
+    async def go():
+        visible = RecordingOutput()
+        scrollback = []
+
+        class GatedTool:
+            description, parameters, read_only = "wait for release", {}, True
+
+            def __init__(self, name):
+                self.name = name
+                self.release = asyncio.Event()
+
+            async def run(self, args, ctx):
+                await self.release.wait()
+                return ToolResult("done")
+
+        async def read(prompt):
+            raise EOFError
+
+        first, second = GatedTool("slow_a"), GatedTool("slow_b")
+        provider = ScriptedProvider(
+            [Turn(calls=[(first.name, {}), (second.name, {})]), Turn(text="Answer.")]
+        )
+        app = ChatApp(
+            config=SessionConfig(
+                model="test", workspace=tmp_path, home=tmp_path / "home", stream_deltas=True
+            ),
+            provider=provider,
+            read_line=read,
+            write=scrollback.append,
+            extra_tools=[first, second],
+            display_factory=TurnDisplay,
+        )
+        with create_pipe_input() as keys, create_app_session(input=keys, output=visible):
+            task = asyncio.create_task(app.turn("run both"))
+            try:
+                await eventually(lambda: "Running slow_a, slow_b" in "".join(visible.frames))
+                assert not scrollback
+                second.release.set()
+                await eventually(lambda: len(scrollback) == 1)
+                assert scrollback[0].startswith("● slow_b {}  ✓ done (")
+                assert "Running slow_a" in app._progress()
+                first.release.set()
+                assert await asyncio.wait_for(task, 2) == "completed"
+            finally:
+                if not task.done():
+                    task.cancel()
+                    await task
+        lines = "".join(scrollback).splitlines()
+        assert lines[1].startswith("● slow_a {}  ✓ done (")
+        assert lines[2:4] == ["", "Answer."]
+        assert sum(line.startswith("● ") for line in lines) == 2
+        assert not any("Running slow_" in line for line in lines)
+
+    asyncio.run(go())
+
+
 def test_resize_and_narrow_terminal_preserve_a_long_unicode_line():
     out = RecordingOutput()
     scrollback = []

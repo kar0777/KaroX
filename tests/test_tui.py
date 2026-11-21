@@ -58,7 +58,11 @@ class HangTool:
     parameters = {"type": "object", "properties": {}}
     read_only = True
 
+    def __init__(self):
+        self.started = asyncio.Event()
+
     async def run(self, args, ctx):
+        self.started.set()
         await asyncio.sleep(3600)
         return ToolResult("unreachable")
 
@@ -142,14 +146,12 @@ def test_deny_mode_refuses_without_asking(tmp_path):
 def test_cancel_stops_only_the_turn(tmp_path):
     term = FakeTerm()
     turns = [Turn(calls=[("hang", {})]), Turn(text="after")]
-    app, provider = make_app(tmp_path, turns, term, extra_tools=[HangTool()])
+    tool = HangTool()
+    app, provider = make_app(tmp_path, turns, term, extra_tools=[tool])
 
     async def go():
         running = asyncio.create_task(app.turn("start"))
-        for _ in range(500):
-            if "hang" in term.text:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(tool.started.wait(), 2)
         running.cancel()  # what Ctrl+C does to the main task
         assert await running == "cancelled"
         assert await app.turn("next") == "completed"
@@ -167,24 +169,16 @@ def test_sigint_under_asyncio_run_stops_only_the_turn(tmp_path):
 
     term = FakeTerm()
     turns = [Turn(calls=[("hang", {})]), Turn(calls=[("hang", {})]), Turn(text="after")]
-    app, _ = make_app(tmp_path, turns, term, extra_tools=[HangTool()])
+    tool = HangTool()
+    app, _ = make_app(tmp_path, turns, term, extra_tools=[tool])
 
     async def main():
         loop = asyncio.get_running_loop()
-        started = asyncio.Event()
-        original = term.write
-
-        def write(text):
-            original(text)
-            if "hang" in text:
-                loop.call_soon_threadsafe(started.set)
-
-        app.write = write
         statuses = []
         for task in ("one", "two"):  # Ctrl+C twice: each stops only its turn
-            started.clear()
+            tool.started.clear()
             running = asyncio.ensure_future(app.turn(task))
-            await started.wait()
+            await asyncio.wait_for(tool.started.wait(), 2)
             # Raised in the main thread, as a terminal's Ctrl+C is delivered to it.
             loop.call_later(0.05, signal.raise_signal, signal.SIGINT)
             statuses.append(await running)
@@ -271,11 +265,10 @@ def test_render_stream_and_events(tmp_path):
     app.render(ev.ErrorEvent(code="x", message="bad"))
     text = term.text
     assert "thinking: hmm\n" in text
-    assert "● bash ls -la" in text
-    assert "✗ 1.5s boom" in text
-    assert "    ● agent-1/read x\n      ✓ 0.0s 2 lines\n" in text
+    assert "● bash ls -la  ✗ boom (1.5s)\n" in text
+    assert "    ● agent-1/read x  ✓ 2 lines (0.0s)\n" in text
     assert "retry 2 in 4s: 429" in text
-    assert "error: bad" in text
+    assert "✗ error: bad" in text
 
 
 def test_progress_follows_parallel_calls_and_keeps_output_compact(tmp_path):
@@ -350,7 +343,7 @@ def test_cli_reaches_prompt_without_runtime_setup(tmp_path, monkeypatch):
     monkeypatch.setenv("KAROX_CONFIG", str(settings))
     monkeypatch.delenv("KAROX_MODEL", raising=False)
     captured = []
-    lines = iter(("/help", "/quit"))
+    lines = iter(("/help", "/clear", "/quit"))
 
     async def read(prompt):
         captured.append(prompt)
@@ -359,14 +352,19 @@ def test_cli_reaches_prompt_without_runtime_setup(tmp_path, monkeypatch):
     def unexpected(*args, **kwargs):
         pytest.fail("runtime loaded before a task or session command")
 
-    monkeypatch.setattr(tui, "terminal_io", lambda history: (read, read))
+    def terminal_io(history, *, workspace, home):
+        assert workspace == home == tmp_path.resolve()
+        assert history == home / "chat_history"
+        return read, read
+
+    monkeypatch.setattr(tui, "terminal_io", terminal_io)
     monkeypatch.setattr(tui, "stdout_write", captured.append)
     monkeypatch.setattr(tui, "secret_reader", unexpected)
     monkeypatch.setattr(cli, "_provider", unexpected)
     monkeypatch.setattr(cli, "_mcp_tools", unexpected)
     assert cli.main(["chat", "--home", str(tmp_path), "--cwd", str(tmp_path)]) == 0
     assert "configured" in captured[0]
-    assert captured.count(tui._glyphs(sys.stdout.encoding)["prompt"]) == 2
+    assert captured.count(tui._glyphs(sys.stdout.encoding)["prompt"]) == 3
     assert not (tmp_path / "sessions").exists()
 
 
@@ -396,7 +394,7 @@ def test_cli_initializes_after_input_and_reuses_runtime(tmp_path, monkeypatch, c
         timeline.append("closed")
 
     monkeypatch.setenv("KAROX_CONFIG", str(tmp_path / "missing.toml"))
-    monkeypatch.setattr(tui, "terminal_io", lambda history: (read, read))
+    monkeypatch.setattr(tui, "terminal_io", lambda history, **kwargs: (read, read))
     monkeypatch.setattr(cli, "_provider", create_provider)
     monkeypatch.setattr(cli, "_mcp_tools", connect)
     monkeypatch.setattr(cli, "_close_mcp", close)

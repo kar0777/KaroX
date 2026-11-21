@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from karox6.core.messages import Price
-from karox6.core.store import default_home
 from karox6.providers.base import RetryPolicy
+from karox6.settings import default_home
 
 
 @dataclass(slots=True)

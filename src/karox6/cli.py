@@ -450,7 +450,7 @@ def _chat(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
 async def _chat_async(args: argparse.Namespace) -> int:
     from karox6.core.config import SessionConfig
-    from karox6.core.store import default_home, resume_kwargs
+    from karox6.settings import default_home
     from karox6.tui import (
         ChatApp,
         _plain_text,
@@ -465,7 +465,7 @@ async def _chat_async(args: argparse.Namespace) -> int:
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
     if not workspace.is_dir():
         raise ValueError(f"workspace {workspace} is not a directory")
-    read_line, read_answer = terminal_io(home / "chat_history")
+    read_line, read_answer = terminal_io(home / "chat_history", workspace=workspace, home=home)
 
     async def read_secret(prompt: str) -> str:
         return await secret_reader()(prompt)
@@ -485,6 +485,8 @@ async def _chat_async(args: argparse.Namespace) -> int:
     mcp_handles: list[Any] | None = None
 
     async def initialize(app: ChatApp) -> dict[str, Any]:
+        from karox6.core.store import resume_kwargs
+
         nonlocal mcp_handles
         app.config = _session_config(args, workspace, home, stream_deltas=True)
         session_kwargs = (

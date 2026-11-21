@@ -55,12 +55,16 @@ class SettingsError(ValueError):
     pass
 
 
+def default_home() -> Path:
+    home = os.environ.get("KAROX_HOME")
+    return Path(home).expanduser() if home else Path.home() / ".karox6"
+
+
 def config_path() -> Path:
     env = os.environ.get("KAROX_CONFIG")
     if env:
         return Path(env).expanduser()
-    home = os.environ.get("KAROX_HOME")
-    return (Path(home).expanduser() if home else Path.home() / ".karox6") / "config.toml"
+    return default_home() / "config.toml"
 
 
 def load_settings(profile: str | None = None, path: Path | None = None) -> dict[str, Any]:
