@@ -1535,3 +1535,14 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   (the gateway sets those fields itself), `edit` reports the line of its change in its
   metadata (not in the text the model reads), and a user message may carry pictures.
   No prompt, tool description or loop change since dev35.
+- devs1 result (run 44949328098, 21:01-21:21 UTC; trio, ReformBoss DSV4.1F, disc 2 and 7,
+  1 attempt, one runner; data and `trio_report.md` in `karox6-bench-data/runs/devs1`):
+  PASS by the pre-registered rule: all six trials ended without a provider or infra error
+  (0% refused calls for every arm), versions karox 6.0.0.dev35 / opencode v2.3.2 / DSH
+  0.2.2-rc.5, both tasks valid. Solved: karox6 2, deepseek_harness 2, opencode_v2 1
+  (OpenCode missed plopp-614). Audit usage on the two tasks, karox6 / opencode_v2 / DSH:
+  calls 70 / 73 / 60, input 3.0M / 3.7M / 2.5M (95% / 95% / 93% cached), output 49k / 40k /
+  35k (reasoning 36k / 28k / 22k), agent time 8.8 / 8.7 / 8.3 min, cost-equivalent $0.059 /
+  $0.055 / $0.049, median time to first token 2.6 s for all three. Two tasks say nothing
+  about a difference; they join the sample. devt1 starts now as registered (trio, disc
+  1, 3-6, 8-12, chunk 5, parallel 1, dev35 wheel).
