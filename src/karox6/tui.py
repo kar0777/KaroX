@@ -776,11 +776,17 @@ class ChatApp:
         status = "error"
         count = 0
         record = await self._record_start(prompt)
+        recorded = False
         try:
             async with contextlib.aclosing(self.session.run(text, images)) as events:
                 async for event in events:
                     if isinstance(event, ev.RunFinished):
                         status = event.status
+                        # Before the closing line is printed: "[completed]" on screen
+                        # means the turn is over, so a Ctrl+C after it is for the prompt.
+                        self._phase = "Finishing"
+                        recorded = True
+                        await self._record_end(record)
                         if status == "cancelled":
                             continue  # the turn prints its stop marker after cleanup
                     self.render(event)
@@ -788,7 +794,8 @@ class ChatApp:
                     if count % 32 == 0:
                         await asyncio.sleep(0)
         finally:
-            await self._record_end(record)
+            if not recorded:  # stopped or failed part-way: recorded in the background
+                self._record_close(record)
         return status
 
     # -- pictures -------------------------------------------------------------------
@@ -870,20 +877,23 @@ class ChatApp:
             session_id=self.session.session_id,
         )
 
-    async def _record_end(self, record: _TurnRecord) -> None:
-        """The turn is over (finished, failed or stopped): it can be undone. Its result is
-        recorded before the prompt comes back, so that what the user changes next is never
-        taken for the turn's work; only a recording slower than SNAPSHOT_AFTER_WAIT_S (a
-        huge project) is left to finish in the background."""
+    def _record_close(self, record: _TurnRecord) -> None:
+        """The turn is over (finished, failed or stopped): it can be undone. The snapshot
+        of its result starts now, in a thread."""
         self._turns.append(record)
         del self._turns[:-UNDO_DEPTH]
         self._undone.clear()  # a new turn: nothing left to redo
-        if record.before is None:
-            return
-        task = asyncio.ensure_future(asyncio.to_thread(self._store().snapshot))
-        record.after = task
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), SNAPSHOT_AFTER_WAIT_S)
+        if record.before is not None:
+            record.after = asyncio.ensure_future(asyncio.to_thread(self._store().snapshot))
+
+    async def _record_end(self, record: _TurnRecord) -> None:
+        """Close the turn's record and wait for the snapshot of its result, so that what
+        the user changes next is never taken for the turn's work; only a recording slower
+        than SNAPSHOT_AFTER_WAIT_S (a huge project) is left to finish in the background."""
+        self._record_close(record)
+        if record.after is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(record.after), SNAPSHOT_AFTER_WAIT_S)
 
     def _forget_turns(self) -> None:
         self._turns.clear()

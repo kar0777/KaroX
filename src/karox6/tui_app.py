@@ -53,6 +53,7 @@ from karox6.tui_text import (
     _git_branch,
     _glyphs,
     _plain_text,
+    cell_width,
     narrow,
     status_bar_fragments,
 )
@@ -196,8 +197,8 @@ def _wrap_fragments(fragments: StyleAndTextTuples, width: int) -> list[StyleAndT
 
 
 def _expand_tabs(text: str, start: int) -> str:
-    """Tabs as spaces up to the next multiple of four characters; ``start`` is how many
-    characters the line already holds."""
+    """Tabs as spaces up to the next multiple of four cells; ``start`` is how many
+    cells the line already holds."""
     out: list[str] = []
     col = start
     for ch in text:
@@ -207,7 +208,7 @@ def _expand_tabs(text: str, start: int) -> str:
             col += pad
         else:
             out.append(ch)
-            col += 1
+            col += 1 if ch.isascii() else max(get_cwidth(ch), 0)
     return "".join(out)
 
 
@@ -221,7 +222,7 @@ class _TranscriptControl(UIControl):
 
     def __init__(self) -> None:
         self._lines: list[list[Run]] = [[]]
-        self._chars: int = 0  # characters in the open (last) line, for tab stops
+        self._chars: int = 0  # cells in the open (last) line, for tab stops
         self._wrap_width: int = 0
         self._wrapped_cache: list[list[StyleAndTextTuples]] = []
         self._visual_offsets: list[int] = []
@@ -279,7 +280,7 @@ class _TranscriptControl(UIControl):
                 if raw:
                     part = _expand_tabs(raw, self._chars) if "\t" in raw else raw
                     self._lines[-1].append((style, part))
-                    self._chars += len(part)
+                    self._chars += cell_width(part)
         self._dirty_from = min(self._dirty_from, open_index)
         if len(self._lines) > MAX_LOGICAL_LINES:
             drop = _TRIM_BATCH
