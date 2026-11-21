@@ -14,13 +14,17 @@ from typing import TYPE_CHECKING, Any
 
 from karox6.core.messages import Message, ToolCall, Usage
 from karox6.providers.base import (
+    STREAM_IDLE_S,
     Delta,
     DeltaCallback,
     ErrorCode,
     ModelRequest,
     ModelResponse,
     ProviderError,
+    StreamStalled,
     is_empty,
+    retry_after_seconds,
+    stream_lines,
 )
 
 if TYPE_CHECKING:
@@ -54,6 +58,7 @@ class OpenAIChatProvider:
     stream: bool = True
     timeout_s: float = 900.0
     headers: dict[str, str] = field(default_factory=dict)
+    stream_idle_s: float | None = STREAM_IDLE_S  # silence allowed once the answer flows
     _client: httpx.AsyncClient | None = None
 
     def _http(self) -> httpx.AsyncClient:
@@ -117,11 +122,13 @@ class OpenAIChatProvider:
                         await resp.aread()
                         raise _http_error(resp.status_code, resp.text, resp.headers)
                     try:
-                        async for line in resp.aiter_lines():
+                        async for line in stream_lines(
+                            resp, self.stream_idle_s, lambda: acc.flowing
+                        ):
                             acc.feed_sse_line(line, on_delta)
                             if acc.done:
                                 break  # a reset after [DONE] must not discard the reply
-                    except (httpx.TimeoutException, httpx.TransportError):
+                    except (httpx.TimeoutException, httpx.TransportError, StreamStalled):
                         # The connection dropped after the reply finished (finish reason
                         # and usage arrived, only [DONE] is missing): keep it rather than
                         # pay for the whole request again. Without usage the max_tokens
@@ -203,6 +210,7 @@ class _Accumulator:
         self.usage_seen = False
         self.model: str | None = None
         self.done = False
+        self.flowing = False  # answer tokens (text or tool calls) have started to arrive
 
     def feed_sse_line(self, line: str, on_delta: DeltaCallback | None) -> None:
         line = line.strip()
@@ -232,6 +240,7 @@ class _Accumulator:
             delta = choice.get("delta") or {}
             text = delta.get("content")
             if isinstance(text, str) and text:
+                self.flowing = True
                 self.text.append(text)
                 if on_delta:
                     on_delta(Delta("text", text))
@@ -244,6 +253,7 @@ class _Accumulator:
                         on_delta(Delta("reasoning", thought))
                     break
             for part in delta.get("tool_calls") or []:
+                self.flowing = True
                 self._call_delta(part)
             if choice.get("finish_reason"):
                 self.finish_reason = choice["finish_reason"]
@@ -396,22 +406,27 @@ _QUOTA_HINTS = (
     "billing",
     "top up your balance",
     "credit balance is too low",
+    # an allowance per day: minutes of waiting do not bring it back
+    "daily limit",
+    "daily quota",
+    "per day",
+    "per-day",
+    "дневной лимит",
+    "суточный лимит",
 )
+# A "quota" refusal that names a short wait is a per-minute window in quota wording
+# (Gemini's free tier: "You exceeded your current quota ... Please retry in 23s").
+QUOTA_SHORT_WAIT_S = 120.0
 
 
 def _http_error(status: int, text: str, headers: Any) -> ProviderError:
     snippet = " ".join(text.split())[:500]
-    retry_after: float | None = None
-    raw_retry = headers.get("retry-after") if hasattr(headers, "get") else None
-    if raw_retry:
-        try:
-            retry_after = float(raw_retry)
-        except ValueError:
-            retry_after = None
+    retry_after = retry_after_seconds(headers, text)
     code: ErrorCode
     lowered = snippet.lower()
     if status in (402, 429) and any(hint in lowered for hint in _QUOTA_HINTS):
-        code = "quota"
+        short = retry_after is not None and retry_after <= QUOTA_SHORT_WAIT_S
+        code = "rate_limit" if status == 429 and short else "quota"
     elif status == 429:
         code = "rate_limit"
     elif status in (401, 403):

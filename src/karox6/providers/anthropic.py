@@ -160,7 +160,11 @@ class AnthropicProvider(StreamProvider):
         if self.api_key:
             headers["x-api-key"] = self.api_key
         await self._stream(
-            self.base_url.rstrip("/") + "/v1/messages", self.build_body(request), headers, feed
+            self.base_url.rstrip("/") + "/v1/messages",
+            self.build_body(request),
+            headers,
+            feed,
+            flowing=lambda: bool(text) or any(fragments.values()),
         )
         if not done:
             raise ProviderError("transport", "stream ended before the response finished")

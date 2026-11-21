@@ -131,7 +131,11 @@ class OpenAIResponsesProvider(StreamProvider):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         await self._stream(
-            self.base_url.rstrip("/") + "/responses", self.build_body(request), headers, feed
+            self.base_url.rstrip("/") + "/responses",
+            self.build_body(request),
+            headers,
+            feed,
+            flowing=lambda: bool(text) or bool(fragments),
         )
         if finish is None:
             raise ProviderError("transport", "stream ended before the response finished")

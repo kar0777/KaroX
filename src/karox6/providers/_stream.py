@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from karox6.providers.base import ProviderError
+from karox6.providers.base import STREAM_IDLE_S, ProviderError, stream_lines
 from karox6.providers.openai_chat import _http_error
 
 if TYPE_CHECKING:
@@ -21,6 +21,7 @@ class StreamProvider:
     timeout_s: float = 900.0
     stream: bool = True
     headers: dict[str, str] = field(default_factory=dict)
+    stream_idle_s: float | None = STREAM_IDLE_S  # silence allowed once the answer flows
     _client: httpx.AsyncClient | None = None
 
     def _http(self) -> httpx.AsyncClient:
@@ -41,7 +42,10 @@ class StreamProvider:
         body: dict[str, Any],
         headers: dict[str, str],
         feed: Callable[[dict[str, Any]], None],
+        flowing: Callable[[], bool] = lambda: False,
     ) -> None:
+        """POST ``body`` and feed every SSE data event to ``feed``. ``flowing`` says
+        whether answer tokens have started (see :func:`stream_lines`)."""
         import httpx
 
         try:
@@ -49,7 +53,7 @@ class StreamProvider:
                 if resp.status_code >= 400:
                     await resp.aread()
                     raise _mapped_error(resp.status_code, resp.text, resp.headers)
-                async for line in resp.aiter_lines():
+                async for line in stream_lines(resp, self.stream_idle_s, flowing):
                     if line.startswith("data:"):
                         data = line[5:].strip()
                         if data and data != "[DONE]":

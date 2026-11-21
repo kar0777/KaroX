@@ -161,6 +161,7 @@ class GeminiProvider(StreamProvider):
             self.build_body(request),
             headers,
             feed,
+            flowing=lambda: bool(text) or bool(calls),
         )
         if finish is None:
             raise ProviderError("transport", "stream ended before the response finished")

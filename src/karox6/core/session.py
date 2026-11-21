@@ -83,6 +83,18 @@ TRUNCATION_NOTICE = (
     "Continue from where it stopped. Keep each response shorter: split large file contents "
     "into several smaller write or edit calls."
 )
+# The whole output limit went to reasoning: nothing was said and no tool was called. The
+# model cannot know that (it only sees its own thoughts end), and "write shorter" misleads
+# it: tell it what happened and that the analysis is to be used, not started again. In
+# gtrio2 (replies capped at 8192 tokens) such steps held half of KaroX's reasoning tokens.
+THINKING_CUT_NOTICE = (
+    "Your previous reply was cut off at the output token limit while you were still "
+    "thinking: no answer and no tool call reached me. Do not start the analysis over. Use "
+    "what you have already worked out, decide on the next single action, and take it now "
+    "with a tool call (or give your answer). Keep your thinking for this step brief."
+)
+# Asked for after a reply that was all reasoning: one step lower than the configured effort.
+EASIER_EFFORT = {"max": "high", "xhigh": "high", "high": "medium", "medium": "low"}
 # An empty reply (reasoning only, no text and no tool call) repeats when the same request
 # is sent again: some providers cache identical requests and replay the empty answer
 # (gtrio2: 11 of 24 KaroX runs died this way on Dahl while the retries came back in ~1 s
@@ -167,7 +179,9 @@ class Session:
             self.workspace, self.shell, base=config.system_prompt, append=append
         )
         self._last_input_tokens = 0
+        self._last_cached_tokens = 0  # of the last request that measured the context
         self._chars_since_measure = 0
+        self._effort: str | None = None  # eased reasoning effort after an all-thinking cut
         self._deadline: float | None = None  # monotonic end of the current run
         self._learned_window: int | None = None  # from a context-window error
         if not self.resumed:
@@ -292,9 +306,14 @@ class Session:
                         # Calls cut mid-arguments are answered as errors below; tell the
                         # model why so it does not resend the same oversized call.
                         await self._run_calls(message.tool_calls, ctx, emit)
-                    self._notice("truncated", TRUNCATION_NOTICE, emit)
+                    if not message.content.strip() and not message.tool_calls:
+                        self._ease_effort(emit)
+                        self._notice("truncated", THINKING_CUT_NOTICE, emit)
+                    else:
+                        self._notice("truncated", TRUNCATION_NOTICE, emit)
                     continue
                 truncations = 0  # the limit is on consecutive cut-off replies
+                self._effort = None  # a reply came through: back to the configured effort
                 if not message.tool_calls:
                     final_text = message.content
                     if response.finish_reason == "content_filter":
@@ -439,6 +458,7 @@ class Session:
             # A summary call sends only part of the history: its input size is not the
             # conversation's. The reply itself is counted when it is appended.
             self._last_input_tokens = usage.input_tokens
+            self._last_cached_tokens = usage.cached_tokens
             self._chars_since_measure = 0
         self.store.append(
             "usage",
@@ -469,9 +489,18 @@ class Session:
             tools=tool_specs(self.tools),
             max_output_tokens=self.config.max_output_tokens,
             temperature=self.config.temperature,
-            reasoning_effort=self.config.reasoning_effort,
+            reasoning_effort=self._effort or self.config.reasoning_effort,
             extra_body=dict(self.config.extra_body),
         )
+
+    def _ease_effort(self, emit: Callable[[ev.Event], None]) -> None:
+        """After a reply that spent the whole output limit on reasoning: ask for one step
+        less effort until a reply comes through. Only when an effort is configured (the
+        provider then accepts the field); a gateway that pins the effort ignores it."""
+        easier = EASIER_EFFORT.get(self._effort or self.config.reasoning_effort or "")
+        if easier is not None:
+            self._effort = easier
+            emit(ev.Notice(kind="effort", text=f"reasoning effort {easier} until a reply fits"))
 
     def _replay_view(self, messages: list[Message]) -> list[Message]:
         """Drop reasoning the provider should not see again (``replay_reasoning`` policy)."""
@@ -794,6 +823,8 @@ class Session:
         since another API rejects or misreads it. The conversation itself stays."""
         self._learned_window = None
         self._last_input_tokens = 0
+        self._last_cached_tokens = 0
+        self._effort = None
         if provider_changed:
             for message in self.messages:
                 message.extra = {}
@@ -839,7 +870,8 @@ class Session:
         emit(ev.Notice(kind=kind, text=text))
 
     async def compact(self, emit: Callable[[ev.Event], None] | None = None) -> list[ev.Event]:
-        """Compact conversation history on demand using the existing prune + summary pipeline."""
+        """Compact the conversation history on demand (the same steps as the automatic
+        compaction: a model-written checkpoint, old tool output cut, the head dropped)."""
         events: list[ev.Event] = []
 
         def record(event: ev.Event) -> None:
@@ -850,7 +882,10 @@ class Session:
         if len(self.messages) < 3:
             return events
         self._close_dangling_calls()
-        before = self._prune_for_compaction(self.context_tokens(), record)
+        before = self.context_tokens()
+        cached = self._cache_active()
+        if not cached:
+            before = self._prune_for_compaction(before, record)
         pruned = bool(events)
         msg_tokens = estimate_tokens(self.messages)
         retain = min(int(self._threshold() * 0.2), max(msg_tokens // 4, 1))
@@ -864,6 +899,8 @@ class Session:
         try:
             summarized = await self._summarize(before, record, retain_tokens=retain)
             out_of_time = self._deadline is not None and time.monotonic() >= self._deadline
+            if not summarized and cached:
+                pruned = self._prune_for_compaction(before, record) < before
             if not summarized and not pruned and not out_of_time:
                 await self._drop_head(before, record, retain_tokens=retain)
         finally:
@@ -875,14 +912,29 @@ class Session:
             return self._last_input_tokens + int(self._chars_since_measure / 3.5)
         return estimate_tokens(self.messages, self.system_prompt)
 
+    def _cache_active(self) -> bool:
+        """The provider served most of the last request from its prompt cache."""
+        return bool(self._last_input_tokens) and (
+            self._last_cached_tokens * 2 >= self._last_input_tokens
+        )
+
     async def _maybe_compact(self, emit: Callable[[ev.Event], None]) -> None:
         threshold = self._threshold()
         before = self.context_tokens()
         if before < threshold:
             return
-        before = self._prune_for_compaction(before, emit)
-        if before < threshold:
-            return
+        # Cutting the middle out of old tool results costs no model call, but it rewrites
+        # early messages, so a provider with a prompt cache reads the whole conversation
+        # again at the full price (measured: 0-6k of 250-300k tokens cached on the call
+        # after a prune) and, in 11 of 16 recorded runs, the summary followed a few steps
+        # later anyway. With a live cache the checkpoint comes first: its request reuses
+        # the cached conversation, and the context restarts small. Without one (local
+        # models) pruning stays the free first step.
+        cached = self._cache_active()
+        if not cached:
+            before = self._prune_for_compaction(before, emit)
+            if before < threshold:
+                return
         try:
             summarized = await self._summarize(before, emit)
         except ProviderError as exc:
@@ -892,6 +944,10 @@ class Session:
             await self._recover_overflow(emit)
             return
         out_of_time = self._deadline is not None and time.monotonic() >= self._deadline
+        if not summarized and cached and not out_of_time:
+            before = self._prune_for_compaction(before, emit)
+            if before < threshold:
+                return
         if not summarized and not out_of_time:
             # No usable checkpoint (e.g. the model spent its output on reasoning twice):
             # shrink without the model, or every next step would pay for two more tries.
@@ -1032,7 +1088,12 @@ class Session:
             cut = [m for m in _user_turns(full) if id(m) not in kept and m is not first_user]
             cut += [m for m in _user_turns(head) if m is not first_user]
         request = self._request()
-        request.messages = self._replay_view([*head, Message("user", COMPACTION_INSTRUCTION)])
+        # The instruction is marked as a harness message, not a new user turn: reasoning
+        # is then replayed exactly as in the step before, so the request is the cached
+        # conversation plus one message (as a "turn" it dropped all reasoning, the prefix
+        # changed and the whole head was billed at the full price).
+        ask = Message("user", COMPACTION_INSTRUCTION, meta={"kind": "compaction_request"})
+        request.messages = self._replay_view([*head, ask])
         # Tool schemas stay in the first try so the cached prefix is reused; a model that
         # answers with a tool call instead of text gets one retry without tools.
         summary = await self._summary_call(request, emit)

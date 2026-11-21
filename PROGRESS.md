@@ -1399,3 +1399,78 @@ git diff --check
   this load; the comparison moves to ReformBoss / a new provider.
 - OpenRouter key (probe orkey): 1000 free-model requests/day, no request limit on paid
   models; account $9.74 left, key cap $6 with $0.44 left; the $1 budget is spent.
+
+## Devin iteration (branch `devin/big`, bench branch `devin/bench`) - started 2026-11-21
+
+Report by stage: `DEVIN_REPORT.md`. Work happens only in the worktrees
+`D:\проекты\karox6-wt-devin` (devin/big from karox6/main ee24034) and
+`D:\проекты\bench-wt-devin` (devin/bench from karox6-adapter 9a2aac5); bench runs use
+`--ref devin/bench`. Own venv (uv, Python 3.12) with pyte, pywinpty and build as dev
+dependencies; the lock was stale since prompt_toolkit became a core dependency
+(`uv sync --locked` failed). Baseline: full suite green.
+
+- 18:30 UTC, where KaroX spends more: saved runs only, no new runs (scripts:
+  bench repo `scripts/analysis/`, one question each, README there).
+  * "KaroX reasons 1.6x OpenCode per call" is a Dahl effect, not a general one. On Dahl
+    (replies capped at 8192 tokens) 51% of KaroX's reasoning characters sit in steps with
+    no tool call, i.e. replies cut while thinking (`stepcmp.py` gtrio2: 63 such steps,
+    mean 19.7k chars; OpenCode 54 steps, 35%). 96% of KaroX's cuts there are thinking-only
+    (`cuts.py`: 76 of 79) and 16% of them are followed by another cut. On DSV4.1F the
+    ratio is 1.16 (or1: 2132 vs 1837 chars per step) to 1.25 (tbd3), and on OpenRouter GLM
+    (gduel2) KaroX reasons less (1611 vs 2475).
+  * Same step, same thinking. By size of the tool arguments (`buckets.py`, or1) a shell
+    step costs the same reasoning in both CLIs (<150 chars: 1706 vs 1764; 150-400: 1951 vs
+    1751). KaroX's mix is heavier: 35% of its shell steps carry >= 400 characters of
+    arguments against OpenCode's 24% (compound commands, the "fewer, fuller steps" rule),
+    without fewer steps on or1 (1481 vs 1412). Reasoning per call does not grow with
+    context size (`rbyctx.py`). All three CLIs send reasoning back (`replay.py`: input
+    growth = 0.94-1.0 x reasoning tokens), so replay is not the difference.
+  * Long tasks: context. OpenCode compacts at ~171k tokens and restarts from ~7k
+    (`traj.py` tbd3: 9 of 10 runs, peaks 171-188k); KaroX runs to 320k (400k limit x 0.8),
+    DSH does not compact (peaks up to 335k). Mean input per call on tbd3: 147k / 85k /
+    133k. On the disc set 53% of KaroX's input tokens on tasks 13-24 are spent above 150k
+    of context (`peaks.py` ab2), 1% on tasks 1-12. Replaying recorded runs with a 170k
+    threshold (`simcompact.py`, cached-equivalent tokens, no behaviour change assumed):
+    input -11% (or1), -13% (ab2), -20% (tbd3); with 120k: -20% / -27% / -31%.
+  * What a compaction costs today. In all 16 recorded KaroX compactions the first step
+    was a prune of old tool output; the call after it had 0-6k of 250-300k tokens cached
+    (a full re-read at the uncached price), and in 11 of 16 the summary followed a few
+    steps later anyway. The summary request itself was uncached too (131k in, 3k cached):
+    the instruction counted as a new user turn, so all reasoning was dropped from the
+    request and its prefix no longer matched the conversation.
+  * The two named losses. In gtrio2 claude-code-by-agents and fastapi-deprecation ended
+    after 18 and 16 steps on `empty_response` (Dahl's cache of identical requests; fixed
+    in dev33), not on the task. On ReformBoss dev31 solved fastapi-deprecation (ab2);
+    claude-code-by-agents was void there (daily cap).
+  * Tools are not the cost on the disc set: 48 runs (ab1 + ab2), 3248 bash calls, 78 min
+    of tool time in total, 7 tool errors (`errs.py`). Time is model calls.
+- 6.0.0.dev35 (core and providers; no prompt, tool or default-limit change). Each item is
+  an error path or a cost path measured above, with tests:
+  * Compaction with a live prompt cache: the checkpoint comes first and pruning is the
+    fallback (a session whose last request was at least half cached; without a cache,
+    e.g. local models, the free prune stays first). The summary request is now the
+    previous request plus one message: the instruction is a harness message, not a user
+    turn, so reasoning is replayed as before and the prefix matches the cache. Same order
+    for `/compact`.
+  * A reply cut while thinking (no text, no tool call) gets its own notice (what
+    happened; use the analysis, do not restart it; take the next action) instead of
+    "write shorter", and, when an effort is configured, one step less reasoning effort
+    until a reply comes through (max -> high -> medium -> low). The bench gateway pins the
+    effort, so only the notice can show there.
+  * Retry-After is a floor: parsed from seconds, HTTP dates, `retry-after-ms`, OpenAI's
+    `x-ratelimit-reset-*` durations, a generic `x-ratelimit-reset` (delta or epoch) and
+    the error body ("try again in 1.2s", Gemini's `retryDelay`); never shortened (it was
+    ignored above 60 s and replaced by a shorter backoff); followed for rate limits and
+    outages while the waiting budget lasts, and a wait longer than the budget left ends
+    the retries at once; a little jitter on top so agents sharing a key do not return
+    together.
+  * Quota or rate limit: a per-day allowance ("daily limit", "per day", ReformBoss's
+    "дневной лимит", OpenRouter's "free-models-per-day") is `quota` (ab2 burned ~1,200
+    refused requests waiting on it); quota wording with a short wait named (Gemini's free
+    tier, <= 120 s) is a rate limit and is waited out.
+  * An empty reply is resent once, not five times, before the session's notice changes
+    the request (each resend is billed for the whole conversation and a provider that
+    caches identical requests answers the same).
+  * A stream that goes silent for 300 s after answer tokens started is a timeout (retried)
+    instead of hanging for the 900 s request timeout; silence while the model is still
+    thinking is left alone; a stall after the reply finished keeps the reply.
