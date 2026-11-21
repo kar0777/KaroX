@@ -1323,3 +1323,7 @@ git diff --check
   second model (small sample). Cost: balance 11.08 -> ~10.0 for the run (cached input on
   this route is $0.03 vs $0.04 uncached, so caching saves little: input volume is the
   cost). The $1 budget is spent; the floor stops further orglm jobs.
+- Dahl back (dahlping 06:33 UTC: 1.6 s, no 503). Run gduel3: the same duel on Dahl
+  GLM-5.3-Flash (same model, other host), disc tasks 5,8,9,10,11,12 (rest of the first
+  12), parallel 1 (2 agents <= 3 slots). Combined with gduel2: 12 tasks. Read solved and
+  audit tokens per arm; no tuning on it.
