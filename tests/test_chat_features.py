@@ -414,3 +414,74 @@ def test_init_prompt_is_generic():
     assert "agents.md" in text
     assert "single test" in text
     assert "do not change any other file" in text
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"picture"
+
+
+def _clipboard_tools(monkeypatch, present, outputs):
+    """Stand-ins for the clipboard programs: which exist, and what each one prints."""
+    calls = []
+    monkeypatch.setattr(clipboard.shutil, "which", lambda name: name if name in present else None)
+
+    def run(command):
+        calls.append(command[0])
+        return outputs.get(command[0])
+
+    monkeypatch.setattr(clipboard, "_run", run)
+    return calls
+
+
+def test_linux_clipboard_asks_wayland_first_then_x11(monkeypatch):
+    calls = _clipboard_tools(monkeypatch, {"wl-paste", "xclip"}, {"wl-paste": PNG})
+    assert clipboard._linux_png() == PNG
+    assert calls == ["wl-paste"]
+    # wl-paste is installed but the session is X11 (it prints nothing): xclip answers
+    calls = _clipboard_tools(monkeypatch, {"wl-paste", "xclip"}, {"xclip": PNG})
+    assert clipboard._linux_png() == PNG
+    assert calls == ["wl-paste", "xclip"]
+    # a tool is there and the clipboard holds text: no picture
+    _clipboard_tools(monkeypatch, {"xclip"}, {})
+    assert clipboard._linux_png() is None
+
+
+def test_linux_clipboard_without_a_tool_names_what_to_install(monkeypatch):
+    _clipboard_tools(monkeypatch, set(), {})
+    with pytest.raises(clipboard.ClipboardError, match=r"wl-paste \(Wayland\) or xclip"):
+        clipboard._linux_png()
+
+
+def test_mac_clipboard_through_pngpaste_or_applescript(tmp_path, monkeypatch):
+    target = tmp_path / "images" / "clipboard.png"
+    calls = _clipboard_tools(monkeypatch, {"pngpaste"}, {"pngpaste": PNG})
+    assert clipboard._mac_png(target) == PNG
+    assert calls == ["pngpaste"]
+
+    def osascript(command):  # the script writes the picture to the file it names
+        assert command[:2] == ["osascript", "-e"]
+        target.write_bytes(PNG)
+
+    monkeypatch.setattr(clipboard, "_run", osascript)
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _name: None)
+    assert clipboard._mac_png(target) == PNG
+
+
+def test_mac_clipboard_without_a_picture_leaves_no_empty_file(tmp_path, monkeypatch):
+    target = tmp_path / "images" / "clipboard.png"
+
+    def osascript(_command):  # the script opens the file, then finds no picture to write
+        target.write_bytes(b"")
+
+    monkeypatch.setattr(clipboard, "_run", osascript)
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _name: None)
+    assert clipboard._mac_png(target) is None
+    assert not target.exists()
+
+
+def test_the_applescript_names_the_file_even_with_quotes_in_its_path():
+    from pathlib import PurePosixPath
+
+    slash = chr(92)  # one backslash
+    script = clipboard._mac_script(PurePosixPath(f'/Users/o"brien/a{slash}b/clipboard.png'))
+    quoted = f'/Users/o{slash}"brien/a{slash}{slash}b/clipboard.png'
+    assert f'POSIX file "{quoted}" with write permission' in script

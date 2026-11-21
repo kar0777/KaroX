@@ -7,11 +7,12 @@ Linux: ``wl-paste`` (Wayland) or ``xclip`` (X11). No third-party imaging library
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import struct
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 MAX_PIXELS = 40_000_000  # refuse absurd bitmaps before allocating for them
@@ -118,17 +119,29 @@ def _run(command: list[str]) -> bytes | None:
 def _mac_png(target: Path) -> bytes | None:
     if shutil.which("pngpaste"):
         return _run(["pngpaste", "-"])
-    script = (
-        f'set f to (open for access POSIX file "{target}" with write permission)\n'
-        "try\n  write (the clipboard as «class PNGf») to f\nend try\nclose access f"
-    )
     target.parent.mkdir(parents=True, exist_ok=True)
-    _run(["osascript", "-e", script])
+    _run(["osascript", "-e", _mac_script(target)])
     try:
         data = target.read_bytes()
     except OSError:
         return None
-    return data or None
+    if not data:
+        # The script creates the file before it knows whether there is a picture.
+        with contextlib.suppress(OSError):
+            target.unlink()
+        return None
+    return data
+
+
+def _mac_script(target: PurePath) -> str:
+    """AppleScript that writes the clipboard's PNG to ``target`` (an empty file when the
+    clipboard holds no picture)."""
+    backslash = chr(92)
+    quoted = str(target).replace(backslash, backslash * 2).replace('"', backslash + '"')
+    return (
+        f'set f to (open for access POSIX file "{quoted}" with write permission)\n'
+        "try\n  write (the clipboard as «class PNGf») to f\nend try\nclose access f"
+    )
 
 
 def _linux_png() -> bytes | None:
