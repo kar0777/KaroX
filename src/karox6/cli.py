@@ -116,6 +116,11 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
         help="destructive commands: ask (default), deny, allow",
     )
     chat.add_argument("--no-color", action="store_true", help="plain output without ANSI colors")
+    chat.add_argument(
+        "--inline",
+        action="store_true",
+        help="run in inline scrollback mode instead of the full-screen TUI",
+    )
 
     mcp = sub.add_parser(
         "mcp", help="serve KaroX to MCP clients (stdio, or Streamable HTTP with --http)"
@@ -465,23 +470,49 @@ async def _chat_async(args: argparse.Namespace) -> int:
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
     if not workspace.is_dir():
         raise ValueError(f"workspace {workspace} is not a directory")
-    read_line, read_answer = terminal_io(home / "chat_history", workspace=workspace, home=home)
 
-    async def read_secret(prompt: str) -> str:
-        return await secret_reader()(prompt)
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    use_fullscreen = is_tty and not getattr(args, "inline", False)
+    color = not args.no_color and color_enabled()
+    encoding = getattr(sys.stdout, "encoding", None)
+    ui: Any = None
+    if use_fullscreen:
+        try:
+            from karox6.tui_app import FullScreenTui
+        except ImportError:
+            use_fullscreen = False
+            sys.stderr.write(
+                "KaroX: prompt_toolkit is missing, so the chat runs in inline plain mode. "
+                "Reinstall KaroX with its dependencies for the full-screen TUI.\n"
+            )
+        else:
+            ui = FullScreenTui(
+                workspace=workspace,
+                home=home,
+                history=home / "chat_history",
+                color=color,
+                encoding=encoding,
+                model=args.model or "",
+                provider=args.provider,
+                approval_mode=args.approve_dangerous,
+            )
+
+    if ui is None:
+        read_line, read_answer = terminal_io(home / "chat_history", workspace=workspace, home=home)
+
+        async def read_secret(prompt: str) -> str:
+            return await secret_reader()(prompt)
+
+        write_fn = stdout_write
+        display_factory = terminal_display
+    else:
+        read_line = ui.read_line
+        read_answer = ui.read_answer
+        read_secret = ui.read_secret
+        write_fn = ui.write
+        display_factory = ui.turn_display
 
     chose_model = not args.model
-    if chose_model:
-        from karox6.setup import run_setup
-
-        try:
-            choice = await run_setup(read_answer, read_secret, stdout_write, home)
-        except EOFError:
-            return 2
-        if choice is None:
-            return 2
-        args.provider, args.base_url, args.model = choice.provider, choice.base_url, choice.model
-
     mcp_handles: list[Any] | None = None
 
     async def initialize(app: ChatApp) -> dict[str, Any]:
@@ -534,32 +565,58 @@ async def _chat_async(args: argparse.Namespace) -> int:
             app.bridge_env = {"KAROX_BRIDGE_API_KEY": typed}
             app.write("key saved (encrypted for your user); /key changes it\n")
 
-    app = ChatApp(
-        config=SessionConfig(
-            model=args.model, provider_name=args.provider, workspace=workspace, home=home
-        ),
-        provider=None,
-        read_line=read_line,
-        read_answer=read_answer,
-        write=stdout_write,
-        approval_mode=args.approve_dangerous,
-        color=not args.no_color and color_enabled(),
-        encoding=getattr(sys.stdout, "encoding", None),
-        read_secret=read_secret,
-        initialize=initialize,
-        before_turn=check_key,
-        display_factory=terminal_display,
-    )
+    app: ChatApp | None = None
+    summary: str | None = None
     try:
-        return await app.run()
+        async with ui if ui is not None else contextlib.nullcontext():
+            if chose_model:
+                from karox6.setup import run_setup
+
+                try:
+                    choice = await run_setup(read_answer, read_secret, write_fn, home)
+                except (EOFError, KeyboardInterrupt):
+                    return 2
+                if choice is None:
+                    return 2
+                args.provider, args.base_url, args.model = (
+                    choice.provider,
+                    choice.base_url,
+                    choice.model,
+                )
+
+            app = ChatApp(
+                config=SessionConfig(
+                    model=args.model, provider_name=args.provider, workspace=workspace, home=home
+                ),
+                provider=None,
+                read_line=read_line,
+                read_answer=read_answer,
+                write=write_fn,
+                approval_mode=args.approve_dangerous,
+                color=color,
+                encoding=encoding,
+                read_secret=read_secret,
+                initialize=initialize,
+                before_turn=check_key,
+                display_factory=display_factory,
+            )
+            if ui is not None:
+                ui.attach_app(app)
+            try:
+                return await app.run()
+            finally:
+                if ui is not None:
+                    summary = app.exit_summary()
+                with contextlib.suppress(Exception):
+                    await app.close()
     finally:
-        with contextlib.suppress(Exception):
-            await app.close()
         try:
-            if app.provider is not None:
+            if app is not None and app.provider is not None:
                 await app.provider.aclose()
         finally:
             await _close_mcp(mcp_handles or [])
+        if summary:
+            stdout_write(summary + "\n")
 
 
 def _session_config(
