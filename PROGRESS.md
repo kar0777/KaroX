@@ -1371,3 +1371,20 @@ git diff --check
   Idea (not built, not measurable on the bench because the gateway enforces the effort):
   after a length cut with no content and no tool call, retry the step at a lower
   reasoning effort instead of only asking for shorter output.
+- dev33: an empty reply (no text, no tool call) is answered with a notice instead of a
+  plain resend. Cause: Dahl caches identical requests, so the resend replayed the same
+  empty reply and 11 of 24 gtrio2 KaroX runs ended on empty_response. At most 3 notices.
+- Dahl lane made countable (pre-registered before gtrio3, 2026-11-21):
+  * keys: job k of N owns keys k, k+N, ... (plan_matrix.py slot + dahl_gateway.py), so
+    jobs never collide on a key's 3-request limit; with 24 jobs over 32 keys each trio
+    job has 1-2 keys for its 3 agents.
+  * validity (scripts/trio_report.py): a refused request that the gateway retried is
+    not a failure. A trial is void only if it ended UNSOLVED on a provider error (KaroX:
+    its own run_finished reason rate_limit/server/quota; other CLIs: Harbor's exception
+    type), or refused > 50% of its calls AND hit the time limit. A task counts only if
+    all three arms are valid. Tokens/time from the gateway audit.
+  * gtrio2 re-scored by this rule: 19/24 valid; solved on valid karox6 8, opencode_v2 6,
+    DSH 4 (all tasks 8 / 7 / 5).
+  * gtrio3: dev33, trio, disc 1-24, dahl2 (32 keys), parallel 24, 1 attempt. Decision:
+    KaroX's lead holds if karox6 >= opencode_v2 on valid tasks; >= 20 valid tasks needed,
+    else the lane stays unreliable and the big comparison moves to ReformBoss.
