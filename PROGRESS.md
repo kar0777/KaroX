@@ -1298,3 +1298,11 @@ git diff --check
 - Partial-read guard (GPT audit item) checked against the logs: 558 sessions, 689
   `write` calls, 4 writes after only a partial read (1 session). Too rare to add a
   refusal that costs steps; not built.
+- ab2 (44850317451, dev31, disc 13-24): 5 of 12 tasks void in both arms: ReformBoss's
+  account-wide daily cap of 5000 requests ran out mid-run (HTTP 429, resets 00:00 MSK).
+  On the 7 valid: A 6, B 5 (koota A0->B1 after a reproduced finding; montepy A1->B0
+  after a "finding" whose own text says it is NOT a failure of the fix (the gate passed
+  it: evidence was real, the claim was empty); sqllineage-866 A1->B0 with 0 findings).
+  B's wall time 1.5x A's even at the halved budget. ab1+ab2 combined: A 12, B 12 ->
+  drop by the pre-registered rule. `--review` stays as an opt-in flag, off by default;
+  no further review tuning (each tweak would need another 2 x 12-task A/B to judge).
