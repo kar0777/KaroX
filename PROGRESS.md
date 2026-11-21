@@ -1628,3 +1628,50 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   * Linux numbers for the chat UI (docs/perf.md, `scripts/tui_perf.py` under WSL2 on the
     same PC): first frame 44 ms, ready for input 148 ms (Windows: 170 and 414 ms), 6,000
     lines shown in 0.26 s, key echo while streaming 25 ms median.
+- devt1 result (run 44951155404, 21:22-22:50 UTC; trio, ReformBoss DSV4.1F, disc 1, 3-6,
+  8-12, 1 attempt, one runner per chunk, karox 6.0.0.dev35 / opencode v2.3.2 / DSH
+  0.2.2-rc.5; data, `trio_report.md` and the pooled `trio_report_devs1_devt1.md` in
+  `karox6-bench-data/runs/devt1`). All 10 tasks valid (no trial ended on a provider
+  error; 3-5% of the requests were refused for the key's 4-in-flight limit and went
+  through on the gateway's retry). Solved: karox6 4, opencode_v2 7, deepseek_harness 6.
+  Pooled with devs1 (same wheel, arms and lane; 12 tasks, 12 valid):
+  | arm | solved | ok calls | input M (cached) | output k | reasoning k | agent min | cost-eq $ |
+  |---|---|---|---|---|---|---|---|
+  | karox6 (dev35) | 6 | 596 | 36.7 (97%) | 408 | 284 | 76.3 | 0.503 |
+  | opencode_v2 | 8 | 503 | 30.6 (96%) | 308 | 214 | 64.4 | 0.419 |
+  | deepseek_harness | 8 | 414 | 22.3 (95%) | 265 | 176 | 51.3 | 0.356 |
+  By the registered reading a gap under 4 solved tasks at one attempt is a tie, so the
+  count does not separate the three; KaroX is not ahead on it, and it is the most
+  expensive: +20% cost-equivalent and +18% agent time against OpenCode, +41% and +49%
+  against DSH, from more calls (49.7 / 41.9 / 34.5 per task) and more output per task
+  (34.0k / 25.7k / 22.1k tokens). Median time to first token is the same (2.8-3.0 s).
+  KaroX alone failed sqllineage-872 and linopy-1083 (both others solved them), failed
+  haystack-13633 with OpenCode (DSH solved it) and linopy-1088 with DSH (OpenCode solved
+  it); it alone beat OpenCode on plopp-614 and DSH on faststream-3281. Every KaroX trial
+  ended by its own choice (status completed, no tool errors, at most one retried 429 per
+  trial). First reading of the losses, general causes only: haystack-13633 and
+  sqllineage-872 are answers that pass the agent's own tests and miss cases of the
+  hidden ones (camelCase and kebab-case names that the issue listed as "not checked";
+  `COPY INTO <location>`), i.e. the scope of the fix, not a harness fault. Where the
+  extra cost sits (audit, by thirds of each run): KaroX's first third of the calls holds
+  twice the output of the others (reasoning 42.5k vs 24.1k DSH and 20.1k OpenCode on the
+  first seven tasks; visible output 19.6k vs 10.2k and 10.5k), the later thirds are close
+  to OpenCode's. That is the prompt's "exact contract" and "read callers, tests, build
+  configuration" start; whether it buys solved tasks is not shown by this sample.
+- Requests used since the 21:00 UTC reset (audit rows, refused ones included): devs1 +
+  devt1 = 1,575 for 12 trio tasks (131 per task; 74-225).
+- Before devt2 (registered 18:50 UTC; unchanged: trio, ReformBoss, 1 attempt, parallel 1,
+  chunk 2; first disc 17 and 20, then 13-16). Wheel: devt2 runs karox 6.0.0.dev36
+  (`karox6_wheel=karox6-6.0.0.dev36-py3-none-any.whl`, bench b9696e8), devt1 and devs1
+  ran 6.0.0.dev35. dev36 is what `devin/big` shipped at 18cc218; on the headless path it
+  differs from dev35 only in code that does not fire in the bench (see the 20:58 entry),
+  but it is a different build: devt2's rows are reported under their own wheel, and a
+  pooled 18-task figure, if shown, carries that note. Two dispatches, one after the other
+  (the workflow orders tasks by the set's file, and 17 and 20 come first by the
+  registration): `devt2` = disc 17, 20; `devt2b` = disc 13-16. Request estimate from ab2
+  (KaroX arms on the same lane: 59-206 requests per task on 13-17, 171-179 on 20 before
+  the daily cap) and devt1's arm ratios: 250-360 per trio task, 1,500-2,200 for the six,
+  3,600 at the very worst (every arm at 200 per task). 1,575 + 2,200 = 3,775 of 5,000.
+  The compaction A/B (disc 18, 19; two KaroX arms; ab2: 547 and 329 requests, ~900
+  together, 1,100 with a margin) starts only if devt2 and devt2b leave at least 1,100
+  requests and it can end before 03:40 UTC; otherwise it is not run today.
