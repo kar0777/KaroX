@@ -58,21 +58,41 @@ still works in 400k unless you raise the limit.
 
 ## Chat
 
-`karox chat` (or plain `karox` in a terminal) opens a chat in the normal scrollback: the
-answer streams in, each tool call is one line, and a destructive command asks before it
-runs (`y` / `N` / `a` = allow for the rest of the session).
+`karox chat` (or plain `karox` in a terminal) opens a full-screen chat: the conversation
+scrolls above, a status bar shows the model, the project and the context fill, and the
+input line stays at the bottom. The answer streams in, each tool call is one line (an
+edit also shows the lines it changed), and a destructive command asks before it runs
+(`y` / `N` / `a` = allow for the rest of the session). `--inline` keeps the chat in the
+terminal's normal scrollback instead.
 
 | Command | Does |
 |---|---|
 | `/diff` | workspace changes: `git diff` plus untracked files |
-| `/status` | session, model, tokens and cost |
-| `/new` | start a fresh session |
+| `/undo`, `/redo` | take the last turn back (its messages and the files it changed), or put it back |
+| `/fork` | continue in a copy of this conversation; the original stays as it is |
+| `/init [FOCUS]` | have the model write `AGENTS.md` for this project |
+| `/paste` (Alt+V) | attach the picture in the clipboard to the next message |
+| `/mcp [SERVER]` | MCP servers: state, tools, how to add one |
+| `/status`, `/cost` | session, model, tokens, context fill and cost |
+| `/compact` | shrink the conversation to free context |
+| `/new`, `/clear` | start a fresh session; clear the screen |
 | `/sessions`, `/resume [ID\|last]` | list and continue saved sessions |
+| `/model [NAME]`, `/setup`, `/key` | change the model, the provider, the API key |
 | `/approve ask\|allow\|deny` | how destructive commands are handled |
 | `/reasoning` | show or hide the model's reasoning |
 | `/help`, `/quit` | help; leave (Ctrl+D works too) |
 
-Ctrl+C stops the running turn and keeps the session; end a line with `\` to type more lines.
+Esc or Ctrl+C stops the running turn and keeps the session. Enter sends; Alt+Enter, Ctrl+J
+or a trailing `\` start a new line. `@path` attaches a file, `@shot.png` (or a dragged
+picture's path) attaches a picture. Tab completes commands and paths, Ctrl+R searches the
+input history, PgUp/PgDn and the mouse wheel scroll. A message sent while the agent works
+waits its turn.
+
+`/undo` records the project around each turn in a private git store under
+`<home>/snapshots`; your own repository, index and stash are never touched, ignored files
+are not recorded, and a file you changed after the turn is left alone. `--no-undo` switches
+the recording off. `karox chat -c` continues the project's last session, `--fork ID|last`
+starts a new one from a copy of it.
 
 ## Headless runs
 
