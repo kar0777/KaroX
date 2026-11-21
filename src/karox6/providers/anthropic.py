@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from karox6.core.messages import Message, ToolCall, Usage
+from karox6.core.messages import Message, ToolCall, Usage, image_note, image_payload
 from karox6.providers._stream import StreamProvider, stream_error
 from karox6.providers.base import (
     Delta,
@@ -49,7 +49,15 @@ class AnthropicProvider(StreamProvider):
                     }
                 )
             else:
-                blocks.append({"type": "text", "text": m.content})
+                for image in m.images:
+                    payload = image_payload(image)
+                    if payload is None:
+                        blocks.append({"type": "text", "text": image_note(image)})
+                    else:
+                        source = {"type": "base64", "media_type": payload[0], "data": payload[1]}
+                        blocks.append({"type": "image", "source": source})
+                if m.content or not m.images:
+                    blocks.append({"type": "text", "text": m.content})
             if messages and messages[-1]["role"] == role:
                 messages[-1]["content"].extend(blocks)
             else:

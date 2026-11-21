@@ -1517,3 +1517,14 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
     compaction at 320k) vs karox6b `--compact-at 170000` side by side on disc 18 and 19,
     the two tasks whose context passes 200k; read: audit input tokens and cost, solved,
     agent time. The default stays 400k (the user's decision of 2026-11-17) until then.
+- devd1 result (run 44936691031, 18:39-19:52 UTC; karox6 dev35 only, Dahl GLM, disc 11, 15,
+  18; data in `karox6-bench-data/runs/devd1`): as pre-registered, a plumbing and mechanism
+  check, not a comparison, and Dahl's free model was saturated again (87% of 1,376 calls
+  refused), so it proves only the plumbing. The dev35 wheel installs and runs in the bench
+  images (Harbor reports "karox 6.0.0.dev35"); 0 of 3 solved (pyqasm ended by its own
+  choice after 87 steps, unsolved as in gtrio3; sqllineage-866 and koota-pair hit the
+  3,550 s limit after 53 and 42 steps with most of the hour spent waiting: void by the
+  rule, waited+timeout). Mechanism: 3 replies were cut while thinking, each got the new
+  notice and each next reply came through (0 of 3 cut again; baseline 12 of 74); no run
+  ended on "output repeatedly cut off". Three events are too few to call it an effect.
+  No empty_response endings. The comparison stays on ReformBoss (devs1 after 21:00 UTC).

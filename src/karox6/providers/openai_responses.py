@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from karox6.core.messages import Message, ToolCall, Usage
+from karox6.core.messages import Message, ToolCall, Usage, image_note, image_payload
 from karox6.providers._stream import StreamProvider, stream_error
 from karox6.providers.base import (
     Delta,
@@ -46,6 +46,18 @@ class OpenAIResponsesProvider(StreamProvider):
                             "arguments": c.arguments,
                         }
                     )
+            elif m.images:
+                content: list[dict[str, Any]] = (
+                    [{"type": "input_text", "text": m.content}] if m.content else []
+                )
+                for image in m.images:
+                    payload = image_payload(image)
+                    if payload is None:
+                        content.append({"type": "input_text", "text": image_note(image)})
+                    else:
+                        url = f"data:{payload[0]};base64,{payload[1]}"
+                        content.append({"type": "input_image", "image_url": url})
+                items.append({"role": "user", "content": content})
             else:
                 items.append({"role": "user", "content": m.content})
         body: dict[str, Any] = {

@@ -48,9 +48,14 @@ class Message:
     reasoning: str | None = None  # assistant private reasoning text (replayed where required)
     extra: dict[str, Any] = field(default_factory=dict)  # provider round-trip data
     meta: dict[str, Any] = field(default_factory=dict)  # KaroX-only, never sent to a model
+    # Pictures attached to a user message: [{"path": file in the session, "media_type":
+    # "image/png"}]. Kept as files, read when a request is built (see image_payload).
+    images: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"role": self.role, "content": self.content}
+        if self.images:
+            out["images"] = self.images
         if self.tool_calls:
             out["tool_calls"] = [c.to_dict() for c in self.tool_calls]
         if self.tool_call_id is not None:
@@ -82,7 +87,41 @@ class Message:
             reasoning=data.get("reasoning"),
             extra=dict(data.get("extra") or {}),
             meta=dict(data.get("meta") or {}),
+            images=[dict(i) for i in data.get("images") or [] if isinstance(i, dict)],
         )
+
+
+IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+IMAGE_MAX_BYTES = 5 * 1024 * 1024  # what the vision APIs accept per picture
+IMAGE_TOKENS = 1_500  # a rough cost of one picture, for context estimates
+
+
+def image_payload(image: dict[str, str]) -> tuple[str, str] | None:
+    """(media type, base64 data) of an attached picture; None when its file is gone or
+    too large. The bytes are read as they are, so every request encodes the picture the
+    same way and a provider's prompt cache keeps matching."""
+    import base64
+    from pathlib import Path
+
+    try:
+        data = Path(image["path"]).read_bytes()
+    except (OSError, KeyError):
+        return None
+    if not data or len(data) > IMAGE_MAX_BYTES:
+        return None
+    return image.get("media_type") or "image/png", base64.b64encode(data).decode("ascii")
+
+
+def image_note(image: dict[str, str]) -> str:
+    """Text that stands in for a picture that can no longer be read."""
+    name = str(image.get("path") or "image").replace("\\", "/").rsplit("/", 1)[-1]
+    return f"[image {name} is no longer available]"
 
 
 @dataclass(slots=True)

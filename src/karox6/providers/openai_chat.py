@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from karox6.core.messages import Message, ToolCall, Usage
+from karox6.core.messages import Message, ToolCall, Usage, image_note, image_payload
 from karox6.providers.base import (
     STREAM_IDLE_S,
     Delta,
@@ -188,6 +188,16 @@ def to_wire(m: Message) -> dict[str, Any]:
         if m.reasoning:
             out[str(m.extra.get("reasoning_field") or "reasoning_content")] = m.reasoning
         return out
+    if m.images:
+        parts: list[dict[str, Any]] = [{"type": "text", "text": m.content}] if m.content else []
+        for image in m.images:
+            payload = image_payload(image)
+            if payload is None:
+                parts.append({"type": "text", "text": image_note(image)})
+            else:
+                url = f"data:{payload[0]};base64,{payload[1]}"
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+        return {"role": m.role, "content": parts}
     return {"role": m.role, "content": m.content}
 
 

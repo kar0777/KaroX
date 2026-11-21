@@ -32,7 +32,7 @@ from karox6.context.spill import limit_output
 from karox6.core import events as ev
 from karox6.core.config import SessionConfig as SessionConfig  # noqa: PLC0414
 from karox6.core.loopguard import LoopGuard
-from karox6.core.messages import Message, ToolCall, Usage
+from karox6.core.messages import IMAGE_TOKENS, Message, ToolCall, Usage
 from karox6.core.prompt import build_system_prompt
 from karox6.core.review import (
     REVIEW_APPEND,
@@ -197,8 +197,11 @@ class Session:
 
     # -- public -------------------------------------------------------------------
 
-    async def run(self, prompt: str) -> AsyncGenerator[ev.Event, None]:
-        """Run one user turn; yields events until (and including) ``RunFinished``."""
+    async def run(
+        self, prompt: str, images: list[dict[str, str]] | None = None
+    ) -> AsyncGenerator[ev.Event, None]:
+        """Run one user turn; yields events until (and including) ``RunFinished``.
+        ``images`` are pictures attached to the prompt (``core.messages.Message.images``)."""
         queue: asyncio.Queue[ev.Event | None] = asyncio.Queue()
 
         def emit(event: ev.Event) -> None:
@@ -206,7 +209,7 @@ class Session:
 
         async def produce() -> None:
             try:
-                await self._drive(prompt, emit)
+                await self._drive(prompt, emit, images or [])
             finally:
                 queue.put_nowait(None)
 
@@ -226,7 +229,9 @@ class Session:
 
     # -- loop ---------------------------------------------------------------------
 
-    async def _drive(self, prompt: str, emit: Callable[[ev.Event], None]) -> None:
+    async def _drive(
+        self, prompt: str, emit: Callable[[ev.Event], None], images: list[dict[str, str]]
+    ) -> None:
         started = time.monotonic()
         self._deadline = (
             started + self.config.max_seconds if self.config.max_seconds is not None else None
@@ -255,7 +260,7 @@ class Session:
         )
         self.guard.reset()
         self._close_dangling_calls()
-        self._append(Message("user", prompt))
+        self._append(Message("user", prompt, images=list(images)))
         steps = 0
         truncations = 0
         empties = 0  # empty replies answered with EMPTY_REPLY_NOTICE
@@ -815,6 +820,26 @@ class Session:
         emit(ev.Notice(kind="review", text=note))
         return found
 
+    def rewind(self, count: int) -> list[Message]:
+        """Drop the conversation after its first ``count`` messages (``/undo``); the
+        dropped messages are returned so that a redo can put them back."""
+        count = max(min(count, len(self.messages)), 0)
+        dropped = self.messages[count:]
+        if dropped:
+            self.messages = self.messages[:count]
+            self.store.reset(self.messages)
+            self._last_input_tokens = self._last_cached_tokens = 0
+            self._chars_since_measure = 0
+        return dropped
+
+    def extend(self, messages: list[Message]) -> None:
+        """Put messages back at the end of the conversation (the redo of ``rewind``)."""
+        if messages:
+            self.messages = [*self.messages, *messages]
+            self.store.reset(self.messages)
+            self._last_input_tokens = self._last_cached_tokens = 0
+            self._chars_since_measure = 0
+
     def forget_model_state(self, *, provider_changed: bool) -> None:
         """After /model or /setup: what the session learned about the old model (its
         smaller context window, the size of the last request) does not apply to the new
@@ -862,6 +887,7 @@ class Session:
             len(message.content)
             + len(message.reasoning or "")
             + sum(len(c.arguments) for c in message.tool_calls)
+            + int(IMAGE_TOKENS * 3.5) * len(message.images)
         )
         self.store.message(message)
 

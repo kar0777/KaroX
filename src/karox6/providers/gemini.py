@@ -7,7 +7,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Any
 
-from karox6.core.messages import Message, ToolCall, Usage
+from karox6.core.messages import Message, ToolCall, Usage, image_note, image_payload
 from karox6.providers._stream import StreamProvider, stream_error
 from karox6.providers.base import (
     Delta,
@@ -49,6 +49,12 @@ class GeminiProvider(StreamProvider):
                     }
                 )
             else:
+                for image in m.images:
+                    payload = image_payload(image)
+                    if payload is None:
+                        parts.append({"text": image_note(image)})
+                    else:
+                        parts.append({"inlineData": {"mimeType": payload[0], "data": payload[1]}})
                 if m.content:
                     part: dict[str, Any] = {"text": m.content}
                     if m.extra.get("gemini_text_signature"):
