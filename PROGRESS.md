@@ -1560,3 +1560,40 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   and the run ends on its own. If it passes, a codex arm may join a later same-model
   comparison, registered separately; if it fails, the report says that Codex CLI could
   not be measured on this gateway, and why. Its score is not read.
+- Night session, 21:47 UTC (same branches). Checks at 18cc218 before anything else: ruff
+  check, ruff format --check, mypy (68 files), git diff --check clean; full suite 1118
+  passed, 5 skipped (Windows). 6.0.0.dev36 wheel built from 18cc218 (`python -m build
+  --wheel`), in the bench as `wheels/karox6-6.0.0.dev36-py3-none-any.whl` (bench aa40c03).
+  devt1 was dispatched at bcfd3bb and its jobs check out that commit: it stays on dev35.
+- 22:00 UTC, the suite on Linux for the first time (WSL Ubuntu, Python 3.12.14, own venv
+  from uv.lock; nothing but unit tests runs on this PC). Everything outside the terminal
+  tests passed at once: 1092 passed, the headless path of dev36 has no Linux-only fault.
+  10 of the 15 terminal flows failed, one cause, a real bug: the start-up frame is on
+  screen ~250 ms before the app reads keys, and a POSIX terminal spends that time in its
+  line mode, echoing what is typed and passing Enter on as Ctrl+J (a new line in the
+  input box), so a message typed at once was never sent. The frame now switches echo,
+  line editing and the CR/LF translation off when it is painted and the shell's mode
+  comes back on every exit path (commit 5d88789, 6.0.0.dev37; chat only, the headless
+  run does not paint the frame). Two test-only faults next to it: a 13-byte `hello.py`
+  expected where files get CRLF (now the file's real size), and `Ctrl+R` sent in the same
+  instant as the turn's end, before prompt_toolkit had reloaded the input line's history
+  (failed whenever that test ran alone on Linux; the test now waits for the history).
+  Linux after the fixes: 1108 passed, 22 skipped (16 need ripgrep, 6 are Windows-only);
+  Windows: unchanged.
+- devc0 result (run 44951463333, 21:25-22:12 UTC): FAIL as a plumbing check, and it does
+  not answer the question. The trial ran 44 min and scored 0, then Harbor stopped with
+  PermissionError on `agent/codex-home/tmp/arg0-linux/.../apply_patch` (Codex keeps
+  root-only files in CODEX_HOME, which the arm had put under the collected /logs) and the
+  artifact upload failed on the same path: no audit and no trajectory came back, so
+  whether Codex's requests reached the model is unknown. Bench fix (devin/bench):
+  CODEX_HOME moved to /tmp inside the container, its session files and logs are copied
+  to /logs afterwards with read permission, and the workflow makes the collected
+  directory readable before the upload. The trio's agents, aliases and profile are
+  untouched.
+- Pre-registered devc1 (plumbing only, not a comparison; same rule as devc0): arm `codex`
+  alone, lane freeinference, disc task 2, 1 attempt, parallel 1, bench commit b9696e8.
+  Pass = Codex CLI installs, the audit has successful rows of harness `codex` with tool
+  use, and the run ends on its own. No ReformBoss request is used (other key and lane).
+  If the audit shows that every request failed, the answer is "no" with the gateway's
+  error; if the trial again leaves no audit, the answer stays "not measurable" and the
+  codex arm is not used.

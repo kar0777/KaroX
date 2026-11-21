@@ -476,8 +476,12 @@ def test_multiline_paste_history_and_ctrl_r(tmp_path: Path) -> None:
                 await eventually(lambda: "r3" in ui.transcript.plain_text)
                 assert provider.requests[2].messages[-1].content == "p1\np2\np3"
 
-                # Ctrl+R searches history for "alpha" and re-sends it.
+                # Ctrl+R searches history for "alpha" and re-sends it. The input line gets
+                # its history back a moment after a message is sent (prompt_toolkit reloads
+                # it at the next repaint, through a thread): keys sent in the same instant
+                # would search an empty history.
                 await eventually(lambda: ui.mode == "prompt")
+                await eventually(lambda: "alpha\nbeta" in ui.input_buffer._working_lines)
                 keys.send_text("\x12alpha\r\r")
                 await eventually(lambda: "r4" in ui.transcript.plain_text)
                 assert provider.requests[3].messages[-1].content == "alpha\nbeta"
