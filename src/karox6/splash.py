@@ -5,7 +5,9 @@ about 300 ms of imports on a Windows PC, on top of the interpreter's own start. 
 module paints that first frame at once with plain writes: the welcome card, the status
 bar and the prompt, at the cells where the app draws them a moment later, from the same
 text functions (``tui_text``), so the hand-over is not visible. Keys typed in between
-wait in the terminal's input queue and reach the app when it starts reading.
+wait in the terminal's input queue and reach the app when it starts reading. A POSIX
+terminal would otherwise handle them itself until then (see ``_quiet_input``), so its
+input mode is changed for that time and put back when the chat ends.
 
 The frame is only painted when it can be exact: a terminal that understands escape
 sequences, colours on, a window tall enough for the whole card, and text whose width
@@ -16,8 +18,10 @@ starts as before.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -52,8 +56,9 @@ _BAR_STYLES = {
 class Splash:
     """The painted first frame: the alternate screen is ours until the app takes it."""
 
-    def __init__(self, stream: TextIO) -> None:
+    def __init__(self, stream: TextIO, restore_input: Callable[[], None] | None = None) -> None:
         self._stream = stream
+        self._restore_input = restore_input
         self.active = True
 
     def take_over(self) -> bool:
@@ -66,10 +71,15 @@ class Splash:
 
     def close(self) -> None:
         """Leave the alternate screen if the app never took the frame over (it failed to
-        start): the user's own screen comes back before any message is printed."""
+        start): the user's own screen comes back before any message is printed. The
+        terminal's own input mode comes back too; that part is repeated on every call,
+        because the app, when it ran, has put back the mode it found (ours), and the
+        last call is the one made at exit."""
         if self.active:
             self.active = False
             _vt_write(self._stream, LEAVE_ALTERNATE)
+        if self._restore_input is not None:
+            self._restore_input()
 
 
 def first_frame(
@@ -163,11 +173,54 @@ def show(
         rows=size.lines,
         columns=columns,
     )
-    if frame is None or not _vt_write(stream, frame):
+    if frame is None:
         return None
-    splash = Splash(stream)
+    restore_input = _quiet_input()
+    if not _vt_write(stream, frame):
+        if restore_input is not None:
+            restore_input()
+        return None
+    splash = Splash(stream, restore_input)
     atexit.register(splash.close)  # whatever happens, the user's screen comes back
     return splash
+
+
+def _quiet_input(fd: int | None = None) -> Callable[[], None] | None:
+    """Keep the terminal from handling keys itself while the frame is up (POSIX).
+
+    Until the app switches to raw mode a POSIX terminal is in its line mode: it echoes
+    what is typed (over the painted frame) and hands Enter on as a line feed, which the
+    app reads as Ctrl+J, "new line", so a message typed at once would sit in the input
+    box unsent. Echo, line editing and the CR/LF translation are switched off at once;
+    Ctrl+C still interrupts the start. Returns the function that puts the mode back, or
+    None when nothing was changed (Windows: a console queues key events as they are).
+    """
+    if sys.platform == "win32":
+        return None
+    import termios
+
+    try:
+        if fd is None:
+            fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+        quiet = termios.tcgetattr(fd)
+    except (termios.error, OSError, ValueError, AttributeError):
+        return None
+    quiet[0] &= ~(termios.ICRNL | termios.INLCR | termios.IGNCR)  # input flags
+    quiet[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)  # local flags
+    quiet[6][termios.VMIN] = 1  # a read returns as soon as one byte is there
+    quiet[6][termios.VTIME] = 0
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, quiet)  # NOW: typed-ahead keys are kept
+    except (termios.error, OSError):
+        return None
+    target = fd
+
+    def restore() -> None:
+        with contextlib.suppress(termios.error, OSError, ValueError):
+            termios.tcsetattr(target, termios.TCSANOW, saved)
+
+    return restore
 
 
 def _is_terminal(stream: Any) -> bool:

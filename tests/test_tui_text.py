@@ -1,7 +1,10 @@
 """Pure text of the chat UI: the welcome card, the status bar, error explanations and
 the start-up frame."""
 
+import atexit
 import io
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -184,6 +187,83 @@ def test_the_painted_frame_is_given_back_exactly_once(monkeypatch):
     shown.close()
     shown.close()
     assert written == [splash.LEAVE_ALTERNATE]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the line mode of a POSIX terminal")
+def test_keys_typed_under_the_first_frame_stay_as_typed():
+    import pty
+    import termios
+
+    master, slave = pty.openpty()
+    try:
+        found = termios.tcgetattr(slave)
+        assert found[3] & termios.ECHO  # a new terminal: line mode, echo, CR read as LF
+        assert found[3] & termios.ICANON
+        assert found[0] & termios.ICRNL
+        restore = splash._quiet_input(slave)
+        assert restore is not None
+        quiet = termios.tcgetattr(slave)
+        assert not quiet[3] & (termios.ECHO | termios.ICANON)
+        assert not quiet[0] & termios.ICRNL
+        assert quiet[3] & termios.ISIG  # Ctrl+C still interrupts the start
+        os.write(master, b"hello\r")
+        assert os.read(slave, 64) == b"hello\r"  # at once, and Enter is still Enter
+        os.set_blocking(master, False)
+        with pytest.raises(BlockingIOError):  # nothing was echoed over the frame
+            os.read(master, 64)
+        restore()
+        assert termios.tcgetattr(slave) == found
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_input_mode_is_left_alone_where_it_cannot_be_read():
+    # not a terminal (or Windows, where a console queues key events as they are)
+    with open(os.devnull, "rb") as not_a_terminal:
+        assert splash._quiet_input(not_a_terminal.fileno()) is None
+
+
+def test_the_input_mode_comes_back_on_every_close(monkeypatch):
+    monkeypatch.setattr(splash, "_vt_write", lambda _stream, _text: True)
+    restored = []
+    shown = splash.Splash(io.StringIO(), lambda: restored.append(True))
+    assert shown.take_over() is True
+    assert restored == []  # the app reads keys in the mode the frame set
+    shown.close()  # the app has ended and put back the mode it found: the frame's
+    shown.close()  # and again at exit
+    assert restored == [True, True]
+
+
+class _Window(io.StringIO):
+    def fileno(self) -> int:
+        return 1
+
+
+@pytest.mark.parametrize("written", [True, False])
+def test_show_sets_the_input_mode_only_for_a_painted_frame(monkeypatch, written):
+    for name in ("NO_COLOR", "KAROX_NO_SPLASH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(splash, "_is_terminal", lambda _stream: True)
+    monkeypatch.setattr(splash.os, "get_terminal_size", lambda _fd: os.terminal_size((100, 30)))
+    monkeypatch.setattr(splash, "_vt_write", lambda _stream, _text: written)
+    restored = []
+    monkeypatch.setattr(splash, "_quiet_input", lambda: lambda: restored.append(True))
+    args = frame_args()
+    del args["encoding"], args["rows"], args["columns"]
+    shown = splash.show(**args, stream=_Window())
+    if not written:  # the terminal took no escape sequences: everything as it was
+        assert shown is None
+        assert restored == [True]
+        return
+    assert shown is not None
+    try:
+        assert restored == []
+        shown.close()
+        assert restored == [True]
+    finally:
+        atexit.unregister(shown.close)
 
 
 @pytest.mark.parametrize(

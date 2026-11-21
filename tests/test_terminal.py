@@ -29,6 +29,7 @@ from term import Terminal
 SRC = Path(__file__).resolve().parents[1] / "src"
 ENTER_ALT, LEAVE_ALT = "\x1b[?1049h", "\x1b[?1049l"
 PUSH = ("bash", {"command": "git push --force origin main"})  # needs approval (git.push-force)
+LINE_MODE = {"echo": True, "line": True, "cr_as_lf": True}  # a POSIX terminal as a shell has it
 _ACTIVITY = re.compile(r"\d+\.\ds  \S")
 
 
@@ -166,6 +167,24 @@ def test_first_frame_alternate_screen_and_clean_exit(launch: Launcher) -> None:
     assert "KaroX 6" not in t.text()
     assert "\x1b[?1000l" in t.raw  # mouse reporting is switched off again
     assert "\x1b[?2004l" in t.raw  # and bracketed paste
+    # and the terminal handles typed keys itself again, as the shell expects
+    assert t.input_mode() in (None, LINE_MODE)
+
+
+def test_keys_typed_under_the_first_frame_reach_the_app_as_typed(launch: Launcher) -> None:
+    """The first frame is on the screen before the app reads keys. A terminal in its line
+    mode (POSIX) would handle what is typed in between itself: echo it over the frame and
+    pass Enter on as Ctrl+J, a new line in the input box, so nothing would be sent."""
+    chat = launch.start([Reply(text="pong")], ready=None, watch=("Type a task to start.",))
+    t = chat.term
+    t.seen_at("Type a task to start.")
+    t.send("ping\r")  # typed at once, Enter included
+    t.wait("pong")
+    assert chat.last_user_message() == "ping"
+    t.wait(lambda _s: chat.idle())
+    t.key("ctrl-d")
+    assert t.wait_exit() == 0
+    assert t.input_mode() in (None, LINE_MODE)
 
 
 def test_ctrl_c_twice_leaves_and_names_the_session(launch: Launcher) -> None:
@@ -424,14 +443,15 @@ def test_a_message_typed_while_the_agent_works_waits_its_turn(launch: Launcher) 
 def test_completion_multiline_history_and_search(launch: Launcher) -> None:
     chat = launch.start([Reply(text=f"answer {n}") for n in range(1, 6)])
     t = chat.term
+    size = (chat.ws / "hello.py").stat().st_size  # 13 bytes where text files end lines in CRLF
     t.send("look at @he")
-    t.wait("@hello.py  13 B")
+    t.wait(f"@hello.py  {size} B")
     t.key("tab")
     t.wait(lambda _s: t.lines()[-1] == "› look at @hello.py")
     t.key("enter")  # takes the completion, does not send
     assert len(chat.model.requests) == 0
     t.key("enter")
-    t.wait("attached: hello.py (13 B)")
+    t.wait(f"attached: hello.py ({size} B)")
     t.wait("answer 1")
     assert '<attached_file path="hello.py">' in str(chat.last_user_message())
     t.send("@зам")

@@ -228,6 +228,21 @@ class Terminal:
 
             fcntl.ioctl(self._fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
+    def input_mode(self) -> dict[str, bool] | None:
+        """How the terminal itself treats typed keys right now (POSIX): echo, line editing
+        and reading Enter (CR) as a line feed, all on in the line mode a program finds
+        and must leave behind. None on Windows, where a console has no such mode."""
+        if self._proc is not None:
+            return None
+        import termios
+
+        attrs = termios.tcgetattr(self._fd)
+        return {
+            "echo": bool(attrs[3] & termios.ECHO),
+            "line": bool(attrs[3] & termios.ICANON),
+            "cr_as_lf": bool(attrs[0] & termios.ICRNL),
+        }
+
     # -- timing -------------------------------------------------------------------------
 
     def watch(self, text: str) -> None:
