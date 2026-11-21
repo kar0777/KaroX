@@ -19,6 +19,24 @@ Measured 2026-11-21 on the development PC (Windows 11, Python 3.12, ConPTY, 100x
 | one paragraph of 30,000 characters streamed (CPU in the UI) | 11.2 s (29.8 s dim) | 10 ms (17 ms) |
 | 20,000 lines: resize (full re-wrap) | 211 ms | 111 ms |
 
+The same script on Linux (WSL2 Ubuntu on the same PC, Python 3.12.14, a POSIX pty, commit
+ccf8412; the times include the test harness's launcher, one extra interpreter start of
+~10 ms):
+
+| what | Linux |
+|---|---|
+| first frame | 44 ms (median of 7); 119 ms with `KAROX_NO_SPLASH=1` |
+| ready for input | 148 ms (142 ms without the start-up frame) |
+| 6,000 lines streamed and shown | 0.26 s, 6 KB written to the terminal |
+| PageUp / Ctrl+Home / Ctrl+End in that session | 23 / 23 / 23 ms |
+| key -> echo while a reply streams | median 25 ms, p90 48 ms |
+| terminal output while a reply streams | 8 KB/s |
+
+On a POSIX terminal the keys typed before the app reads them are kept as typed only since
+6.0.0.dev37 (the frame switches the terminal's echo and line editing off; before that
+Enter arrived as Ctrl+J and the "ready for input" figure would have been the terminal's
+own echo, not the app's).
+
 What the numbers mean:
 
 * First frame. Python needs ~65 ms to start here and the imports the app needs (asyncio

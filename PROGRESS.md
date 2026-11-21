@@ -1597,3 +1597,34 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   If the audit shows that every request failed, the answer is "no" with the gateway's
   error; if the trial again leaves no audit, the answer stays "not measurable" and the
   codex arm is not used.
+- 22:17 UTC, devc1 dispatched: run 44955966673 (bench b9696e8).
+- 22:30 UTC, work between the runs (KaroX devin/big; none of it is in the dev36 wheel the
+  comparison uses, and none of it touches the prompt, the tools or the loop):
+  * Providers, errors inside a stream (commit fc34711). The three native adapters mapped
+    such errors through a short table of Anthropic names. The Responses API's own `error`
+    event (code and message at the top level) became "server: None" and was retried; its
+    string codes (`rate_limit_exceeded`, `insufficient_quota`) were retried as server
+    faults; Gemini's in-stream 400s and Anthropic's `permission_error` and
+    `not_found_error` were retried as server faults too. Numeric codes and the providers'
+    own names now give the HTTP status of the same refusal, and the names stay in the
+    message. A reply the provider stopped (`refusal` on Anthropic, `content_filter` on the
+    Responses API) is no longer taken for the model's final answer;
+    `model_context_window_exceeded` asks for a smaller conversation.
+  * Providers, context overflow in other servers' words: only a recognised refusal leads
+    to a smaller conversation instead of the end of the run. Added Anthropic's "input
+    length and `max_tokens` exceed context limit" (the form an agent meets first; it was a
+    plain bad request) and "prompt is too long" on OpenAI-compatible routes, Gemini's
+    "exceeds the maximum number of tokens", xAI's "maximum prompt length", llama.cpp's
+    "exceeds the available context size" and Bedrock's "Input is too long". 27 new test
+    cases; 21 of them failed before the change. Checked against scripted servers only
+    (no keys on this PC); the xAI and llama.cpp wordings were read from their issue
+    trackers.
+  * tests/term.py on POSIX (commit ccf8412): the program was started with `pty.fork()`
+    while the scripted model's server thread runs (Python 3.12 warns that such a child can
+    deadlock); it is now started by subprocess on an opened pty, with a one-line launcher
+    that makes the pty the controlling terminal. Output is decoded incrementally (a
+    character split between two reads became U+FFFD) and an empty read ends the reader
+    (macOS and BSD report end of file that way; the loop would have spun).
+  * Linux numbers for the chat UI (docs/perf.md, `scripts/tui_perf.py` under WSL2 on the
+    same PC): first frame 44 ms, ready for input 148 ms (Windows: 170 and 414 ms), 6,000
+    lines shown in 0.26 s, key echo while streaming 25 ms median.
