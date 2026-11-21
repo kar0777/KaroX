@@ -1316,7 +1316,10 @@ git diff --check
 - gduel2 (44869244553, GLM-5.3-Flash on OpenRouter): karox6 4/6 (isort, markdown, plopp,
   django-ninja), opencode_v2 3/6 (isort, plopp, django-ninja); markdown KaroX-only, none
   OpenCode-only. Input tokens karox6 16.7M vs opencode 22.1M (KaroX lower on 4 of 6),
-  output 228k vs 52k (KaroX 4x: GLM thinks/writes more in KaroX). The lead holds on a
+  output 228k vs 52k by Harbor's counts, BUT Harbor's opencode count omits reasoning:
+  the gateway audit (same counter for both) gives karox6 vs opencode_v2: calls 405 vs
+  458, input 16.7M vs 22.2M, output 228k vs 367k (reasoning 169k vs 314k). KaroX is
+  cheaper on every axis on GLM; compare tokens only from the audit. The lead holds on a
   second model (small sample). Cost: balance 11.08 -> ~10.0 for the run (cached input on
   this route is $0.03 vs $0.04 uncached, so caching saves little: input volume is the
   cost). The $1 budget is spent; the floor stops further orglm jobs.
