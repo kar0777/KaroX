@@ -187,6 +187,30 @@ def test_keys_typed_under_the_first_frame_reach_the_app_as_typed(launch: Launche
     assert t.input_mode() in (None, LINE_MODE)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="under pywinpty a Ctrl+C sent before the app reads keys reaches the program "
+    "neither as an interrupt nor as a key (observed), so the path only runs on POSIX",
+)
+def test_ctrl_c_under_the_first_frame_leaves_a_clean_terminal(launch: Launcher) -> None:
+    """Ctrl+C while only the start-up frame is up (the app is still being imported) ends
+    the start: the user's screen and the terminal's own input mode come back."""
+    chat = launch.start([], ready=None, watch=("Type a task to start.",))
+    t = chat.term
+    t.seen_at("Type a task to start.")
+    t.key("ctrl-c")
+    # The terminal turns the key into an interrupt (the frame leaves that switched on) and
+    # the start ends. If the app was already reading keys, the first Ctrl+C arms the exit.
+    armed = "Press Ctrl+C again to exit."
+    t.wait(lambda screen: not t.alive() or armed in screen, 15)
+    if t.alive():
+        t.key("ctrl-c")
+    assert t.wait_exit() == 0
+    assert not t.screen.alternate
+    assert t.raw.count(ENTER_ALT) == t.raw.count(LEAVE_ALT) == 1
+    assert t.input_mode() in (None, LINE_MODE)
+
+
 def test_ctrl_c_twice_leaves_and_names_the_session(launch: Launcher) -> None:
     chat = launch.start([Reply(text="pong")])
     chat.turn("ping")
