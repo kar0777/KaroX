@@ -1313,3 +1313,10 @@ git diff --check
   side, GLM, disc tasks 1,2,3,4,6,7 (fastest), 1 attempt, parallel 3. Question: does
   KaroX's head-to-head lead on DSV4.1F hold on a second model? Read: solved per arm,
   tokens and time per arm; no tuning on these results.
+- gduel2 (44869244553, GLM-5.3-Flash on OpenRouter): karox6 4/6 (isort, markdown, plopp,
+  django-ninja), opencode_v2 3/6 (isort, plopp, django-ninja); markdown KaroX-only, none
+  OpenCode-only. Input tokens karox6 16.7M vs opencode 22.1M (KaroX lower on 4 of 6),
+  output 228k vs 52k (KaroX 4x: GLM thinks/writes more in KaroX). The lead holds on a
+  second model (small sample). Cost: balance 11.08 -> ~10.0 for the run (cached input on
+  this route is $0.03 vs $0.04 uncached, so caching saves little: input volume is the
+  cost). The $1 budget is spent; the floor stops further orglm jobs.
