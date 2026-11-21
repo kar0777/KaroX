@@ -1474,3 +1474,46 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   * A stream that goes silent for 300 s after answer tokens started is a timeout (retried)
     instead of hanging for the 900 s request timeout; silence while the model is still
     thinking is left alone; a stall after the reply finished keeps the reply.
+- Bench branch `devin/bench` (60fd856): dev35 wheel; `scripts/trio_report.py` now also
+  reports agent time (Harbor's agent_execution phase) and a cost-equivalent (audit tokens
+  at one price list for every arm; default the W&B list used so far: input 0.13, cached
+  0.002, output 0.65 USD per 1M), usage on valid tasks next to all tasks, pooled run
+  directories and a Markdown table. One scoring fix, made before any run of this branch:
+  the rule's second clause ("refused > 50% of calls AND hit the time limit") never fired
+  for KaroX, because the script looked for a reason starting with "time" while KaroX's is
+  "limit:time limit 3550s". gtrio2 rescored with the fix: 18/24 valid (was 19), solved on
+  valid tasks karox6 7, opencode_v2 5, deepseek_harness 4.
+- ReformBoss limits read from the gateway audit (ab1, ab2): 4 requests in flight per key,
+  40 requests per minute per key, 3 client IPs per 10 minutes, 5000 requests per day per
+  account (reset 21:00 UTC). Requests per task and arm on this lane (ab1/ab2, dev30/31):
+  ~49 on disc 1-12, 58-161 on disc 13-20 except koota-pair (~290, runs to the time limit).
+  A trio on disc 1-24 therefore needs ~5,400 requests, more than a day's allowance: the
+  comparison below is sized to fit one day with a margin.
+- Pre-registered before any run of this branch (2026-11-21 18:50 UTC):
+  * devd1, mechanism and plumbing check on the free Dahl lane (not a comparison): karox6
+    only, dev35, disc tasks 11, 15, 18 (pyqasm-468, sqllineage-866, koota-pair: the runs
+    with the most cut replies in gtrio2/gtrio3), 1 attempt, dahl2, parallel 3. Read: the
+    wheel installs and runs in the bench; after a thinking-only cut the next reply is cut
+    again less often than the 16% baseline (12 of 74 in gtrio2/gtrio3/gduel3/rivals1); no
+    run ends on "output repeatedly cut off". If Dahl's free capacity is saturated again
+    the run only proves the plumbing. No decision rides on it.
+  * devs1, smoke on ReformBoss after the reset: trio (karox6 dev35, opencode_v2 2.3.2,
+    deepseek_harness 0.2.2-rc.5), disc tasks 2 and 7 (isort-2750, plopp-614: solved by
+    KaroX in ab1, so solvable on this model), 1 attempt, chunk 2, parallel 1 (one runner,
+    one IP, 3 requests in flight). Pass = all six trials end without a provider or infra
+    error and `trio_report.py` scores them. Only then the main run starts.
+  * devt1, main comparison: the same trio and lane, disc tasks 1, 3-6, 8-12 (the rest of
+    the fastest twelve), chunk 5, parallel 1; then devt2: disc 17, 20 (the two tasks
+    named as KaroX losses: fastapi-deprecation, claude-code-by-agents), then 13, 14, 15,
+    16, chunk 2, parallel 1, as far as the day's requests reach. Tasks 18 and 19 are left
+    out for their cost (~870 and ~480 requests per trio by ab2), fixed here before any
+    result. devs1 counts as part of the sample (same wheel, arms and lane): 18 tasks.
+  * Reading (as before): solved per arm on valid tasks (`trio_report.py` rule); with one
+    attempt per task a gap under 4 solved tasks is a tie. Cost-equivalent, audit tokens,
+    model time and agent time are compared on valid tasks only. No KaroX change during
+    the runs; trajectories are read afterwards for general causes only. Whatever the
+    result, it is recorded here.
+  * Not run today (requests): the compaction-threshold A/B. Prepared as karox6 (default,
+    compaction at 320k) vs karox6b `--compact-at 170000` side by side on disc 18 and 19,
+    the two tasks whose context passes 200k; read: audit input tokens and cost, solved,
+    agent time. The default stays 400k (the user's decision of 2026-11-17) until then.
