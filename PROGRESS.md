@@ -1341,3 +1341,8 @@ git diff --check
   1 attempt, parallel 3 (9 agents). New baseline after the rival bump. Read: solved per
   arm, audit tokens and calls, 429 share per arm (void a task where any arm's failed
   calls exceed half of its calls).
+- gtrio1 cancelled after a few minutes (user: use all 36 slots). Relaunched as gtrio2:
+  same trio and lane, disc tasks 1-24, parallel 12 (36 agents = 12 keys x 3). The
+  per-job gateways now pick keys at random and rest a key 3 s after a 429 (jobs cannot
+  see each other's requests). Same void rule (a task where any arm's failed calls
+  exceed half its calls).
