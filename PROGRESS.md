@@ -1284,3 +1284,14 @@ git diff --check
   disc tasks 1-12 (fastest discriminating), 1 attempt, parallel 2 (4 agents on the key).
   Keep --review going if B solves >= A + 2; drop it if B < A; otherwise inconclusive
   (then read the reviews for harm/help).
+- ab1 (44838155200): A (dev30) 6/12, B (dev30 --review) 7/12 -> inconclusive by the
+  pre-registered rule. Read: haystack flip (A0->B1) and plopp (A1->B0) had 0 findings, so
+  they are coin flips. sqllineage-872 (A0->B1): the reviewer reproduced a real gap
+  (COPY INTO with a UNION/CTE transformation subquery still loses the source) and the
+  agent fixed it: plausibly the review's one win. 4 tasks got 1 reproduced finding each,
+  no false alarm sent the agent wrong; 3 of those 4 were solved. Cost: wall time 392 s ->
+  707 s per task (+80%), input tokens +25%, output tokens +98%; reviews with 0 findings
+  still took 4-7 min. Next (dev31): same review at half the budget (25 steps / 300 s,
+  reminders at 14 and 21), then ab2 on disc tasks 13-24 (held out from ab1). Rule: keep
+  --review if B >= A + 1 on ab1+ab2 combined with B's mean time <= 1.4x A's; drop it if
+  B <= A combined.

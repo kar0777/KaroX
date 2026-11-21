@@ -26,16 +26,16 @@ from karox6.tools.base import ToolContext, ToolResult
 
 MAX_DIFF_CHARS = 40_000
 MAX_SAVED_BYTES = 4_000_000
-REVIEW_MAX_STEPS = 45
-REVIEW_MAX_SECONDS = 600.0
+REVIEW_MAX_STEPS = 25
+REVIEW_MAX_SECONDS = 300.0
 # Reminders by step: rev1 reviewers found real failures but ran out of steps before
 # reporting any of them.
 REVIEW_STEP_NOTICES = {
-    28: (
-        "You have used 28 of 45 steps. Report every problem you have already shown with "
+    14: (
+        "You have used 14 of 25 steps. Report every problem you have already shown with "
         "`finding` now; then check at most one or two more requirements."
     ),
-    40: "Stop checking now: report what you have shown with `finding`, then reply.",
+    21: "Stop checking now: report what you have shown with `finding`, then reply.",
 }
 
 REVIEW_APPEND = (
@@ -57,7 +57,7 @@ REVIEW_APPEND = (
     "lines of its output that show the problem. Do not report style, missing comments, "
     "or suspicions you could not demonstrate with a command. Report each problem right "
     "after the check that shows it, before you check the next requirement: you have "
-    "about 30 tool calls, so start with the requirements the change most likely misses "
+    "about 15 tool calls, so start with the requirements the change most likely misses "
     "(exact constraints, must-nots, edge cases the task names).\n"
     "When you are done, reply with one short line: how many requirements you checked and "
     "how many findings you reported."
