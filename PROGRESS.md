@@ -1388,3 +1388,14 @@ git diff --check
   * gtrio3: dev33, trio, disc 1-24, dahl2 (32 keys), parallel 24, 1 attempt. Decision:
     KaroX's lead holds if karox6 >= opencode_v2 on valid tasks; >= 20 valid tasks needed,
     else the lane stays unreliable and the big comparison moves to ReformBoss.
+- gtrio3 (44901706177; dev33, trio, disc 1-24, dahl2 32 keys, parallel 24): VOID by the
+  pre-registered rule (2/24 valid tasks, < 20). Disjoint keys worked: zero
+  parallel_key_limit refusals; every refusal was Dahl's global free capacity ("paid
+  accounts first") plus our gateway's cooldown. The gateway gave up after ~1 min of
+  retries and passed the 429 on: KaroX kept going (own retries), OpenCode and DSH stopped.
+  Solved on all tasks karox6 10, opencode_v2 2, DSH 0; successful calls 1272 / 174 / 42.
+  This measures tolerance of an overloaded provider, not solving. No empty_response
+  endings (dev33 fix works). Decision: Dahl's free lane is unusable for comparisons at
+  this load; the comparison moves to ReformBoss / a new provider.
+- OpenRouter key (probe orkey): 1000 free-model requests/day, no request limit on paid
+  models; account $9.74 left, key cap $6 with $0.44 left; the $1 budget is spent.
