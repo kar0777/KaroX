@@ -7,6 +7,7 @@ see, not prompt_toolkit's idea of it. Keys are written the way a terminal sends 
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import copy
 import os
@@ -97,10 +98,10 @@ class Terminal:
         self.chunks: list[tuple[float, int]] = []  # (seconds from start, characters) per read
         self._watched: dict[str, float | None] = dict.fromkeys(watch)
         self._lock = threading.Lock()
-        self._exit: int | None = None
         self._fd = -1
-        self._pid = -1
-        self._proc: Any = None
+        self._decode = codecs.getincrementaldecoder("utf-8")("replace").decode
+        self._child: Any = None  # POSIX: subprocess.Popen on the pty
+        self._proc: Any = None  # Windows: winpty's PtyProcess
         if sys.platform == "win32":
             from winpty import PtyProcess
 
@@ -116,18 +117,31 @@ class Terminal:
         import fcntl
         import pty
         import struct
+        import subprocess
         import termios
 
-        self._pid, self._fd = pty.fork()
-        if self._pid == 0:  # the child: its controlling terminal is the new pty
-            try:
-                if cwd:
-                    os.chdir(cwd)
-                os.execvpe(argv[0], argv, env or dict(os.environ))
-            finally:
-                os._exit(127)
-        size = struct.pack("HHHH", self.rows, self.cols, 0, 0)
-        fcntl.ioctl(self._fd, termios.TIOCSWINSZ, size)
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", self.rows, self.cols, 0, 0))
+        # A new session with the pty as its controlling terminal, the way a terminal
+        # emulator starts a program. A one-line launcher does it after exec, not Python
+        # code between fork and exec (pty.fork): this process has threads (the scripted
+        # model's server), and a forked copy of a threaded interpreter can deadlock.
+        launcher = (
+            "import fcntl, os, sys, termios; os.setsid(); "
+            "fcntl.ioctl(0, termios.TIOCSCTTY, 0); os.execvp(sys.argv[1], sys.argv[1:])"
+        )
+        try:
+            self._child = subprocess.Popen(
+                [sys.executable, "-c", launcher, *argv],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env=env,
+                cwd=cwd,
+            )
+        finally:
+            os.close(slave)
+        self._fd = master
 
     def _read(self) -> None:
         while True:
@@ -135,7 +149,10 @@ class Terminal:
                 if self._proc is not None:
                     data = self._proc.read(4096)
                 else:
-                    data = os.read(self._fd, 4096).decode("utf-8", "replace")
+                    raw = os.read(self._fd, 4096)
+                    if not raw:
+                        break  # end of file (macOS, BSD; Linux raises EIO instead)
+                    data = self._decode(raw)  # a character may be split between reads
             except (EOFError, OSError):
                 break
             if not data:
@@ -158,13 +175,7 @@ class Terminal:
     def alive(self) -> bool:
         if self._proc is not None:
             return bool(self._proc.isalive())
-        if self._exit is not None:
-            return False
-        pid, status = os.waitpid(self._pid, os.WNOHANG)
-        if pid == 0:
-            return True
-        self._exit = os.waitstatus_to_exitcode(status)
-        return False
+        return self._child.poll() is None
 
     def wait_exit(self, timeout: float = 10.0) -> int:
         end = time.perf_counter() + timeout
@@ -175,7 +186,7 @@ class Terminal:
         self._reader.join(2.0)
         if self._proc is not None:
             return int(self._proc.exitstatus or 0)
-        return int(self._exit or 0)
+        return int(self._child.returncode or 0)
 
     def close(self) -> None:
         if self._proc is not None:
@@ -183,11 +194,9 @@ class Terminal:
                 self._proc.terminate(force=True)
             with contextlib.suppress(Exception):
                 self._proc.close()
-        elif self.alive():
-            import signal
-
-            os.kill(self._pid, signal.SIGKILL)
-            os.waitpid(self._pid, 0)
+        elif self._child is not None and self.alive():
+            self._child.kill()
+            self._child.wait()
         if self._fd >= 0:
             with contextlib.suppress(OSError):
                 os.close(self._fd)
