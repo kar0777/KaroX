@@ -2,7 +2,7 @@
 
 The chat streams into the terminal's normal scrollback (no full-screen takeover), so
 output stays searchable and copyable after the session ends. Line editing and history
-come from prompt_toolkit when the ``tui`` extra is installed; without it the chat falls
+come from prompt_toolkit (a dependency); if it cannot be imported the chat falls
 back to plain ``input()``. All I/O goes through two injected callables, so the app is
 tested without a terminal.
 """
@@ -216,14 +216,35 @@ def _plain_text(text: str) -> str:
     return _TERMINAL_CONTROL.sub("", text)
 
 
+def _git_branch(workspace: Path) -> str:
+    """The checked-out branch read from .git/HEAD (no git process: it runs before the first
+    prompt); empty when the project is not a git checkout or HEAD is detached."""
+    for folder in (workspace, *workspace.parents):
+        head = folder / ".git"
+        if head.is_file():  # a worktree: "gitdir: <path>"
+            try:
+                target = head.read_text(encoding="utf-8").split(":", 1)[1].strip()
+            except (OSError, IndexError, UnicodeDecodeError):
+                return ""
+            head = Path(target) if Path(target).is_absolute() else folder / target
+        if head.is_dir():
+            try:
+                ref = (head / "HEAD").read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                return ""
+            return ref.removeprefix("ref: refs/heads/") if ref.startswith("ref: ") else ""
+    return ""
+
+
 def _box(title: str, rows: list[tuple[str, str]], fancy: bool) -> str:
     """A framed panel: label column, then values (ANSI colors do not count as width)."""
     tl, tr, bl, br, h, v = _BOX_FANCY if fancy else _BOX_ASCII
     wide = max((len(k) for k, _ in rows), default=0)
     lines = [(f"{k:<{wide}}  {val}" if wide else val) for k, val in rows]
     seen = [len(_ANSI.sub("", ln)) for ln in lines]
-    width = max([*seen, len(title) + 2]) + 2
-    out = [tl + h + f" {title} " + h * (width - len(title) - 3) + tr]
+    shown = len(_ANSI.sub("", title))
+    width = max([*seen, shown + 2]) + 2
+    out = [tl + h + f" {title} " + h * (width - shown - 3) + tr]
     out += [f"{v} {ln}{' ' * (width - n - 1)}{v}" for ln, n in zip(lines, seen, strict=True)]
     out.append(bl + h * width + br)
     return "\n".join(out)
@@ -543,14 +564,24 @@ class ChatApp:
             return "\n".join(lines)
 
     def _banner(self) -> str:
+        """The welcome card: what runs where, and the keys a new user needs first."""
         cfg = self.config
-        head = self.paint("bold", f"KaroX {__version__}")
-        return (
-            f"{head}{self.glyph['dot']}{_plain_text(cfg.model)}"
-            f"{self.glyph['dot']}{_plain_text(str(cfg.workspace))}\n"
-            + self.paint("dim", "Type a task; /help lists commands.")
-            + "\n"
-        )
+        dot = self.glyph["dot"]
+        project = _plain_text(str(cfg.workspace))
+        branch = _git_branch(Path(cfg.workspace))
+        if branch:
+            project += self.paint("dim", f"{dot}{_plain_text(branch)}")
+        rows = [
+            ("model", _plain_text(cfg.model) + self.paint("dim", f"{dot}{cfg.provider_name}")),
+            ("project", project),
+            ("approvals", f"{self.approval_mode}" + self.paint("dim", "  (/approve to change)")),
+            ("", ""),
+            ("", self.paint("dim", f"/ commands{dot}@ attach a file{dot}Alt+Enter new line")),
+            ("", self.paint("dim", f"Esc stops the agent{dot}/help{dot}Ctrl+D quits")),
+        ]
+        fancy = self.glyph.get("box", "ascii") == "fancy"
+        card = _box(self.paint("bold", f"KaroX {__version__}"), rows, fancy)
+        return card + "\n" + self.paint("dim", "Type a task to start.") + "\n"
 
     # -- turns ----------------------------------------------------------------------
 
@@ -1448,6 +1479,11 @@ def terminal_io(
         from prompt_toolkit import PromptSession
         from prompt_toolkit.patch_stdout import patch_stdout
     except ImportError:
+        # Never degrade silently: without it there is no completion, history or live status.
+        sys.stderr.write(
+            "KaroX: prompt_toolkit is missing, so the chat runs in plain mode (no completion, "
+            "history or live status). Reinstall KaroX with its dependencies to fix it.\n"
+        )
         return _plain_read, _plain_read
 
     main = build_prompt_session(history=history, workspace=workspace, home=home)

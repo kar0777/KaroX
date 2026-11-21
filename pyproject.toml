@@ -19,7 +19,7 @@ classifiers = [
 ]
 # Core stays tiny: one HTTP client. Everything heavier lives in extras and is
 # imported lazily, so `karox --version` and an idle session stay cheap.
-dependencies = ["httpx>=0.27,<1"]
+dependencies = ["httpx>=0.27,<1", "prompt_toolkit>=3.0.40,<4"]
 
 [project.optional-dependencies]
 tui = ["prompt_toolkit>=3.0.40,<4"]

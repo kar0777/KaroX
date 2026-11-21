@@ -98,6 +98,23 @@ def test_turns_share_history(tmp_path):
     assert seen == ["hello", "first answer", "and again"]
 
 
+def test_welcome_card_shows_model_project_branch_and_keys(tmp_path):
+    term = FakeTerm(["/quit"])
+    app, _ = make_app(tmp_path, [], term)
+    git = tmp_path / "ws" / ".git"
+    git.mkdir()
+    (git / "HEAD").write_text("ref: refs/heads/feature-x\n", encoding="utf-8")
+    asyncio.run(app.run())
+    card = term.text.split("Type a task to start.")[0]
+    for part in ("KaroX ", "test", "openai-chat", str(tmp_path / "ws"), "feature-x", "ask"):
+        assert part in card
+    for key in ("/ commands", "@ attach a file", "Alt+Enter", "Esc"):
+        assert key in card
+    lines = [ln for ln in card.splitlines() if ln.strip()]
+    assert len(lines) >= 8
+    assert len({len(ln) for ln in lines}) == 1  # the frame is closed and aligned
+
+
 def test_multiline_input_and_eof(tmp_path):
     term = FakeTerm(["line one\\", "line two"])  # then EOF ends the chat
     app, _ = make_app(tmp_path, [Turn(text="ok")], term)
