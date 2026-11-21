@@ -1306,3 +1306,10 @@ git diff --check
   B's wall time 1.5x A's even at the halved budget. ab1+ab2 combined: A 12, B 12 ->
   drop by the pre-registered rule. `--review` stays as an opt-in flag, off by default;
   no further review tuning (each tweak would need another 2 x 12-task A/B to judge).
+- Dev lane "orglm" (2026-11-21, user's OpenRouter balance, budget $1, floor file in the
+  bench): GLM-5.3-Flash on OpenRouter (`:batch` is a batch-only API, 404 on chat).
+  Probe orp2 (faststream, karox6 only): 55 calls, median latency 1.6 s, 97% of input
+  cached, ~$0.04, 161 s, not solved. Run gduel2: karox6 (dev31) + opencode_v2 side by
+  side, GLM, disc tasks 1,2,3,4,6,7 (fastest), 1 attempt, parallel 3. Question: does
+  KaroX's head-to-head lead on DSV4.1F hold on a second model? Read: solved per arm,
+  tokens and time per arm; no tuning on these results.
