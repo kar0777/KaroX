@@ -1336,3 +1336,8 @@ git diff --check
 - Dahl: 12 keys now (secrets DAHL_API_KEY, _2.._12; upstream dahl2 uses all, 3 parallel
   each). Free capacity is global, so keys help only when the model has room; paid
   accounts ($0.01 per 1M tokens until 30 Nov) are admitted first.
+- Dahl free capacity back at 09:10 UTC. Run gtrio1: trio (karox6 dev31, opencode_v2
+  2.3.2, deepseek_harness rc.5), Dahl GLM-5.3-Flash with 12 keys (dahl2), disc tasks 1-12,
+  1 attempt, parallel 3 (9 agents). New baseline after the rival bump. Read: solved per
+  arm, audit tokens and calls, 429 share per arm (void a task where any arm's failed
+  calls exceed half of its calls).
