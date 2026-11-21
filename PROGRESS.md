@@ -1710,3 +1710,25 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   565 (2,140 since the reset).
 - 23:34 UTC, devc2 dispatched: run 44962415993 (bench be12460, codex alone, ReformBoss,
   disc 2). devt2b waits for it to end.
+- devc2 result (run 44962415993, 23:34-23:39 UTC; data in `karox6-bench-data/runs/devc2`):
+  FAIL, and this time the answer is about the path itself. Codex CLI 0.171.0 installed,
+  started and sent one request; the gateway bridged it to chat completions and ReformBoss
+  refused it with HTTP 400 `invalid_parameter_error` ("неверный формат или параметры",
+  `outcome: not_executed`); Codex ended its turn after 7 s. So today: Codex CLI does not
+  work through this gateway on ReformBoss, because the bridged request is not one the
+  upstream accepts. Which field it refuses the audit could not say: the audit callback
+  itself failed on that row (`litellm_params["metadata"]` is None for bridged calls), a
+  bench bug that would have dropped every row of the codex arm, successful ones included.
+  Bench 8fe67be: that bug fixed; failure rows carry the names (never the content) of the
+  final request's fields, message roles and tool types; and for the alias `hard12-codex`
+  only, the two things in a Codex request that a chat-completions upstream cannot take
+  are adapted: the `developer` role becomes `system`, tools that are not functions are
+  left out. The trio's requests are not read or changed (checked offline: identical
+  request and audit row before and after).
+- 23:40 UTC, devt2b dispatched: run 44962894203 (bench be12460, dev36 wheel named), two
+  jobs, disc 13-14 then 15-16.
+- Pre-registered devc3 (plumbing only, last attempt today; same pass rule): codex alone,
+  ReformBoss, disc task 2, bench 8fe67be, after devt2b ends and before the compaction
+  A/B. Pass = successful audit rows of harness `codex` with tool use and a run that ends
+  on its own. If the upstream refuses again, the audit now names the refused shape and
+  the report says "no: <what is refused>"; no further codex run today either way.
