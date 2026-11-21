@@ -38,6 +38,9 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "prompt_toolkit>=3.0.40,<4",
+    "pyte>=0.8.2",
+    "pywinpty>=2.0.13 ; sys_platform == 'win32'",
+    "build>=1.2",
 ]
 
 [tool.hatch.version]
