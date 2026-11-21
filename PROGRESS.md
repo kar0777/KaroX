@@ -1361,3 +1361,13 @@ git diff --check
   KaroX asked 4 times to continue in smaller pieces, OpenCode stopped after its 2
   continuations, DSH on max-tokens. A bench-profile problem (max effort + 32k cap on
   GLM), not a CLI difference.
+- Dahl caps every reply at 8192 output tokens (probe 2026-11-21, aquarium prompt,
+  streamed: high/medium finish=length out=8192 with 8,180 reasoning and no content; low
+  6,880 reasoning + 4.5k chars). The 32k max_tokens we send is ignored. Consequences: the
+  aquarium (a ~15-25k-token single file) cannot be written in one reply on Dahl by any
+  CLI -> run it on ReformBoss (32k replies). In gtrio2, calls that hit the cap with
+  reasoning only: karox6 49, opencode_v2 32, DSH 14 (wasted calls). Without them KaroX
+  still reasons ~1.6x OpenCode per call (440 vs 268): open question.
+  Idea (not built, not measurable on the bench because the gateway enforces the effort):
+  after a length cut with no content and no tool call, retry the step at a lower
+  reasoning effort instead of only asking for shorter output.
