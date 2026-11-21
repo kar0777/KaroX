@@ -1346,3 +1346,18 @@ git diff --check
   per-job gateways now pick keys at random and rest a key 3 s after a 429 (jobs cannot
   see each other's requests). Same void rule (a task where any arm's failed calls
   exceed half its calls).
+- gtrio2 (44888518176; Dahl GLM, 12 keys, 36 agents; disc 1-24, rivals OpenCode 2.3.2 /
+  DSH rc.5): solved karox6 8, opencode_v2 7, deepseek_harness 5. KaroX-only: plopp;
+  OpenCode-only: claude-code-by-agents; DSH-only: fastapi-deprecation; sentry karox6+DSH.
+  VOID by the pre-registered rule: in 22 of 24 tasks at least one arm had > 50% failed
+  calls (Dahl's free model at global capacity: ~60% of refusals; per-key collisions
+  between jobs: ~40%). Not a valid measurement; the direction matches all earlier runs.
+  Audit usage (successful calls): karox6 / opencode_v2 / DSH: calls 1125 / 1219 / 502,
+  input 49.0M / 44.1M / 14.8M, output 1069k / 772k / 346k, reasoning 875k / 580k / 265k,
+  model time 34.3k / 29.3k / 13.1k s. KaroX's reasoning per call is ~780 tokens vs
+  ~480 for OpenCode on GLM (on DSV4.1F tbd2 it was 2,200 vs 1,600): a lead to check.
+- aqua-glm1 (aquarium-3d, trio, 2 attempts): no arm wrote the file. GLM at
+  reasoning_effort=max spends the whole 32k output on reasoning (KaroX 40,998 of 41,062);
+  KaroX asked 4 times to continue in smaller pieces, OpenCode stopped after its 2
+  continuations, DSH on max-tokens. A bench-profile problem (max effort + 32k cap on
+  GLM), not a CLI difference.
