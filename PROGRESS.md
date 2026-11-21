@@ -1546,7 +1546,7 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   $0.055 / $0.049, median time to first token 2.6 s for all three. Two tasks say nothing
   about a difference; they join the sample. devt1 starts now as registered (trio, disc
   1, 3-6, 8-12, chunk 5, parallel 1, dev35 wheel).
-- 21:30 UTC, devt1 dispatched: run 44951155404 (bench commit bcfd3bb, dev35 wheel), two
+- 21:22 UTC, devt1 dispatched: run 44951155404 (bench commit bcfd3bb, dev35 wheel), two
   chunks of five tasks on one runner each, one after the other.
 - Bench: opt-in arm `codex` (Codex CLI 0.171.0, bench commit 3116d6b): Codex speaks the
   Responses API, the gateway bridges it to the lane's model under its own alias with the
