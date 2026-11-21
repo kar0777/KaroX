@@ -27,6 +27,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -529,12 +530,15 @@ async def connect(name: str, spec: dict[str, Any]) -> McpServerHandle:
     return McpServerHandle(name, connection, tools, spec=spec, call_timeout=call_timeout(spec))
 
 
-async def load_mcp_tools(path: Path) -> tuple[list[McpTool], list[McpServerHandle]]:
+async def load_mcp_tools(
+    path: Path, *, warn: Callable[[str], object] | None = None
+) -> tuple[list[McpTool], list[McpServerHandle]]:
     """Connect every configured server; return their tools and handles (close them later).
 
     On failure or cancellation part-way, the servers already connected are closed here:
     the caller never received their handles.
     """
+    report = warn or sys.stderr.write
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path}: the MCP config must be a JSON object")
@@ -550,7 +554,7 @@ async def load_mcp_tools(path: Path) -> tuple[list[McpTool], list[McpServerHandl
             handle = await asyncio.wait_for(connect(name, spec), CONNECT_TIMEOUT_S + 5)
         except Exception as exc:
             reason = str(exc) or f"{type(exc).__name__} (no answer in {CONNECT_TIMEOUT_S:g}s)"
-            sys.stderr.write(f"karox: MCP server {name!r} skipped: {reason}\n")
+            report(f"karox: MCP server {name!r} skipped: {reason}\n")
             return
         connected.append(handle)
 
@@ -566,7 +570,7 @@ async def load_mcp_tools(path: Path) -> tuple[list[McpTool], list[McpServerHandl
                 try:
                     tool = McpTool(handle, spec)
                 except Exception as exc:
-                    sys.stderr.write(
+                    report(
                         f"karox: MCP tool from {handle.name!r} skipped: {type(exc).__name__}: "
                         f"{exc}\n"
                     )

@@ -11,7 +11,7 @@ import contextlib
 import json
 import os
 import sys
-from collections.abc import Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -449,74 +449,122 @@ def _chat(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
 
 
 async def _chat_async(args: argparse.Namespace) -> int:
+    from karox6.core.config import SessionConfig
     from karox6.core.store import default_home, resume_kwargs
-    from karox6.credentials import save_key
-    from karox6.setup import run_setup
-    from karox6.tui import ChatApp, color_enabled, secret_reader, stdout_write, terminal_io
+    from karox6.tui import (
+        ChatApp,
+        _plain_text,
+        color_enabled,
+        secret_reader,
+        stdout_write,
+        terminal_display,
+        terminal_io,
+    )
 
     home = (args.home or default_home()).expanduser().resolve()
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
     if not workspace.is_dir():
         raise ValueError(f"workspace {workspace} is not a directory")
     read_line, read_answer = terminal_io(home / "chat_history")
-    read_secret = secret_reader()
-    if not args.model:
-        choice = await run_setup(read_answer, read_secret, stdout_write, home)
+
+    async def read_secret(prompt: str) -> str:
+        return await secret_reader()(prompt)
+
+    chose_model = not args.model
+    if chose_model:
+        from karox6.setup import run_setup
+
+        try:
+            choice = await run_setup(read_answer, read_secret, stdout_write, home)
+        except EOFError:
+            return 2
         if choice is None:
             return 2
         args.provider, args.base_url, args.model = choice.provider, choice.base_url, choice.model
-    config = _session_config(args, workspace, home, stream_deltas=True)
-    session_kwargs = resume_kwargs(home, args.resume, workspace=workspace) if args.resume else {}
-    provider = _provider(args)
-    if not getattr(provider, "api_key", None) and not _local_url(args.base_url):
-        stdout_write("No API key for this model yet.\n")
-        typed = (await read_secret("API key (hidden; Enter to skip): ")).strip()
+
+    mcp_handles: list[Any] | None = None
+
+    async def initialize(app: ChatApp) -> dict[str, Any]:
+        nonlocal mcp_handles
+        app.config = _session_config(args, workspace, home, stream_deltas=True)
+        session_kwargs = (
+            resume_kwargs(home, args.resume, workspace=workspace) if args.resume else {}
+        )
+        if app.provider is None:
+            # Drop the key from the environment before starting any MCP server.
+            app.provider = _provider(args)
+            app.bridge_agent_args = ["--provider", args.provider, "--model", args.model]
+            if args.base_url:
+                app.bridge_agent_args += ["--base-url", args.base_url]
+            key = getattr(app.provider, "api_key", None)
+            if key:
+                app.bridge_agent_args += ["--api-key-env", "KAROX_BRIDGE_API_KEY"]
+                app.bridge_env = {"KAROX_BRIDGE_API_KEY": key}
+        if mcp_handles is None:
+
+            def warn(message: str) -> None:
+                app.write(_plain_text(message))
+
+            app.extra_tools, mcp_handles = await _mcp_tools(args, home, warn=warn)
+        return session_kwargs
+
+    async def check_key(app: ChatApp) -> None:
+        if (
+            chose_model
+            or getattr(app.provider, "api_key", None)
+            or _local_url(getattr(app.provider, "base_url", args.base_url))
+            or not (sys.stdin.isatty() and sys.stdout.isatty())
+        ):
+            return
+        from karox6.credentials import save_key
+
+        app.write("No API key for this model yet.\n")
+        try:
+            typed = (await app.read_secret("API key (hidden; Enter to skip): ")).strip()
+        except EOFError:
+            import asyncio
+
+            raise asyncio.CancelledError from None
         if typed:
             save_key(home, typed)
-            provider.api_key = typed
-            stdout_write("key saved (encrypted for your user); /key changes it\n")
-    mcp_handles: list[Any] = []
-    # `/bridge agent` runs `karox mcp` on the chat's model: same provider flags, and the
-    # key (already dropped from this environment) handed to that child alone.
-    bridge_args = ["--provider", args.provider, "--model", args.model]
-    if args.base_url:
-        bridge_args += ["--base-url", args.base_url]
-    key = getattr(provider, "api_key", None)
-    bridge_env = {"KAROX_BRIDGE_API_KEY": key} if key else {}
-    if key:
-        bridge_args += ["--api-key-env", "KAROX_BRIDGE_API_KEY"]
-    app: ChatApp | None = None
+            app.provider.api_key = typed
+            app.bridge_agent_args += ["--api-key-env", "KAROX_BRIDGE_API_KEY"]
+            app.bridge_env = {"KAROX_BRIDGE_API_KEY": typed}
+            app.write("key saved (encrypted for your user); /key changes it\n")
+
+    app = ChatApp(
+        config=SessionConfig(
+            model=args.model, provider_name=args.provider, workspace=workspace, home=home
+        ),
+        provider=None,
+        read_line=read_line,
+        read_answer=read_answer,
+        write=stdout_write,
+        approval_mode=args.approve_dangerous,
+        color=not args.no_color and color_enabled(),
+        encoding=getattr(sys.stdout, "encoding", None),
+        read_secret=read_secret,
+        initialize=initialize,
+        before_turn=check_key,
+        display_factory=terminal_display,
+    )
     try:
-        mcp_tools, mcp_handles = await _mcp_tools(args, home)
-        app = ChatApp(
-            config=config,
-            provider=provider,
-            read_line=read_line,
-            read_answer=read_answer,
-            write=stdout_write,
-            approval_mode=args.approve_dangerous,
-            color=not args.no_color and color_enabled(),
-            encoding=getattr(sys.stdout, "encoding", None),
-            extra_tools=mcp_tools,
-            session_kwargs=session_kwargs,
-            bridge_agent_args=bridge_args,
-            bridge_env=bridge_env,
-            read_secret=read_secret,
-        )
         return await app.run()
     finally:
-        if app is not None:
-            with contextlib.suppress(Exception):
-                await app.close()
-        await provider.aclose()
-        await _close_mcp(mcp_handles)
+        with contextlib.suppress(Exception):
+            await app.close()
+        try:
+            if app.provider is not None:
+                await app.provider.aclose()
+        finally:
+            await _close_mcp(mcp_handles or [])
 
 
 def _session_config(
     args: argparse.Namespace, workspace: Path, home: Path, *, stream_deltas: bool
 ) -> Any:
+    from karox6.core.config import SessionConfig
     from karox6.core.messages import Price
-    from karox6.core.session import SessionConfig
 
     price = None
     if args.price_input is not None and args.price_output is not None:
@@ -796,7 +844,9 @@ def _http_token(args: argparse.Namespace, home: Path) -> tuple[str, Path | None]
     return saved_token(path, renew=args.new_token), path
 
 
-async def _mcp_tools(args: argparse.Namespace, home: Path) -> tuple[list[Any], list[Any]]:
+async def _mcp_tools(
+    args: argparse.Namespace, home: Path, *, warn: Callable[[str], object] | None = None
+) -> tuple[list[Any], list[Any]]:
     """Tools of the configured external MCP servers (none unless a config exists)."""
     if args.no_mcp:
         return [], []
@@ -805,7 +855,7 @@ async def _mcp_tools(args: argparse.Namespace, home: Path) -> tuple[list[Any], l
         return [], []
     from karox6.mcp.client import load_mcp_tools
 
-    tools, handles = await load_mcp_tools(path)
+    tools, handles = await load_mcp_tools(path, warn=warn)
     return list(tools), list(handles)
 
 

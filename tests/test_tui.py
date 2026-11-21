@@ -1,5 +1,8 @@
 import asyncio
+import os
 import subprocess
+import sys
+import threading
 
 import pytest
 
@@ -275,6 +278,37 @@ def test_render_stream_and_events(tmp_path):
     assert "error: bad" in text
 
 
+def test_progress_follows_parallel_calls_and_keeps_output_compact(tmp_path):
+    term = FakeTerm()
+    app, _ = make_app(tmp_path, [], term)
+    app._turn_started = 0
+    app.render(ev.ToolStarted("a", "grep", "{}"))
+    app.render(ev.ToolStarted("b", "read", "{}"))
+    assert "Running grep, read" in app._progress()
+    app.render(ev.ToolFinished("a", "grep", False, "x" * 50_000 + "\nsecond line", 10))
+    assert "Running read" in app._progress()
+    app.render(ev.ToolFinished("b", "read", False, "one\ntwo\n", 10))
+    assert "Model thinking" in app._progress()
+    assert len(term.text) < 240
+    assert "second line" not in term.text
+    assert "2 lines" in term.text
+
+
+def test_stream_retains_deltas_and_ignores_non_printed_events(tmp_path):
+    term = FakeTerm()
+    app, _ = make_app(tmp_path, [], term)
+    app.render(ev.TextDelta("hello "))
+    assert term.text == "hello "
+    app.render(ev.UsageUpdate(1, {}, {}, None, None))
+    app.render(ev.TextDelta("world\n"))
+    app.render(ev.AssistantMessage(step=1, text="hello world\n"))
+    assert term.text == "hello world\n"
+    app.render(ev.TextDelta("partial response"))
+    app.render(ev.Retry(attempt=2, delay_s=1, error="retry"))
+    app.render(ev.AssistantMessage(step=2, text="complete response"))
+    assert term.text.endswith("complete response\n")
+
+
 def test_helpers():
     assert Palette(True)("red", "x") == "\x1b[31mx\x1b[0m"
     assert Palette(False)("red", "x") == "x"
@@ -306,3 +340,165 @@ def test_resume_last_skips_empty_and_current_sessions(tmp_path):
     assert SessionStore.latest(app2.config.home) == used
     asyncio.run(app2.run())
     assert app2.session.session_id == used
+
+
+def test_cli_reaches_prompt_without_runtime_setup(tmp_path, monkeypatch):
+    from karox6 import tui
+
+    settings = tmp_path / "config.toml"
+    settings.write_text('model = "configured"\n', encoding="utf-8")
+    monkeypatch.setenv("KAROX_CONFIG", str(settings))
+    monkeypatch.delenv("KAROX_MODEL", raising=False)
+    captured = []
+    lines = iter(("/help", "/quit"))
+
+    async def read(prompt):
+        captured.append(prompt)
+        return next(lines)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("runtime loaded before a task or session command")
+
+    monkeypatch.setattr(tui, "terminal_io", lambda history: (read, read))
+    monkeypatch.setattr(tui, "stdout_write", captured.append)
+    monkeypatch.setattr(tui, "secret_reader", unexpected)
+    monkeypatch.setattr(cli, "_provider", unexpected)
+    monkeypatch.setattr(cli, "_mcp_tools", unexpected)
+    assert cli.main(["chat", "--home", str(tmp_path), "--cwd", str(tmp_path)]) == 0
+    assert "configured" in captured[0]
+    assert captured.count(tui._glyphs(sys.stdout.encoding)["prompt"]) == 2
+    assert not (tmp_path / "sessions").exists()
+
+
+def test_cli_initializes_after_input_and_reuses_runtime(tmp_path, monkeypatch, capsys):
+    from karox6 import tui
+
+    timeline = []
+    tasks = iter(("first task", "second task", "/quit"))
+    provider = ScriptedProvider([Turn(text="first reply"), Turn(text="second reply")])
+
+    async def read(prompt):
+        task = next(tasks)
+        timeline.append(task)
+        return task
+
+    def create_provider(args):
+        timeline.append("provider")
+        return provider
+
+    async def connect(args, home, *, warn):
+        timeline.append("mcp")
+        warn("server unavailable\x1b[2J\n")
+        return [], ["fake handle"]
+
+    async def close(handles):
+        assert handles == ["fake handle"]
+        timeline.append("closed")
+
+    monkeypatch.setenv("KAROX_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setattr(tui, "terminal_io", lambda history: (read, read))
+    monkeypatch.setattr(cli, "_provider", create_provider)
+    monkeypatch.setattr(cli, "_mcp_tools", connect)
+    monkeypatch.setattr(cli, "_close_mcp", close)
+    assert cli.main(["chat", "--model", "test", "--home", str(tmp_path)]) == 0
+    assert timeline == ["first task", "provider", "mcp", "second task", "/quit", "closed"]
+    capture = capsys.readouterr()
+    assert "server unavailable\n" in capture.out
+    assert "\x1b" not in capture.out
+    assert capture.err == ""
+    assert [m.content for m in provider.requests[1].messages] == [
+        "first task",
+        "first reply",
+        "second task",
+    ]
+
+
+def test_cancelled_initialization_keeps_one_session_factory(tmp_path, monkeypatch):
+    term = FakeTerm()
+    provider = ScriptedProvider([Turn(text="after cancellation")])
+    initializes = []
+
+    async def initialize(app):
+        initializes.append(app)
+        return {}
+
+    app = ChatApp(
+        config=SessionConfig(model="test", workspace=tmp_path, home=tmp_path / "home"),
+        provider=provider,
+        read_line=term.read_line,
+        write=term.write,
+        initialize=initialize,
+    )
+    new_session = app._new_session
+    release = threading.Event()
+    built = []
+
+    async def go():
+        started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def create(**kwargs):
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(timeout=5)
+            built.append(new_session(**kwargs))
+            return built[-1]
+
+        monkeypatch.setattr(app, "_new_session", create)
+        first = asyncio.create_task(app.turn("cancelled during preparation"))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            first.cancel()
+            assert await asyncio.wait_for(first, 2) == "cancelled"
+        finally:
+            release.set()
+        assert await app.turn("continue") == "completed"
+
+    asyncio.run(go())
+    assert initializes == [app]
+    assert built == [app.session]
+    assert provider.requests[0].messages[0].content == "continue"
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "cp1251"])
+def test_piped_chat_decodes_cyrillic_and_emits_no_terminal_controls(tmp_path, encoding):
+    code = r"""
+import sys
+from karox6 import cli
+from karox6.providers.scripted import ScriptedProvider, Turn
+provider = ScriptedProvider([Turn(text="\x1b[31mОтвет\x1b[0m")])
+cli._provider = lambda args: provider
+assert cli.main(["chat", "--model", "test", "--no-mcp", "--home", sys.argv[1]]) == 0
+assert provider.requests[0].messages[0].content == "Привет мир"
+"""
+    env = {
+        **os.environ,
+        "PYTHONIOENCODING": "cp1251",
+        "KAROX_CONFIG": str(tmp_path / "missing.toml"),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        input="Привет мир\r\n".encode(encoding),
+        env=env,
+        capture_output=True,
+        check=True,
+    )
+    assert "Ответ" in result.stdout.decode().splitlines()
+    assert b"\x1b" not in result.stdout
+
+
+def test_legacy_console_output_and_no_color(monkeypatch):
+    import io
+
+    from karox6.tui import color_enabled, stdout_write
+
+    class LegacyConsole(io.TextIOWrapper):
+        def isatty(self):
+            return True
+
+    stream = LegacyConsole(io.BytesIO(), encoding="cp1251")
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setenv("NO_COLOR", "1")
+    cli.safe_streams()
+    assert not color_enabled()
+    stdout_write("Кириллица🙂")
+    assert stream.buffer.getvalue().decode("cp1251") == "Кириллица?"

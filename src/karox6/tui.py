@@ -14,22 +14,28 @@ import contextlib
 import os
 import re
 import sys
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from karox6 import __version__
-from karox6.bridge import Bridge, BridgeError
 from karox6.core import events as ev
 from karox6.core.digest import brief, outcome
-from karox6.core.session import Session, SessionConfig
-from karox6.core.store import recent_sessions, resume_kwargs
-from karox6.tools.base import ApprovalRequest, Tool
+
+if TYPE_CHECKING:
+    from karox6.bridge import Bridge
+    from karox6.core.config import SessionConfig
+    from karox6.core.session import Session
+    from karox6.tools.base import ApprovalRequest, Tool
+    from karox6.tui_terminal import TurnDisplay
 
 ReadLine = Callable[[str], Awaitable[str]]  # raises EOFError at end of input
 Write = Callable[[str], None]
+DisplayFactory = Callable[[Write, Callable[[], str], Callable[[], None]], "TurnDisplay | None"]
 
 APPROVAL_MODES = ("ask", "allow", "deny")
+_EARLY_COMMANDS = frozenset(("/help", "/approve", "/reasoning", "/q", "/quit", "/exit"))
 DIFF_CAP = 40_000
 HELP = """Commands:
   /help                     this help
@@ -48,7 +54,7 @@ HELP = """Commands:
                             KaroX's tools; agent: they hand tasks to KaroX's own model)
   /bridge url | log | stop  the secret no-auth link, recent requests, stop (also on exit)
   /quit                     leave (Ctrl+D works too)
-Ctrl+C stops the running turn. End a line with \\ to continue on the next line."""
+Esc or Ctrl+C stops the running turn. End a line with \\ to continue on the next line."""
 
 _CODES = {"dim": "2", "bold": "1", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
 
@@ -80,6 +86,16 @@ def _glyphs(encoding: str | None) -> dict[str, str]:
 _BOX_FANCY = ("╭", "╮", "╰", "╯", "─", "│")
 _BOX_ASCII = ("+", "+", "+", "+", "-", "|")
 _ANSI = re.compile("\x1b\\[[0-9;]*m")
+_TERMINAL_CONTROL = re.compile(
+    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+    r"|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
+    r"|[\x00-\x08\x0b-\x1f\x7f-\x9f]"
+)
+
+
+def _plain_text(text: str) -> str:
+    # Keep newlines and tabs. Model and tool output must never move the terminal cursor.
+    return _TERMINAL_CONTROL.sub("", text)
 
 
 def _box(title: str, rows: list[tuple[str, str]], fancy: bool) -> str:
@@ -93,6 +109,11 @@ def _box(title: str, rows: list[tuple[str, str]], fancy: bool) -> str:
     out += [f"{v} {ln}{' ' * (width - n - 1)}{v}" for ln, n in zip(lines, seen, strict=True)]
     out.append(bl + h * width + br)
     return "\n".join(out)
+
+
+class _PromptInterrupt(KeyboardInterrupt):
+    def __init__(self, empty: bool) -> None:
+        self.empty = empty
 
 
 class ChatApp:
@@ -112,13 +133,16 @@ class ChatApp:
         bridge_agent_args: list[str] | None = None,
         bridge_env: dict[str, str] | None = None,
         read_secret: ReadLine | None = None,
+        initialize: Callable[[ChatApp], Awaitable[dict[str, Any]]] | None = None,
+        before_turn: Callable[[ChatApp], Awaitable[None]] | None = None,
+        display_factory: DisplayFactory | None = None,
     ) -> None:
         if approval_mode not in APPROVAL_MODES:
             raise ValueError(f"approval mode must be one of {APPROVAL_MODES}")
         self.config = config
         self.provider = provider
         self.read_line = read_line
-        self.read_answer = read_answer or read_line
+        self._read_answer = read_answer or read_line
         self.write = write
         self.approval_mode = approval_mode
         self.paint = Palette(color)
@@ -127,15 +151,53 @@ class ChatApp:
         self.show_reasoning = False
         self._stream: str | None = None  # "text" | "reasoning" while a delta stream is open
         self._streamed_text = False
-        self.session = self._new_session(**(session_kwargs or {}))
-        self.bridge = Bridge(config.home)
+        self._stream_newline = False
+        self._initialize = initialize
+        self._before_turn = before_turn
+        self._session_task: asyncio.Task[Session] | None = None
+        self._display_factory = display_factory
+        self._display: TurnDisplay | None = None
+        self._turn_started = 0.0
+        self._phase = ""
+        self._active_tools: dict[str, str] = {}
+        self.session: Session
+        if initialize is None:
+            self.session = self._new_session(**(session_kwargs or {}))
+        self._bridge_instance: Bridge | None = None
         self.bridge_agent_args = list(bridge_agent_args or [])
         self.bridge_env = dict(bridge_env or {})
-        self.read_secret = read_secret or self.read_answer
+        self._read_secret = read_secret or self._read_answer
+        self._question_lock = asyncio.Lock()
+        self._turn_running = False
 
     # -- lifecycle ------------------------------------------------------------------
 
+    @property
+    def bridge(self) -> Bridge:
+        from karox6.bridge import Bridge
+
+        if self._bridge_instance is None:
+            self._bridge_instance = Bridge(self.config.home)
+        return self._bridge_instance
+
+    async def _ensure_session(self) -> None:
+        if self._initialize is not None:
+            if self._session_task is None:
+                kwargs = await self._initialize(self)
+                self._session_task = asyncio.create_task(
+                    asyncio.to_thread(self._new_session, **kwargs)
+                )
+            try:
+                self.session = await asyncio.shield(self._session_task)
+            except Exception:
+                self._session_task = None
+                raise
+            self._session_task = None
+            self._initialize = None
+
     def _new_session(self, **kwargs: Any) -> Session:
+        from karox6.core.session import Session
+
         return Session(
             self.config,
             self.provider,
@@ -146,34 +208,53 @@ class ChatApp:
 
     async def run(self) -> int:
         self.write(self._banner())
+        exit_armed = False
         while True:
             try:
                 text = (await self._read_prompt()).strip()
             except EOFError:
                 break
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as exc:
+                empty = not isinstance(exc, _PromptInterrupt) or exc.empty
+                if empty and exit_armed:
+                    break
+                exit_armed = empty
+                if empty:
+                    self.write("Press Ctrl+C again to exit.\n")
                 continue
+            exit_armed = False
             if not text:
                 continue
             if text.startswith("/"):
+                if text.partition(" ")[0].lower() not in _EARLY_COMMANDS:
+                    await self._ensure_session()
                 if await self.command(text) == "quit":
                     break
                 continue
-            await self.turn(text)
+            exit_armed = await self.turn(text) == "cancelled"
         await self.close()
         self.write("\n")
         return 0
 
     async def close(self) -> None:
         """Stop what the chat started beside it (the bridge and its Tailscale route)."""
-        if self.bridge.running():
+        if self._session_task is not None:
+            with contextlib.suppress(Exception):
+                await self._session_task
+            self._session_task = None
+        if self._bridge_instance is not None and self._bridge_instance.running():
             self.write("stopping the bridge...\n")
-            await asyncio.to_thread(self.bridge.stop)
+            await asyncio.to_thread(self._bridge_instance.stop)
 
     async def _read_prompt(self) -> str:
         lines: list[str] = []
         while True:
-            line = await self.read_line(self.glyph["more"] if lines else self.glyph["prompt"])
+            try:
+                line = await self.read_line(self.glyph["more"] if lines else self.glyph["prompt"])
+            except KeyboardInterrupt as exc:
+                if lines:
+                    raise _PromptInterrupt(empty=False) from exc
+                raise
             if line.endswith("\\"):
                 lines.append(line[:-1])
                 continue
@@ -184,7 +265,8 @@ class ChatApp:
         cfg = self.config
         head = self.paint("bold", f"KaroX {__version__}")
         return (
-            f"{head}{self.glyph['dot']}{cfg.model}{self.glyph['dot']}{cfg.workspace}\n"
+            f"{head}{self.glyph['dot']}{_plain_text(cfg.model)}"
+            f"{self.glyph['dot']}{_plain_text(str(cfg.workspace))}\n"
             + self.paint("dim", "Type a task; /help lists commands.")
             + "\n"
         )
@@ -193,70 +275,153 @@ class ChatApp:
 
     async def turn(self, text: str) -> str:
         """Run one user turn; Ctrl+C (cancellation of the caller) stops only this turn."""
-        status = "error"
-        worker = asyncio.create_task(self._consume(text))
-        restore = _trap_sigint(worker)
+        self._turn_started = time.monotonic()
+        self._phase = "Preparing session" if self._initialize is not None else "Model thinking"
+        self._active_tools.clear()
+        self._streamed_text = False
+        ready = asyncio.Event()
+
+        async def consume() -> str:
+            await ready.wait()
+            return await self._consume(text)
+
+        worker = asyncio.create_task(consume())
+
+        def interrupt() -> None:
+            # Repeated keys during cleanup must not cancel the cleanup itself.
+            if not worker.done() and not worker.cancelling():
+                self._phase = "Stopping"
+                self._active_tools.clear()
+                worker.cancel()
+
+        write = self.write
+        restore = _trap_sigint(interrupt)
+        self._turn_running = True
         try:
-            status = await worker
-        except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                current.uncancel()
-            worker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await worker
-            self._end_stream()
-            self.write(self.paint("yellow", "[stopped]") + "\n")
-            status = "cancelled"
+            display = (
+                self._display_factory(write, self._progress, interrupt)
+                if self._display_factory
+                else None
+            )
+            async with display if display is not None else contextlib.nullcontext():
+                if display is None:
+                    self.write(f"  {self._phase}...\n")
+                else:
+                    self._display = display
+                    self.write = display.write
+                ready.set()
+                try:
+                    return await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        current.uncancel()
+                    interrupt()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await worker
+                    self._end_stream()
+                    self.write(self.paint("yellow", "[stopped]") + "\n")
+                    return "cancelled"
         finally:
-            restore()
-        return status
+            self._turn_running = False
+            self._display = None
+            self.write = write
+            try:
+                if not worker.done():
+                    interrupt()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await worker
+            finally:
+                restore()
+
+    def _progress(self) -> str:
+        elapsed = time.monotonic() - self._turn_started
+        spinner = "|/-\\"[int(elapsed * 8) % 4]
+        phase = self._phase
+        if self._active_tools:
+            phase = "Running " + ", ".join(dict.fromkeys(self._active_tools.values()))
+        return f"{spinner} {elapsed:.1f}s  {phase}"
 
     async def _consume(self, text: str) -> str:
+        await self._ensure_session()
+        if self._before_turn is not None:
+            await self._before_turn(self)
+            self._before_turn = None
+        self._phase = "Model thinking"
         status = "error"
-        async for event in self.session.run(text):
-            self.render(event)
-            if isinstance(event, ev.RunFinished):
-                status = event.status
+        count = 0
+        async with contextlib.aclosing(self.session.run(text)) as events:
+            async for event in events:
+                if isinstance(event, ev.RunFinished):
+                    status = event.status
+                    if status == "cancelled":
+                        continue  # the turn prints its stop marker after cleanup
+                self.render(event)
+                count += 1
+                if count % 32 == 0:
+                    await asyncio.sleep(0)
         return status
 
     def render(self, event: ev.Event) -> None:
         p, g = self.paint, self.glyph
         if isinstance(event, ev.TextDelta):
             self._open("text")
+            self._phase = "Model responding"
             self._streamed_text = True
-            self.write(event.text)
+            text = _plain_text(event.text)
+            self.write(text)
+            if text:
+                self._stream_newline = text.endswith("\n")
             return
         if isinstance(event, ev.ReasoningDelta):
+            self._phase = "Model thinking"
             if self.show_reasoning:
                 self._open("reasoning")
-                self.write(p("dim", event.text))
+                text = _plain_text(event.text)
+                self.write(p("dim", text))
+                if text:
+                    self._stream_newline = text.endswith("\n")
             return
         if isinstance(event, ev.AssistantMessage):
             if event.text and not self._streamed_text:
                 self._end_stream()
-                self.write(event.text.rstrip() + "\n")
+                self.write(_plain_text(event.text).rstrip() + "\n")
             self._streamed_text = False
             self._end_stream()
             return
+        if isinstance(
+            event, ev.UsageUpdate | ev.RunStarted | ev.ApprovalRequested | ev.ApprovalResolved
+        ):
+            return
         self._end_stream()
         if isinstance(event, ev.ToolStarted):
+            name = " ".join(_plain_text(event.name).split())[:80]
+            self._active_tools[event.call_id] = name
             pad = "    " if "/" in event.name else ""  # a subagent's call, under its agent line
             self.write(
-                f"{pad}{p('cyan', g['tool'])} {p('bold', event.name)} {brief(event.arguments)}\n"
+                f"{pad}{p('cyan', g['tool'])} {p('bold', name)} "
+                f"{_plain_text(brief(event.arguments))}\n"
             )
         elif isinstance(event, ev.ToolFinished):
+            self._active_tools.pop(event.call_id, None)
+            self._phase = "Model thinking"
             pad = "    " if "/" in event.name else ""
             mark = p("red", g["fail"]) if event.is_error else p("green", g["ok"])
             secs = f"{event.duration_ms / 1000:.1f}s"
-            self.write(f"{pad}  {mark} {p('dim', secs)} {p('dim', outcome(event))}\n")
+            self.write(f"{pad}  {mark} {p('dim', secs)} {p('dim', _plain_text(outcome(event)))}\n")
         elif isinstance(event, ev.Retry):
+            self._streamed_text = False
+            self._phase = f"Retrying model (attempt {event.attempt})"
+            error = _plain_text(event.error)[:120]
             self.write(
-                p("dim", f"  retry {event.attempt} in {event.delay_s:.0f}s: {event.error[:120]}")
+                p(
+                    "dim",
+                    f"  retry {event.attempt} in {event.delay_s:.0f}s: {error}",
+                )
                 + "\n"
             )
         elif isinstance(event, ev.Notice):
-            self.write(p("yellow", f"  [{event.kind}] {event.text[:200]}") + "\n")
+            self.write(p("yellow", f"  [{event.kind}] {_plain_text(event.text)[:200]}") + "\n")
         elif isinstance(event, ev.Compacted):
             self.write(
                 p(
@@ -267,8 +432,9 @@ class ChatApp:
                 + "\n"
             )
         elif isinstance(event, ev.ErrorEvent):
-            self.write(p("red", f"error: {event.message}") + "\n")
+            self.write(p("red", f"error: {_plain_text(event.message)}") + "\n")
         elif isinstance(event, ev.RunFinished):
+            self._phase = "Finishing"
             self.write(self._footer(event) + "\n")
 
     def _footer(self, event: ev.RunFinished) -> str:
@@ -284,7 +450,9 @@ class ChatApp:
             parts.append(f"{len(event.files_changed)} files changed (/diff)")
         color = "green" if event.status == "completed" else "yellow"
         head = self.paint(color, f"[{event.status}]")
-        reason = f" {event.reason}" if event.reason and event.status != "completed" else ""
+        reason = (
+            f" {_plain_text(event.reason)}" if event.reason and event.status != "completed" else ""
+        )
         return f"{head}{reason} " + self.paint("dim", self.glyph["dot"].join(parts))
 
     def _open(self, kind: str) -> None:
@@ -296,12 +464,37 @@ class ChatApp:
 
     def _end_stream(self) -> None:
         if self._stream is not None:
-            self.write("\n")
+            if not self._stream_newline:
+                self.write("\n")
             self._stream = None
+            self._stream_newline = False
 
     # -- approvals ------------------------------------------------------------------
 
+    async def _read_question(self, reader: ReadLine, prompt: str) -> str:
+        try:
+            if self._display is None:
+                return await reader(prompt)
+            async with self._display.pause():
+                return await reader(prompt)
+        except KeyboardInterrupt:
+            if not self._turn_running:
+                raise
+            self._phase = "Stopping"
+            self._active_tools.clear()
+            raise asyncio.CancelledError from None
+
+    async def read_answer(self, prompt: str) -> str:
+        return await self._read_question(self._read_answer, prompt)
+
+    async def read_secret(self, prompt: str) -> str:
+        return await self._read_question(self._read_secret, prompt)
+
     async def _approve(self, request: ApprovalRequest) -> bool:
+        async with self._question_lock:
+            return await self._ask_approval(request)
+
+    async def _ask_approval(self, request: ApprovalRequest) -> bool:
         if self.approval_mode == "allow":
             return True
         self._end_stream()
@@ -313,8 +506,8 @@ class ChatApp:
             )
             return False
         self.write(
-            self.paint("yellow", f"! {request.reason}")
-            + f"\n  rule: {request.rule}\n  command: {request.summary}\n"
+            self.paint("yellow", f"! {_plain_text(request.reason)}")
+            + f"\n  rule: {_plain_text(request.rule)}\n  command: {_plain_text(request.summary)}\n"
         )
         try:
             answer = (await self.read_answer("  Run it? [y/N/a = always] ")).strip().lower()
@@ -328,6 +521,8 @@ class ChatApp:
     # -- commands -------------------------------------------------------------------
 
     async def command(self, line: str) -> str | None:
+        from karox6.core.store import recent_sessions, resume_kwargs
+
         name, _, rest = line.partition(" ")
         arg = rest.strip()
         name = name.lower()
@@ -419,6 +614,8 @@ class ChatApp:
         self.write(f"now using {choice.model}\n")
 
     async def _bridge(self, arg: str) -> None:
+        from karox6.bridge import BridgeError
+
         b = self.bridge
         if arg == "stop":
             if not b.running():
@@ -549,7 +746,7 @@ class ChatApp:
         return line
 
 
-def _trap_sigint(worker: asyncio.Task[Any]) -> Callable[[], None]:
+def _trap_sigint(interrupt: Callable[[], None]) -> Callable[[], None]:
     """While a turn runs, Ctrl+C cancels that turn only, every time.
 
     asyncio.run cancels the main task on the first SIGINT but raises KeyboardInterrupt on
@@ -564,7 +761,7 @@ def _trap_sigint(worker: asyncio.Task[Any]) -> Callable[[], None]:
     previous = signal.getsignal(signal.SIGINT)
     try:
         # POSIX: the loop's wakeup fd wakes it whichever thread receives the signal.
-        loop.add_signal_handler(signal.SIGINT, worker.cancel)
+        loop.add_signal_handler(signal.SIGINT, interrupt)
     except (NotImplementedError, RuntimeError, ValueError):
         pass  # Windows: no loop signal handlers; a plain handler below
     else:
@@ -576,7 +773,7 @@ def _trap_sigint(worker: asyncio.Task[Any]) -> Callable[[], None]:
         return restore_posix
 
     def on_sigint(_signum: int, _frame: Any) -> None:
-        loop.call_soon_threadsafe(worker.cancel)
+        loop.call_soon_threadsafe(interrupt)
 
     try:
         signal.signal(signal.SIGINT, on_sigint)
@@ -596,32 +793,67 @@ def _k(n: int) -> str:
 # -- terminal wiring ------------------------------------------------------------------
 
 
+def terminal_display(
+    write: Write, status: Callable[[], str], interrupt: Callable[[], None]
+) -> TurnDisplay | None:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        from karox6.tui_terminal import TurnDisplay
+    except ImportError:
+        return None
+    return TurnDisplay(write, status, interrupt)
+
+
 def terminal_io(history: Path | None) -> tuple[ReadLine, ReadLine]:
     """Prompt readers: prompt_toolkit (history, editing) if installed, else input()."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return _plain_read, _plain_read  # piped input: no line editor
     try:
         from prompt_toolkit import PromptSession
-        from prompt_toolkit.history import FileHistory, InMemoryHistory
+        from prompt_toolkit.history import FileHistory, History, InMemoryHistory, ThreadedHistory
+        from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
         from prompt_toolkit.patch_stdout import patch_stdout
     except ImportError:
         return _plain_read, _plain_read
 
-    store: Any = InMemoryHistory()
-    if history is not None:
-        with contextlib.suppress(OSError):
-            history.parent.mkdir(parents=True, exist_ok=True)
-            store = FileHistory(str(history))
-    main: PromptSession[str] = PromptSession(history=store)
-    answers: PromptSession[str] = PromptSession()
+    class ChatHistory(FileHistory):
+        def load_history_strings(self) -> Iterable[str]:
+            with contextlib.suppress(OSError):
+                yield from super().load_history_strings()
+
+        def store_string(self, string: str) -> None:
+            with contextlib.suppress(OSError):
+                Path(os.fsdecode(self.filename)).parent.mkdir(parents=True, exist_ok=True)
+                super().store_string(string)
+
+    store: History = ThreadedHistory(ChatHistory(history)) if history else InMemoryHistory()
+    keys = KeyBindings()
+
+    @keys.add("c-c", eager=True)
+    @keys.add("<sigint>", eager=True)
+    def interrupt(event: KeyPressEvent) -> None:
+        event.app.exit(
+            exception=_PromptInterrupt(empty=not event.current_buffer.text),
+            style="class:aborting",
+        )
+
+    main: PromptSession[str] = PromptSession(history=store, key_bindings=keys)
+    answers: PromptSession[str] | None = None
 
     async def read_line(prompt: str) -> str:
         return await main.prompt_async(prompt)
 
     async def read_answer(prompt: str) -> str:
+        from karox6.tui_terminal import question_bindings
+
+        nonlocal answers
+        if answers is None:
+            answers = PromptSession(key_bindings=question_bindings())
+            answers.app.ttimeoutlen = 0.12
         # Tool events of parallel calls may print while the question is open.
         with patch_stdout(raw=True):
-            return await answers.prompt_async(prompt)
+            return await answers.prompt_async(prompt, handle_sigint=False)
 
     return read_line, read_answer
 
@@ -632,10 +864,13 @@ def secret_reader() -> ReadLine:
         try:
             from prompt_toolkit import PromptSession
 
-            session: Any = PromptSession()
+            from karox6.tui_terminal import question_bindings
+
+            session: PromptSession[str] = PromptSession(key_bindings=question_bindings())
+            session.app.ttimeoutlen = 0.12
 
             async def hidden(prompt: str) -> str:
-                return str(await session.prompt_async(prompt, is_password=True))
+                return await session.prompt_async(prompt, is_password=True, handle_sigint=False)
 
             return hidden
         except ImportError:
@@ -650,7 +885,22 @@ def secret_reader() -> ReadLine:
 
 
 async def _plain_read(prompt: str) -> str:
-    return await asyncio.to_thread(input, prompt)
+    return await asyncio.to_thread(_plain_input, prompt)
+
+
+def _plain_input(prompt: str) -> str:
+    stream = getattr(sys.stdin, "buffer", None)
+    if sys.stdin.isatty() or stream is None:
+        return input(prompt)
+    stdout_write(prompt)
+    data: bytes = stream.readline()
+    if not data:
+        raise EOFError
+    try:
+        line = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        line = data.decode(sys.stdin.encoding or "utf-8", errors="replace")
+    return line.removesuffix("\n").removesuffix("\r")
 
 
 def color_enabled(stream: Any = None) -> bool:
@@ -662,5 +912,20 @@ def color_enabled(stream: Any = None) -> bool:
 
 
 def stdout_write(text: str) -> None:
+    if not sys.stdout.isatty():
+        text = _plain_text(text)
+    elif sys.platform == "win32" and "\x1b" in text:
+        # Win32Output sets native attributes in conhost and negotiates VT mode in
+        # Windows Terminal. Direct writes of SGR codes may appear literally.
+        if sys.stdout is sys.__stdout__:
+            try:
+                from prompt_toolkit import print_formatted_text
+                from prompt_toolkit.formatted_text import ANSI
+            except ImportError:
+                pass
+            else:
+                print_formatted_text(ANSI(text), end="")
+                return
+        text = _plain_text(text)
     sys.stdout.write(text)
     sys.stdout.flush()

@@ -15,8 +15,8 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncGenerator, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +30,9 @@ from karox6.context.compaction import (
 )
 from karox6.context.spill import limit_output
 from karox6.core import events as ev
+from karox6.core.config import SessionConfig as SessionConfig  # noqa: PLC0414
 from karox6.core.loopguard import LoopGuard
-from karox6.core.messages import Message, Price, ToolCall, Usage
+from karox6.core.messages import Message, ToolCall, Usage
 from karox6.core.prompt import build_system_prompt
 from karox6.core.review import (
     REVIEW_APPEND,
@@ -50,7 +51,6 @@ from karox6.core.snapshot import write_snapshot
 from karox6.core.store import (
     CANCELLED_RESULT,
     SessionStore,
-    default_home,
     new_session_id,
 )
 from karox6.providers.base import (
@@ -59,7 +59,6 @@ from karox6.providers.base import (
     ModelResponse,
     Provider,
     ProviderError,
-    RetryPolicy,
     complete_with_retry,
 )
 from karox6.tools.base import (
@@ -101,56 +100,6 @@ FINAL_NOTICE = (
     "This run has taken {steps} steps. Stop now: reply with your final summary (what you "
     "changed, what is verified, what remains) without calling more tools."
 )
-
-
-@dataclass(slots=True)
-class SessionConfig:
-    model: str
-    provider_name: str = "openai-chat"
-    workspace: Path = field(default_factory=Path.cwd)
-    home: Path = field(default_factory=default_home)
-    max_steps: int | None = None
-    max_seconds: float | None = None
-    max_cost_usd: float | None = None
-    max_output_tokens: int | None = None
-    context_window: int | None = None  # what the served model accepts (None: unknown)
-    context_limit: int = 400_000  # the user's working budget; the smaller of the two counts
-    compact_at_tokens: int | None = None  # default: derived from the effective window
-    temperature: float | None = None
-    reasoning_effort: str | None = None
-    price: Price | None = None
-    apply_patch: bool = False
-    replay_reasoning: str = "turn"  # all | turn | none
-    loop_hard_stop: int = 20
-    snapshot_on_finish: bool = True  # copy changed files to submissions/NN (grading)
-    max_parallel: int = 10
-    stream_deltas: bool = False
-    extra_body: dict[str, Any] = field(default_factory=dict)
-    system_prompt: str | None = None  # replaces the base prompt (environment is still added)
-    system_append: str | None = None  # appended after the base prompt (A/B variants, users)
-    subagents: bool = False  # offer the `agent` tool (M5, off until it wins an A/B)
-    code_mode: bool = False  # offer `run_code` (M5, off until it wins an A/B)
-    copy_notes: bool = False  # edit lists other copies of replaced code (off until A/B)
-    command_wait_cap_s: int | None = None  # foreground wait cap per command (off until A/B)
-    wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)
-    deadline_notice_s: int | None = None  # warn this long before max_seconds (off until A/B)
-    review: bool = False  # independent review before finishing (core/review.py; off until A/B)
-    step_notices: dict[int, str] = field(default_factory=dict)  # step -> notice (the review)
-    retry: RetryPolicy = field(default_factory=RetryPolicy)
-
-    def effective_window(self, learned: int | None = None) -> int:
-        """Tokens the conversation may use: the user's limit, capped by the model's window
-        when it is known and by what a context-window error taught the session."""
-        known = [v for v in (self.context_window, self.context_limit, learned) if v]
-        return min(known) if known else 400_000
-
-    def compaction_threshold(self, learned: int | None = None) -> int:
-        if self.compact_at_tokens:
-            return self.compact_at_tokens
-        window = self.effective_window(learned)
-        reserve = (self.max_output_tokens or 32_000) + 16_000
-        # A small window (local models) still compacts below its size.
-        return max(int(min(window * 0.8, window - reserve)), min(8_000, window // 2))
 
 
 class Session:
@@ -225,7 +174,7 @@ class Session:
 
     # -- public -------------------------------------------------------------------
 
-    async def run(self, prompt: str) -> AsyncIterator[ev.Event]:
+    async def run(self, prompt: str) -> AsyncGenerator[ev.Event, None]:
         """Run one user turn; yields events until (and including) ``RunFinished``."""
         queue: asyncio.Queue[ev.Event | None] = asyncio.Queue()
 
@@ -553,7 +502,17 @@ class Session:
                         if nxt is None or not nxt.read_only:
                             break
                         batch.append(index + len(batch))
-                    await asyncio.gather(*(one(i) for i in batch))
+                    tasks = [asyncio.create_task(one(i)) for i in batch]
+                    try:
+                        await asyncio.gather(*tasks)
+                    except BaseException:
+                        # When one tool aborts an approval, gather does not cancel its
+                        # siblings itself. Wait for all tool cleanup before returning.
+                        for task in tasks:
+                            if not task.done() and not task.cancelling():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        raise
                     index += len(batch)
                 else:
                     await one(index)
