@@ -362,9 +362,13 @@ class EditTool:
             _shown_text(changed_snippet(text, updated.replace("\r\n", "\n"))) if count == 1 else ""
         )
         copies = await _copies_note(ctx, path, old_n, new_n) if ctx.copy_notes else ""
+        meta: dict[str, Any] = {"path": str(path), "match": how}
+        if count == 1 and how == "exactly":
+            # 1-based line where the replaced text began (the chat numbers its preview)
+            meta["line"] = text.count("\n", 0, text.find(old_n)) + 1
         return ToolResult(
             f"Edited {shown}: replaced {count} occurrence{plural}{note}.{snippet}{copies}",
-            meta={"path": str(path), "match": how},
+            meta=meta,
         )
 
 

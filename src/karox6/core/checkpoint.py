@@ -1,11 +1,12 @@
 """Workspace snapshots for ``/undo``: a private git object store beside the sessions.
 
-Before a chat turn the workspace is recorded as a git tree (``git add -A`` + ``git
+Around every chat turn the workspace is recorded as a git tree (``git add -A`` + ``git
 write-tree``) in a repository of KaroX's own under ``<home>/snapshots/<id>``. The user's
 repository, index, branches and stash are never touched: every command runs with
 ``GIT_DIR`` and ``GIT_INDEX_FILE`` pointing at the private store and the workspace only as
-the work tree. Undo makes the work tree match a recorded tree again: files changed or
-deleted since then are written back, files created since then are removed.
+the work tree. Undo moves the files a turn changed back to their state before it; a file
+that was changed again after the turn (by the user, in an editor) is left as it is and
+reported, so undo never destroys newer work.
 
 Snapshots are byte-exact (line-ending conversion and filters are switched off for the
 private store, whatever the project's ``.gitattributes`` or the user's git config say) and
@@ -20,6 +21,7 @@ import contextlib
 import hashlib
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 FIRST_SNAPSHOT_TIMEOUT_S = 60.0  # the first one reads every file
@@ -64,6 +66,17 @@ class Checkpoints:
         key = os.path.normcase(str(self.workspace)).encode("utf-8", "surrogateescape")
         self.git_dir = home / "snapshots" / hashlib.sha256(key).hexdigest()[:16]
         self.disabled: str | None = None  # why snapshots are off for this run
+        self._lock = threading.Lock()  # one git operation on the private index at a time
+        self._running: subprocess.Popen[bytes] | None = None
+
+    def abort(self) -> None:
+        """Stop a git command that is still running (the chat is closing) and switch
+        snapshots off; a half-written private index is rebuilt by the next chat."""
+        self.disabled = self.disabled or "the chat is closing"
+        proc = self._running
+        if proc is not None:
+            with contextlib.suppress(OSError):
+                proc.kill()
 
     # -- public -------------------------------------------------------------------------
 
@@ -72,32 +85,47 @@ class Checkpoints:
         (no git, or the workspace is too large to record in time)."""
         if self.disabled:
             return None
-        try:
-            fresh = self._prepare()
-            limit = FIRST_SNAPSHOT_TIMEOUT_S if fresh else SNAPSHOT_TIMEOUT_S
-            self._git("add", "-A", "--", ".", timeout=limit)
-            return self._git("write-tree", timeout=limit).strip()
-        except subprocess.TimeoutExpired:
-            self.disabled = "recording the project took too long"
-        except (OSError, CheckpointError) as exc:
-            self.disabled = str(exc) or type(exc).__name__
+        with self._lock:
+            try:
+                fresh = self._prepare()
+                limit = FIRST_SNAPSHOT_TIMEOUT_S if fresh else SNAPSHOT_TIMEOUT_S
+                self._git("add", "-A", "--", ".", timeout=limit)
+                return self._git("write-tree", timeout=limit).strip()
+            except subprocess.TimeoutExpired:
+                self.disabled = "recording the project took too long"
+            except (OSError, CheckpointError) as exc:
+                self.disabled = str(exc) or type(exc).__name__
         return None
 
     def changes(self, before: str, after: str) -> list[tuple[str, str]]:
         """(status, path) for every file that differs between two snapshots: ``A`` exists
         only in ``after``, ``D`` only in ``before``, ``M`` in both with other content."""
+        if before == after:
+            return []
         out = self._git(
             "diff-tree", "-r", "-z", "--no-renames", "--name-status", before, after, timeout=60
         )
         parts = out.split("\0")
         return [(parts[i][:1], parts[i + 1]) for i in range(0, len(parts) - 1, 2) if parts[i]]
 
-    def restore(self, target: str, current: str) -> list[str]:
-        """Make the workspace match snapshot ``target``. ``current`` is a snapshot of the
-        workspace as it is now (take it right before). Returns the paths that changed."""
-        changed = self.changes(target, current)
-        rewrite = [path for status, path in changed if status != "A"]
-        remove = [path for status, path in changed if status == "A"]
+    def move(self, source: str, target: str, current: str) -> tuple[list[str], list[str]]:
+        """Take the files that differ between snapshots ``source`` and ``target`` from
+        their ``source`` state to their ``target`` state: (paths changed, paths skipped).
+
+        ``current`` is a snapshot of the workspace as it is now (take it right before).
+        A path that no longer is in its ``source`` state was changed by someone else
+        since; it is skipped, never overwritten. Undo is ``move(after, before, now)``,
+        redo is ``move(before, after, now)``.
+        """
+        with self._lock:
+            return self._move(source, target, current)
+
+    def _move(self, source: str, target: str, current: str) -> tuple[list[str], list[str]]:
+        wanted = self.changes(source, target)
+        touched = {path for _, path in self.changes(source, current)}
+        rewrite = [path for status, path in wanted if status != "D" and path not in touched]
+        remove = [path for status, path in wanted if status == "D" and path not in touched]
+        skipped = [path for _, path in wanted if path in touched]
         if rewrite:
             listing = "\0".join(rewrite).encode("utf-8", "surrogateescape")
             self._git(
@@ -113,9 +141,7 @@ class Checkpoints:
             with contextlib.suppress(OSError):
                 path.unlink()
             self._drop_empty_parents(path.parent)
-        # The private index now describes ``target``: the next snapshot starts from it.
-        self._git("read-tree", target, timeout=60)
-        return [path for _, path in changed]
+        return sorted(rewrite + remove), sorted(skipped)
 
     # -- git ----------------------------------------------------------------------------
 
@@ -152,22 +178,29 @@ class Checkpoints:
             GIT_TERMINAL_PROMPT="0",
         )
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 ["git", *args],
                 cwd=self.workspace,
                 env=env,
-                input=stdin,
-                stdin=subprocess.DEVNULL if stdin is None else None,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
+                stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
         except FileNotFoundError:
             raise CheckpointError("git is not installed") from None
+        self._running = proc
+        try:
+            out, err = proc.communicate(stdin, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise
+        finally:
+            self._running = None
         if proc.returncode != 0:
-            detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+            detail = err.decode("utf-8", "replace").strip().splitlines()
             raise CheckpointError(f"git {args[0]} failed: {detail[-1] if detail else 'no output'}")
-        return proc.stdout.decode("utf-8", "surrogateescape")
+        return out.decode("utf-8", "surrogateescape")
 
     def _drop_empty_parents(self, folder: Path) -> None:
         """Remove directories a deleted file left empty (never the workspace itself)."""

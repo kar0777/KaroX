@@ -110,6 +110,25 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     chat.add_argument("--cwd", type=Path, default=None, help="workspace directory")
     chat.add_argument("--resume", default=None, help="session id or 'last'")
     chat.add_argument(
+        "-c",
+        "--continue",
+        dest="resume",
+        action="store_const",
+        const="last",
+        help="continue this project's last session (same as --resume last)",
+    )
+    chat.add_argument(
+        "--fork",
+        default=None,
+        metavar="ID|last",
+        help="start a new session as a copy of a saved one (the original stays as it is)",
+    )
+    chat.add_argument(
+        "--no-undo",
+        action="store_true",
+        help="do not record the workspace around each turn (/undo then restores no files)",
+    )
+    chat.add_argument(
         "--approve-dangerous",
         choices=["ask", "deny", "allow"],
         default="ask",
@@ -488,6 +507,7 @@ def _first_frame(args: argparse.Namespace) -> Any:
 
 
 async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
+    from karox6.chat_features import McpState
     from karox6.core.config import SessionConfig
     from karox6.settings import default_home
     from karox6.tui import (
@@ -560,6 +580,9 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
         session_kwargs = (
             resume_kwargs(home, args.resume, workspace=workspace) if args.resume else {}
         )
+        if args.fork and not args.resume:
+            # A new session that starts with the saved one's conversation.
+            app._fork_source = resume_kwargs(home, args.fork, workspace=workspace)
         if app.provider is None:
             # Drop the key from the environment before starting any MCP server.
             app.provider = _provider(args)
@@ -571,11 +594,20 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
                 app.bridge_agent_args += ["--api-key-env", "KAROX_BRIDGE_API_KEY"]
                 app.bridge_env = {"KAROX_BRIDGE_API_KEY": key}
         if mcp_handles is None:
+            failures: dict[str, str] = {}
 
             def warn(message: str) -> None:
+                server = getattr(message, "server", None)  # mcp.client.ServerSkipped
+                if server is not None:
+                    failures[server] = str(getattr(message, "reason", ""))
                 app.write(_plain_text(message))
 
             app.extra_tools, mcp_handles = await _mcp_tools(args, home, warn=warn)
+            app.mcp = McpState(
+                path=None if args.no_mcp else (args.mcp_config or home / "mcp.json"),
+                handles=mcp_handles,
+                failures=failures,
+            )
         return session_kwargs
 
     async def check_key(app: ChatApp) -> None:
@@ -626,6 +658,8 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
             before_turn=check_key,
             display_factory=display_factory,
             columns=ui.columns if ui is not None else lambda: shutil.get_terminal_size().columns,
+            snapshots=not args.no_undo,
+            prefill=ui.prefill if ui is not None else None,
         )
         if ui is not None:
             ui.attach_app(created)

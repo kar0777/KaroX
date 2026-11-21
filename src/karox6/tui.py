@@ -23,6 +23,16 @@ from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Protocol
 
 from karox6 import __version__
+from karox6.chat_features import (
+    INIT_PROMPT,
+    McpState,
+    closest_command,
+    diff_preview,
+    find_images,
+    image_label,
+    mcp_report,
+    store_image,
+)
 from karox6.core import events as ev
 from karox6.core.digest import brief, clip, explain_error, is_tool_failure, outcome
 from karox6.tui_text import (
@@ -47,7 +57,9 @@ if TYPE_CHECKING:
     from prompt_toolkit.output import Output
 
     from karox6.bridge import Bridge
+    from karox6.core.checkpoint import Checkpoints
     from karox6.core.config import SessionConfig
+    from karox6.core.messages import Message
     from karox6.core.session import Session
     from karox6.tools.base import ApprovalRequest, Tool
 
@@ -87,6 +99,11 @@ _SESSION_COMMANDS = frozenset(
         "/model",
         "/setup",
         "/bridge",
+        "/undo",
+        "/redo",
+        "/fork",
+        "/mcp",
+        "/paste",
     )
 )
 DIFF_CAP = 40_000
@@ -108,6 +125,13 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("/clear", "/clear", "clear the screen (keeps current session)", "Session"),
     CommandSpec("/sessions", "/sessions", "list recent sessions for this workspace", "Session"),
     CommandSpec("/resume", "/resume [ID|last]", "continue a saved session", "Session"),
+    CommandSpec(
+        "/fork", "/fork", "branch off: a copy of this conversation to try another way", "Session"
+    ),
+    CommandSpec(
+        "/undo", "/undo", "take back the last turn: its file changes and messages", "Session"
+    ),
+    CommandSpec("/redo", "/redo", "put back the turn that /undo took away", "Session"),
     CommandSpec("/quit", "/quit", "leave the chat (/exit, /q, Ctrl+D)", "Session"),
     CommandSpec(
         "/diff",
@@ -127,6 +151,18 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "compact conversation history to free context",
         "Workspace & Context",
     ),
+    CommandSpec(
+        "/init",
+        "/init [FOCUS]",
+        "write AGENTS.md: this project's commands, layout and conventions",
+        "Workspace & Context",
+    ),
+    CommandSpec(
+        "/paste",
+        "/paste",
+        "attach the picture in the clipboard to your next message (Alt+V)",
+        "Workspace & Context",
+    ),
     CommandSpec("/model", "/model [NAME]", "show or change the model", "Model & Setup"),
     CommandSpec(
         "/reasoning", "/reasoning [show|hide]", "show or hide model reasoning", "Model & Setup"
@@ -144,6 +180,9 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "/bridge [agent|url|log|stop]",
         "connect ChatGPT/Claude via Tailscale Funnel MCP bridge",
         "Tools & Bridge",
+    ),
+    CommandSpec(
+        "/mcp", "/mcp [SERVER]", "MCP servers: state, tools, how to add one", "Tools & Bridge"
     ),
     CommandSpec("/help", "/help", "show commands and keyboard shortcuts", "Tools & Bridge"),
 )
@@ -177,6 +216,7 @@ _HELP_GROUPS = ("Session", "Workspace & Context", "Model & Setup", "Tools & Brid
 
 _HELP_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("@path", "mention a workspace file to attach it to your message"),
+    ("@shot.png / Alt+V", "attach a picture: its path, or the one in the clipboard"),
     ("Enter / Alt+Enter", "send message / insert newline (Ctrl+J or trailing \\ also work)"),
     ("Tab", "complete /commands, arguments and @file paths"),
     ("Ctrl+R", "search persistent input history"),
@@ -368,6 +408,22 @@ def _diff_summary(diff_text: str) -> tuple[int, int, int]:
     return files, added, removed
 
 
+@dataclass(slots=True)
+class _TurnRecord:
+    """One finished turn, as /undo needs it."""
+
+    prompt: str
+    anchor: Any  # the conversation's last message before the turn (None: it was empty)
+    before: str | None  # workspace snapshot before the turn (None: not recorded)
+    after: asyncio.Future[str | None] | None  # and after it (taken in the background)
+    session_id: str
+
+
+UNDO_DEPTH = 50  # turns /undo can step back through
+SNAPSHOT_WAIT_S = 5.0  # a turn waits this long for its "before" snapshot, then starts
+SNAPSHOT_AFTER_WAIT_S = 3.0  # and this long, when it ends, for the snapshot of its result
+
+
 class _PromptInterrupt(KeyboardInterrupt):
     def __init__(self, empty: bool) -> None:
         self.empty = empty
@@ -394,6 +450,8 @@ class ChatApp:
         before_turn: Callable[[ChatApp], Awaitable[None]] | None = None,
         display_factory: DisplayFactory | None = None,
         columns: Callable[[], int] | None = None,
+        snapshots: bool = False,
+        prefill: Callable[[str], None] | None = None,
     ) -> None:
         if approval_mode not in APPROVAL_MODES:
             raise ValueError(f"approval mode must be one of {APPROVAL_MODES}")
@@ -422,6 +480,15 @@ class ChatApp:
         self._active_tools: dict[str, ev.ToolStarted] = {}
         self._had_tools = False
         self._error_shown = False  # this turn's error line is on screen
+        self.mcp: McpState | None = None  # set when the MCP servers were connected
+        self.snapshots = snapshots  # record the workspace around each turn (for /undo)
+        self._prefill = prefill  # puts text into the input line (an undone message)
+        self._fork_source: dict[str, Any] | None = None  # --fork: history to start from
+        self._checkpoints: Checkpoints | None = None
+        self._turns: list[_TurnRecord] = []  # what /undo can take back, oldest first
+        self._undone: list[tuple[_TurnRecord, list[Message]]] = []  # what /redo can put back
+        self._pending_images: list[Path] = []  # pictures waiting for the next message
+        self._warmup: asyncio.Future[str | None] | None = None
         self.session: Session
         if initialize is None:
             self.session = self._new_session(**(session_kwargs or {}))
@@ -456,6 +523,15 @@ class ChatApp:
                 raise
             self._session_task = None
             self._initialize = None
+            if self._fork_source is not None:
+                source, self._fork_source = self._fork_source, None
+                self.session.take_history(
+                    source["messages"], source["usage"], source["cost_usd"], source["session_id"]
+                )
+                self.write(
+                    f"forked from {source['session_id']}: {len(self.session.messages)} messages, "
+                    f"now in {self.session.session_id}\n"
+                )
 
     def _new_session(self, **kwargs: Any) -> Session:
         from karox6.core.session import Session
@@ -473,6 +549,9 @@ class ChatApp:
         (the full-screen app puts it into its very first frame)."""
         if banner:
             self.write(self._banner())
+        if self.snapshots:
+            # The first snapshot reads the whole project: start it while the user types.
+            self._warmup = asyncio.ensure_future(self._snapshot())
         exit_armed = False
         while True:
             try:
@@ -508,6 +587,8 @@ class ChatApp:
         if self._bridge_instance is not None and self._bridge_instance.running():
             self.write("stopping the bridge...\n")
             await asyncio.to_thread(self._bridge_instance.stop)
+        if self._checkpoints is not None:
+            self._checkpoints.abort()  # a snapshot still being taken must not delay the exit
 
     async def _read_prompt(self) -> str:
         lines: list[str] = []
@@ -590,10 +671,11 @@ class ChatApp:
 
     # -- turns ----------------------------------------------------------------------
 
-    async def turn(self, text: str) -> str:
-        """Run one user turn with interruptible terminal output."""
+    async def turn(self, text: str, *, label: str | None = None) -> str:
+        """Run one user turn with interruptible terminal output. ``label`` is what the
+        turn is called in /undo when ``text`` is a built-in prompt (``/init``)."""
         phase = "Preparing session" if self._initialize is not None else "Model thinking"
-        return await self._run_with_display(lambda: self._consume(text), phase)
+        return await self._run_with_display(lambda: self._consume(text, label), phase)
 
     async def _run_with_display(self, action: Callable[[], Awaitable[str]], phase: str) -> str:
         self._turn_started = time.monotonic()
@@ -668,12 +750,16 @@ class ChatApp:
             phase = "Running " + ", ".join(dict.fromkeys(names))
         return f"{spinner} {elapsed:.1f}s  {phase}"
 
-    async def _consume(self, text: str) -> str:
+    async def _consume(self, text: str, label: str | None = None) -> str:
         await self._ensure_session()
         if self._before_turn is not None:
             await self._before_turn(self)
             self._before_turn = None
-        if _MENTION_RE.search(text):
+        prompt = label or text
+        images: list[dict[str, str]] = []
+        if label is None:
+            text, images = self._attach_images(text)
+        if label is None and _MENTION_RE.search(text):
             mention = await asyncio.to_thread(expand_file_mentions, text, self.session.workspace)
             for warning in mention.warnings:
                 self.write(self.paint("yellow", f"  {_plain_text(warning)}") + "\n")
@@ -689,17 +775,214 @@ class ChatApp:
         self._phase = "Model thinking"
         status = "error"
         count = 0
-        async with contextlib.aclosing(self.session.run(text)) as events:
-            async for event in events:
-                if isinstance(event, ev.RunFinished):
-                    status = event.status
-                    if status == "cancelled":
-                        continue  # the turn prints its stop marker after cleanup
-                self.render(event)
-                count += 1
-                if count % 32 == 0:
-                    await asyncio.sleep(0)
+        record = await self._record_start(prompt)
+        try:
+            async with contextlib.aclosing(self.session.run(text, images)) as events:
+                async for event in events:
+                    if isinstance(event, ev.RunFinished):
+                        status = event.status
+                        if status == "cancelled":
+                            continue  # the turn prints its stop marker after cleanup
+                    self.render(event)
+                    count += 1
+                    if count % 32 == 0:
+                        await asyncio.sleep(0)
+        finally:
+            await self._record_end(record)
         return status
+
+    # -- pictures -------------------------------------------------------------------
+
+    def _attach_images(self, text: str) -> tuple[str, list[dict[str, str]]]:
+        """Pictures for this message: the ones waiting from /paste, then the ones its
+        text names. Each is copied into the session; the text keeps an [image N] mark."""
+        pending, self._pending_images = self._pending_images, []
+        found = find_images(text, self.session.workspace, already=len(pending))
+        for warning in found.warnings:
+            self.write(self.paint("yellow", f"  {_plain_text(warning)}") + "\n")
+        images: list[dict[str, str]] = []
+        labels: list[str] = []
+        base = sum(len(m.images) for m in self.session.messages)
+        for path in [*pending, *found.paths]:
+            try:
+                labels.append(image_label(path))
+                images.append(store_image(self.session.store.dir, path, base + len(images) + 1))
+            except OSError as exc:
+                self.write(self.paint("yellow", f"  skipped {path.name} ({exc})") + "\n")
+        if labels:
+            self.write(self.paint("dim", "  pictures: " + ", ".join(labels)) + "\n")
+        return found.text, images
+
+    async def paste_image(self) -> None:
+        """``/paste`` (Alt+V): keep the clipboard's picture for the next message."""
+        from karox6.clipboard import ClipboardError, grab_image
+
+        await self._ensure_session()
+        number = len(self._pending_images) + 1
+        stamp = time.strftime("%H%M%S")
+        target = self.session.store.dir / "images" / f"clipboard-{stamp}-{number}.png"
+        try:
+            path = await asyncio.to_thread(grab_image, target)
+        except ClipboardError as exc:
+            self.write(self.paint("yellow", f"  {exc}") + "\n")
+            return
+        except OSError as exc:
+            self.write(self.paint("red", f"  cannot read the clipboard: {exc}") + "\n")
+            return
+        self._pending_images.append(path)
+        self.write(
+            self.paint("dim", f"  picture ready: {image_label(path)}; it goes with your next ")
+            + self.paint("dim", "message (/paste again adds another)")
+            + "\n"
+        )
+
+    # -- undo -----------------------------------------------------------------------
+
+    def _store(self) -> Checkpoints:
+        from karox6.core.checkpoint import Checkpoints
+
+        if self._checkpoints is None:
+            self._checkpoints = Checkpoints(self.config.home, Path(self.config.workspace))
+        return self._checkpoints
+
+    async def _snapshot(self, wait: float | None = None) -> str | None:
+        """The workspace recorded now; None when snapshots are off or unavailable, or
+        when ``wait`` seconds were not enough (a first snapshot of a huge project): the
+        recording then goes on in its thread and the next one is quick."""
+        if not self.snapshots:
+            return None
+        task = asyncio.ensure_future(asyncio.to_thread(self._store().snapshot))
+        if wait is None:
+            return await task
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), wait)
+        except TimeoutError:
+            return None
+
+    async def _record_start(self, prompt: str) -> _TurnRecord:
+        messages = self.session.messages
+        before = await self._snapshot(SNAPSHOT_WAIT_S)
+        return _TurnRecord(
+            prompt=prompt,
+            anchor=messages[-1] if messages else None,
+            before=before,
+            after=None,
+            session_id=self.session.session_id,
+        )
+
+    async def _record_end(self, record: _TurnRecord) -> None:
+        """The turn is over (finished, failed or stopped): it can be undone. Its result is
+        recorded before the prompt comes back, so that what the user changes next is never
+        taken for the turn's work; only a recording slower than SNAPSHOT_AFTER_WAIT_S (a
+        huge project) is left to finish in the background."""
+        self._turns.append(record)
+        del self._turns[:-UNDO_DEPTH]
+        self._undone.clear()  # a new turn: nothing left to redo
+        if record.before is None:
+            return
+        task = asyncio.ensure_future(asyncio.to_thread(self._store().snapshot))
+        record.after = task
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), SNAPSHOT_AFTER_WAIT_S)
+
+    def _forget_turns(self) -> None:
+        self._turns.clear()
+        self._undone.clear()
+
+    def _rewind_to(self, record: _TurnRecord) -> list[Message] | None:
+        """Drop the turn's messages; None when its start is no longer in the history
+        (compaction replaced it)."""
+        messages = self.session.messages
+        if record.anchor is None:
+            return self.session.rewind(0)
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index] is record.anchor:
+                return self.session.rewind(index + 1)
+        return None
+
+    async def _move_files(self, record: _TurnRecord, *, back: bool) -> str:
+        """Move the turn's files back (undo) or forward (redo); a line for the user."""
+        after = await record.after if record.after is not None else None
+        if record.before is None or after is None:
+            why = self._store().disabled if self.snapshots else "snapshots are off (--no-undo)"
+            return f"files were not recorded ({why or 'no snapshot'}): only the messages moved"
+        source, target = (after, record.before) if back else (record.before, after)
+        current = await self._snapshot()
+        if current is None:
+            return f"files left as they are ({self._store().disabled})"
+        from karox6.core.checkpoint import CheckpointError
+
+        try:
+            changed, skipped = await asyncio.to_thread(self._store().move, source, target, current)
+        except (CheckpointError, OSError) as exc:
+            return f"files left as they are ({exc})"
+        if not changed and not skipped:
+            return "no files to change"
+        parts = []
+        if changed:
+            shown = ", ".join(_plain_text(p) for p in changed[:6])
+            more = f" and {len(changed) - 6} more" if len(changed) > 6 else ""
+            verb = "restored" if back else "re-applied"
+            plural = "s" if len(changed) != 1 else ""
+            parts.append(f"{verb} {len(changed)} file{plural}: {shown}{more}")
+        if skipped:
+            shown = ", ".join(_plain_text(p) for p in skipped[:6])
+            parts.append(f"left alone (changed since): {shown}")
+        return "; ".join(parts)
+
+    async def _undo(self) -> None:
+        if not self._turns:
+            self.write("nothing to undo (only turns of this chat can be taken back)\n")
+            return
+        record = self._turns.pop()
+        files = await self._move_files(record, back=True)
+        dropped = self._rewind_to(record)
+        title = clip(_plain_text(record.prompt), 70)
+        self.write(f"undid: {self.paint('bold', title)}\n")
+        self.write(self.paint("dim", f"  {files}") + "\n")
+        if dropped is None:
+            # The turn's start was summarised away: the model must still learn of it.
+            self.session.note_for_model(
+                "undo",
+                "[The user undid the last turn: the files it changed are back to their state "
+                "before it. Do not assume those changes exist.]",
+            )
+            self.write(self.paint("dim", "  the conversation was compacted since: kept") + "\n")
+        self._undone.append((record, dropped or []))
+        if self._prefill is not None and dropped is not None:
+            self._prefill(record.prompt)
+            hint = "  your message is back in the input line; /redo puts the turn back"
+        else:
+            hint = "  /redo puts the turn back"
+        self.write(self.paint("dim", hint) + "\n")
+
+    async def _redo(self) -> None:
+        if not self._undone:
+            self.write("nothing to redo\n")
+            return
+        record, dropped = self._undone.pop()
+        files = await self._move_files(record, back=False)
+        self.session.extend(dropped)
+        self._turns.append(record)
+        title = clip(_plain_text(record.prompt), 70)
+        self.write(f"redid: {self.paint('bold', title)}\n")
+        self.write(self.paint("dim", f"  {files}") + "\n")
+
+    def _fork(self) -> None:
+        old = self.session
+        if not old.messages:
+            self.write("nothing to fork yet: the conversation is empty\n")
+            return
+        fresh = self._new_session()
+        fresh.take_history(old.messages, old.usage, old.cost_usd, old.session_id)
+        self.session = fresh
+        self._forget_turns()
+        self.write(
+            f"forked: now in {fresh.session_id}, a copy of {old.session_id} "
+            f"({len(fresh.messages)} messages)\n"
+            + self.paint("dim", f"  the original is untouched: /resume {old.session_id}")
+            + "\n"
+        )
 
     def render(self, event: ev.Event) -> None:
         p, g = self.paint, self.glyph
@@ -794,6 +1077,11 @@ class ChatApp:
             detail = self._paint_diff_stats(*stats)
         took = p("dim", f"({event.duration_ms / 1000:.1f}s)")
         self.write(f"{head}  {mark}" + (f" {detail}" if detail else "") + f" {took}\n")
+        if start is not None and not failed:
+            # What the edit changed, right under its line (the whole change: /diff).
+            colors = {"-": "red", "+": "green", "…": "dim"}
+            for kind, text in diff_preview(event.name, start.arguments, event.meta):
+                self.write(f"{pad}  {p(colors[kind], text)}\n")
 
     def _paint_diff_stats(self, added: int, removed: int) -> str:
         return f"{self.paint('green', f'+{added}')} {self.paint('red', f'-{removed}')}"
@@ -907,7 +1195,21 @@ class ChatApp:
             await self._compact()
         elif name == "/new":
             self.session = self._new_session()
+            self._forget_turns()
             self.write(f"new session {self.session.session_id}\n")
+        elif name == "/undo":
+            await self._undo()
+        elif name == "/redo":
+            await self._redo()
+        elif name == "/fork":
+            self._fork()
+        elif name == "/init":
+            focus = f"\n\nPay special attention to: {arg}" if arg else ""
+            await self.turn(INIT_PROMPT + focus, label="/init" + (f" {arg}" if arg else ""))
+        elif name == "/paste":
+            await self.paste_image()
+        elif name == "/mcp":
+            self.write(mcp_report(self.mcp, self.paint, self.glyph, arg))
         elif name == "/sessions":
             from karox6.core.store import recent_sessions
 
@@ -931,6 +1233,7 @@ class ChatApp:
                 self.write(self.paint("red", str(exc)) + "\n")
             else:
                 self.session = self._new_session(**kwargs)
+                self._forget_turns()
                 count = len(self.session.messages)
                 self.write(f"resumed {self.session.session_id} ({count} messages)\n")
         elif name == "/approve":
@@ -958,7 +1261,10 @@ class ChatApp:
                 self.show_reasoning = not self.show_reasoning
             self.write(f"reasoning {'shown' if self.show_reasoning else 'hidden'}\n")
         else:
-            self.write(f"unknown command {name}; /help lists commands\n")
+            known = [spec.name for spec in COMMANDS] + list(_COMMAND_ALIASES)
+            near = closest_command(name, known)
+            meant = f"did you mean {self.paint('cyan', near)}? " if near else ""
+            self.write(f"unknown command {name}; {meant}/help lists commands\n")
         return None
 
     def _clear_screen(self) -> None:

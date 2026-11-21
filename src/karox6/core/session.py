@@ -820,6 +820,29 @@ class Session:
         emit(ev.Notice(kind="review", text=note))
         return found
 
+    def take_history(
+        self, messages: list[Message], usage: Usage, cost_usd: float, source: str
+    ) -> None:
+        """Start this (new, empty) session as a copy of another conversation: ``/fork`` and
+        ``--fork``. The copy is written to this session's own log, so it resumes on its
+        own; the source session stays as it was."""
+        self.messages = [Message.from_dict(m.to_dict()) for m in messages]
+        self.resumed = bool(self.messages)
+        self.usage = Usage.from_dict(usage.to_dict())
+        self.cost_usd = cost_usd
+        self.store.append("fork", source=source)
+        self.store.reset(self.messages)
+        self.store.append(
+            "usage", step=0, usage=self.usage.to_dict(), cost_usd=cost_usd, source="fork"
+        )
+        self._last_input_tokens = self._last_cached_tokens = 0
+        self._chars_since_measure = 0
+
+    def note_for_model(self, kind: str, text: str) -> None:
+        """Add a harness note to the conversation between turns (the model reads it with
+        the next request; it is not a user turn)."""
+        self._append(Message("user", text, meta={"kind": kind}))
+
     def rewind(self, count: int) -> list[Message]:
         """Drop the conversation after its first ``count`` messages (``/undo``); the
         dropped messages are returned so that a redo can put them back."""

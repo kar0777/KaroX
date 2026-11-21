@@ -22,6 +22,7 @@ from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, ThreadedCompleter
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition, has_completions, is_searching
 from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples
 from prompt_toolkit.history import History
@@ -559,6 +560,7 @@ class FullScreenTui:
 
         self._read_future: asyncio.Future[str] | None = None
         self._question_future: asyncio.Future[str] | None = None
+        self._paste_task: asyncio.Future[None] | None = None
         self._queued_inputs: deque[str | BaseException] = deque()
 
         self._transcript = _TranscriptControl()
@@ -736,6 +738,18 @@ class FullScreenTui:
     def columns(self) -> int:
         """Cells a line of the conversation can take (the scrollbar column left out)."""
         return max(self._app.output.get_size().columns - 1, 20)
+
+    def _paste_done(self, task: asyncio.Future[None]) -> None:
+        self._paste_task = None
+        if not task.cancelled() and task.exception() is not None:
+            self.write(f"  cannot read the clipboard: {task.exception()}\n")
+
+    def prefill(self, text: str) -> None:
+        """Put ``text`` into the input line, cursor at its end (an undone message comes
+        back for editing); text the user has already typed is not replaced."""
+        if not self._input_buffer.text:
+            self._input_buffer.set_document(Document(text, len(text)), bypass_readonly=True)
+            self.invalidate()
 
     def invalidate(self) -> None:
         if self._app.is_running and not self._app.is_done:
@@ -1131,6 +1145,15 @@ class FullScreenTui:
         def _alt_enter(event: KeyPressEvent) -> None:
             del event
             self._input_buffer.insert_text("\n")
+
+        @keys.add("escape", "v", filter=in_prompt & ~is_searching)
+        def _alt_v(event: KeyPressEvent) -> None:
+            del event
+            if self._chat_app is not None and self._paste_task is None:
+                # Reading the clipboard must not block typing.
+                task = asyncio.ensure_future(self._chat_app.paste_image())
+                self._paste_task = task
+                task.add_done_callback(self._paste_done)
 
         @keys.add("c-j", filter=in_input & ~is_searching)
         def _ctrl_j(event: KeyPressEvent) -> None:
