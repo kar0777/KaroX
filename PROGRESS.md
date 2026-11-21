@@ -1327,3 +1327,12 @@ git diff --check
   GLM-5.3-Flash (same model, other host), disc tasks 5,8,9,10,11,12 (rest of the first
   12), parallel 1 (2 agents <= 3 slots). Combined with gduel2: 12 tasks. Read solved and
   audit tokens per arm; no tuning on it.
+- Rivals updated in the bench (2026-11-21): OpenCode 2.3.0 -> 2.3.2, DSH 0.2.2-rc.3 ->
+  0.2.2-rc.5 (npm latest). Smoke rivals1 (trio, django-ninja, Dahl): both install and
+  run (versions reported by Harbor). Scores void: Dahl's free GLM was at global capacity
+  (230 of 279 calls 429 model_concurrency). Results before and after the bump are not
+  pooled. gduel3 stopped after 4 tasks (both arms 3/4, same tasks); GLM total over 10
+  tasks: karox6 7, opencode_v2 6.
+- Dahl: 12 keys now (secrets DAHL_API_KEY, _2.._12; upstream dahl2 uses all, 3 parallel
+  each). Free capacity is global, so keys help only when the model has room; paid
+  accounts ($0.01 per 1M tokens until 30 Nov) are admitted first.
