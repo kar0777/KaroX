@@ -1295,3 +1295,6 @@ git diff --check
   reminders at 14 and 21), then ab2 on disc tasks 13-24 (held out from ab1). Rule: keep
   --review if B >= A + 1 on ab1+ab2 combined with B's mean time <= 1.4x A's; drop it if
   B <= A combined.
+- Partial-read guard (GPT audit item) checked against the logs: 558 sessions, 689
+  `write` calls, 4 writes after only a partial read (1 session). Too rare to add a
+  refusal that costs steps; not built.
