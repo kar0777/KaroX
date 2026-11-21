@@ -444,27 +444,61 @@ def _chat(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     # No model yet: the chat starts with its setup (provider, model, key) instead.
     if not args.model and not (sys.stdin.isatty() and sys.stdout.isatty()):
         parser.error("--model is required (or set KAROX_MODEL, or run `karox6` in a terminal)")
+    splash = _first_frame(args)  # on screen before asyncio and prompt_toolkit are imported
     try:
-        return run_async(_chat_async(args))
+        return run_async(_chat_async(args, splash))
     except KeyboardInterrupt:
         return 0
     except (ValueError, FileNotFoundError) as exc:
+        if splash is not None:
+            splash.close()
         sys.stderr.write(f"karox: {exc}\n")
         return 2
+    finally:
+        if splash is not None:
+            splash.close()
 
 
-async def _chat_async(args: argparse.Namespace) -> int:
+def _initial_window(args: argparse.Namespace) -> int:
+    """The context budget shown before the session exists (as SessionConfig derives it)."""
+    known = [v for v in (args.context_window, args.context_limit) if v]
+    return min(known) if known else 400_000
+
+
+def _first_frame(args: argparse.Namespace) -> Any:
+    """Paint the full-screen chat's first frame right away (see karox6.splash); None when
+    the chat will not start with that frame."""
+    if not args.model or args.no_color or getattr(args, "inline", False):
+        return None
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    workspace = (args.cwd or Path.cwd()).expanduser().resolve()
+    if not workspace.is_dir():
+        return None
+    from karox6 import __version__, splash
+
+    return splash.show(
+        version=__version__,
+        model=args.model,
+        provider=args.provider,
+        workspace=workspace,
+        approval_mode=args.approve_dangerous,
+        context_window=_initial_window(args),
+    )
+
+
+async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
     from karox6.core.config import SessionConfig
     from karox6.settings import default_home
     from karox6.tui import (
         ChatApp,
-        _plain_text,
         color_enabled,
         secret_reader,
         stdout_write,
         terminal_display,
         terminal_io,
     )
+    from karox6.tui_text import _plain_text
 
     home = (args.home or default_home()).expanduser().resolve()
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
@@ -495,9 +529,12 @@ async def _chat_async(args: argparse.Namespace) -> int:
                 model=args.model or "",
                 provider=args.provider,
                 approval_mode=args.approve_dangerous,
+                splash=splash,
             )
 
     if ui is None:
+        if splash is not None:
+            splash.close()
         read_line, read_answer = terminal_io(home / "chat_history", workspace=workspace, home=home)
 
         async def read_secret(prompt: str) -> str:
@@ -565,8 +602,44 @@ async def _chat_async(args: argparse.Namespace) -> int:
             app.bridge_env = {"KAROX_BRIDGE_API_KEY": typed}
             app.write("key saved (encrypted for your user); /key changes it\n")
 
+    def make_app() -> ChatApp:
+        import shutil
+
+        created = ChatApp(
+            config=SessionConfig(
+                model=args.model,
+                provider_name=args.provider,
+                workspace=workspace,
+                home=home,
+                context_window=args.context_window,
+                context_limit=args.context_limit,
+            ),
+            provider=None,
+            read_line=read_line,
+            read_answer=read_answer,
+            write=write_fn,
+            approval_mode=args.approve_dangerous,
+            color=color,
+            encoding=encoding,
+            read_secret=read_secret,
+            initialize=initialize,
+            before_turn=check_key,
+            display_factory=display_factory,
+            columns=ui.columns if ui is not None else lambda: shutil.get_terminal_size().columns,
+        )
+        if ui is not None:
+            ui.attach_app(created)
+        return created
+
     app: ChatApp | None = None
     summary: str | None = None
+    banner = True
+    if ui is not None and not chose_model:
+        # The welcome card is part of the very first frame (it used to pop in a frame
+        # later), which is also what the start-up frame has already painted.
+        app = make_app()
+        ui.write(app._banner())
+        banner = False
     try:
         async with ui if ui is not None else contextlib.nullcontext():
             if chose_model:
@@ -583,27 +656,10 @@ async def _chat_async(args: argparse.Namespace) -> int:
                     choice.base_url,
                     choice.model,
                 )
-
-            app = ChatApp(
-                config=SessionConfig(
-                    model=args.model, provider_name=args.provider, workspace=workspace, home=home
-                ),
-                provider=None,
-                read_line=read_line,
-                read_answer=read_answer,
-                write=write_fn,
-                approval_mode=args.approve_dangerous,
-                color=color,
-                encoding=encoding,
-                read_secret=read_secret,
-                initialize=initialize,
-                before_turn=check_key,
-                display_factory=display_factory,
-            )
-            if ui is not None:
-                ui.attach_app(app)
+            if app is None:
+                app = make_app()
             try:
-                return await app.run()
+                return await app.run(banner=banner)
             finally:
                 if ui is not None:
                     summary = app.exit_summary()
@@ -615,6 +671,8 @@ async def _chat_async(args: argparse.Namespace) -> int:
                 await app.provider.aclose()
         finally:
             await _close_mcp(mcp_handles or [])
+        if splash is not None:
+            splash.close()  # the app never drew: back to the user's screen first
         if summary:
             stdout_write(summary + "\n")
 

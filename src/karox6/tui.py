@@ -24,7 +24,17 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from karox6 import __version__
 from karox6.core import events as ev
-from karox6.core.digest import brief, is_tool_failure, outcome
+from karox6.core.digest import brief, clip, explain_error, is_tool_failure, outcome
+from karox6.tui_text import (
+    Palette,
+    StatusSnapshot,
+    _box,
+    _git_branch,
+    _glyphs,
+    _k,
+    _plain_text,
+    banner_text,
+)
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -57,24 +67,6 @@ class TurnView(Protocol):
     def write(self, text: str) -> None: ...
 
     def pause(self) -> contextlib.AbstractAsyncContextManager[None]: ...
-
-
-@dataclass(frozen=True, slots=True)
-class StatusSnapshot:
-    """Current chat metadata displayed by the full-screen status bar."""
-
-    model: str
-    provider: str
-    workspace_name: str
-    branch: str
-    approval_mode: str
-    running: bool
-    activity: str
-    total_tokens: int
-    context_used: int
-    context_window: int
-    context_pct: int
-    session_id: str | None
 
 
 ReadLine = Callable[[str], Awaitable[str]]  # raises EOFError at end of input
@@ -210,82 +202,6 @@ def _format_help(paint: Palette, mode: str) -> str:
         shortcuts.append(f"  {paint('cyan', f'{key:<{width}}')}{desc}")
     sections.append("\n".join(shortcuts))
     return "\n\n".join(sections)
-
-
-_CODES = {"dim": "2", "bold": "1", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
-
-
-class Palette:
-    def __init__(self, enabled: bool) -> None:
-        self.enabled = enabled
-
-    def __call__(self, style: str, text: str) -> str:
-        if not self.enabled or not text:
-            return text
-        return f"\x1b[{_CODES[style]}m{text}\x1b[0m"
-
-
-def _glyphs(encoding: str | None) -> dict[str, str]:
-    fancy = {"tool": "●", "ok": "✓", "fail": "✗", "prompt": "› ", "more": "… ", "dot": " · "}
-    try:
-        "".join(fancy.values()).encode(encoding or "ascii")
-    except (LookupError, UnicodeEncodeError):
-        return {"tool": "*", "ok": "ok", "fail": "x", "prompt": "> ", "more": ". ", "dot": " | "}
-    try:
-        "".join(_BOX_FANCY).encode(encoding or "ascii")
-        fancy["box"] = "fancy"
-    except (LookupError, UnicodeEncodeError):
-        fancy["box"] = "ascii"
-    return fancy
-
-
-_BOX_FANCY = ("╭", "╮", "╰", "╯", "─", "│")
-_BOX_ASCII = ("+", "+", "+", "+", "-", "|")
-_ANSI = re.compile("\x1b\\[[0-9;]*m")
-_TERMINAL_CONTROL = re.compile(
-    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
-    r"|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
-    r"|[\x00-\x08\x0b-\x1f\x7f-\x9f]"
-)
-
-
-def _plain_text(text: str) -> str:
-    # Keep newlines and tabs. Model and tool output must never move the terminal cursor.
-    return _TERMINAL_CONTROL.sub("", text)
-
-
-def _git_branch(workspace: Path) -> str:
-    """The checked-out branch read from .git/HEAD (no git process: it runs before the first
-    prompt); empty when the project is not a git checkout or HEAD is detached."""
-    for folder in (workspace, *workspace.parents):
-        head = folder / ".git"
-        if head.is_file():  # a worktree: "gitdir: <path>"
-            try:
-                target = head.read_text(encoding="utf-8").split(":", 1)[1].strip()
-            except (OSError, IndexError, UnicodeDecodeError):
-                return ""
-            head = Path(target) if Path(target).is_absolute() else folder / target
-        if head.is_dir():
-            try:
-                ref = (head / "HEAD").read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeDecodeError):
-                return ""
-            return ref.removeprefix("ref: refs/heads/") if ref.startswith("ref: ") else ""
-    return ""
-
-
-def _box(title: str, rows: list[tuple[str, str]], fancy: bool) -> str:
-    """A framed panel: label column, then values (ANSI colors do not count as width)."""
-    tl, tr, bl, br, h, v = _BOX_FANCY if fancy else _BOX_ASCII
-    wide = max((len(k) for k, _ in rows), default=0)
-    lines = [(f"{k:<{wide}}  {val}" if wide else val) for k, val in rows]
-    seen = [len(_ANSI.sub("", ln)) for ln in lines]
-    shown = len(_ANSI.sub("", title))
-    width = max([*seen, shown + 2]) + 2
-    out = [tl + h + f" {title} " + h * (width - shown - 3) + tr]
-    out += [f"{v} {ln}{' ' * (width - n - 1)}{v}" for ln, n in zip(lines, seen, strict=True)]
-    out.append(bl + h * width + br)
-    return "\n".join(out)
 
 
 _MENTION_RE = re.compile(r'(?:^|(?<=[\s(\[{]))@(?:"([^"]+)"|([^\s"]+))')
@@ -477,6 +393,7 @@ class ChatApp:
         initialize: Callable[[ChatApp], Awaitable[dict[str, Any]]] | None = None,
         before_turn: Callable[[ChatApp], Awaitable[None]] | None = None,
         display_factory: DisplayFactory | None = None,
+        columns: Callable[[], int] | None = None,
     ) -> None:
         if approval_mode not in APPROVAL_MODES:
             raise ValueError(f"approval mode must be one of {APPROVAL_MODES}")
@@ -497,12 +414,14 @@ class ChatApp:
         self._before_turn = before_turn
         self._session_task: asyncio.Task[Session] | None = None
         self._display_factory = display_factory
+        self._columns = columns  # terminal width in cells, for text that must not wrap
         self._display: TurnView | None = None
         self._branch: str | None = None
         self._turn_started = 0.0
         self._phase = ""
         self._active_tools: dict[str, ev.ToolStarted] = {}
         self._had_tools = False
+        self._error_shown = False  # this turn's error line is on screen
         self.session: Session
         if initialize is None:
             self.session = self._new_session(**(session_kwargs or {}))
@@ -549,8 +468,11 @@ class ChatApp:
             **kwargs,
         )
 
-    async def run(self) -> int:
-        self.write(self._banner())
+    async def run(self, *, banner: bool = True) -> int:
+        """The chat loop. ``banner=False``: the caller has already shown the welcome card
+        (the full-screen app puts it into its very first frame)."""
+        if banner:
+            self.write(self._banner())
         exit_armed = False
         while True:
             try:
@@ -654,22 +576,17 @@ class ChatApp:
     def _banner(self) -> str:
         """The welcome card: what runs where, and the keys a new user needs first."""
         cfg = self.config
-        dot = self.glyph["dot"]
-        project = _plain_text(str(cfg.workspace))
-        branch = self._branch_name()
-        if branch:
-            project += self.paint("dim", f"{dot}{_plain_text(branch)}")
-        rows = [
-            ("model", _plain_text(cfg.model) + self.paint("dim", f"{dot}{cfg.provider_name}")),
-            ("project", project),
-            ("approvals", f"{self.approval_mode}" + self.paint("dim", "  (/approve to change)")),
-            ("", ""),
-            ("", self.paint("dim", f"/ commands{dot}@ attach a file{dot}Alt+Enter new line")),
-            ("", self.paint("dim", f"Esc stops the agent{dot}/help{dot}Ctrl+D quits")),
-        ]
-        fancy = self.glyph.get("box", "ascii") == "fancy"
-        card = _box(self.paint("bold", f"KaroX {__version__}"), rows, fancy)
-        return card + "\n" + self.paint("dim", "Type a task to start.") + "\n"
+        return banner_text(
+            version=__version__,
+            model=cfg.model,
+            provider=cfg.provider_name,
+            workspace=str(cfg.workspace),
+            branch=self._branch_name(),
+            approval_mode=self.approval_mode,
+            paint=self.paint,
+            glyph=self.glyph,
+            max_width=self._columns() if self._columns is not None else None,
+        )
 
     # -- turns ----------------------------------------------------------------------
 
@@ -824,7 +741,7 @@ class ChatApp:
         elif isinstance(event, ev.Retry):
             self._streamed_text = False
             self._phase = f"Retrying model (attempt {event.attempt})"
-            error = _plain_text(event.error)[:120]
+            error = clip(_plain_text(explain_error(event.error)[0]), 140)
             self.write(
                 p(
                     "dim",
@@ -844,10 +761,15 @@ class ChatApp:
                 + "\n"
             )
         elif isinstance(event, ev.ErrorEvent):
-            self.write(p("red", f"{g['fail']} error: {_plain_text(event.message)}") + "\n")
+            line, hint = explain_error(event.message)
+            self.write(p("red", f"{g['fail']} error: {_plain_text(line)}") + "\n")
+            if hint:
+                self.write(p("dim", f"  {hint}") + "\n")
+            self._error_shown = True
         elif isinstance(event, ev.RunFinished):
             self._phase = "Finishing"
             self.write(self._footer(event) + "\n")
+            self._error_shown = False
 
     def _render_tool_finished(self, event: ev.ToolFinished) -> None:
         start = self._active_tools.pop(event.call_id, None)
@@ -889,9 +811,10 @@ class ChatApp:
             parts.append(f"{len(event.files_changed)} files changed (/diff)")
         color = "green" if event.status == "completed" else "yellow"
         head = self.paint(color, f"[{event.status}]")
-        reason = (
-            f" {_plain_text(event.reason)}" if event.reason and event.status != "completed" else ""
-        )
+        reason = ""
+        if event.reason and event.status != "completed" and not self._error_shown:
+            # (an error was just printed in full above the footer: not twice)
+            reason = f" {clip(_plain_text(explain_error(event.reason)[0]), 160)}"
         return f"{head}{reason} " + self.paint("dim", self.glyph["dot"].join(parts))
 
     def _open(self, kind: str) -> None:
@@ -1196,7 +1119,7 @@ class ChatApp:
         self.write(_box("KaroX bridge", rows, self.glyph.get("box", "ascii") == "fancy") + "\n")
 
     def _context_summary(self, *, with_threshold: bool = False) -> str:
-        used = self.session.context_tokens()
+        used = self.session.context_tokens() if self.session.messages else 0
         window = self.config.effective_window(self.session._learned_window)
         pct = min(round(used / window * 100), 100) if window else 0
         base = f"{_k(used)} / {_k(window)} ({pct}%)"
@@ -1329,10 +1252,6 @@ def _trap_sigint(interrupt: Callable[[], None]) -> Callable[[], None]:
         signal.signal(signal.SIGINT, previous)
 
     return restore
-
-
-def _k(n: int) -> str:
-    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
 # -- terminal wiring ------------------------------------------------------------------
@@ -1486,6 +1405,22 @@ def build_completer(*, workspace: Path | None = None, home: Path | None = None) 
     return _ChatCompleter()
 
 
+def pasted_line_end(event: Any) -> bool:
+    """True when this Enter is a line end inside pasted text: more keys arrived in the
+    same read, so nobody typed them one by one. Terminals without bracketed paste send a
+    paste as plain keys, and each of its line ends would otherwise send a message. The
+    line feed of a CR LF pair is dropped, so one line end stays one."""
+    from prompt_toolkit.keys import Keys
+
+    queue = event.app.key_processor.input_queue
+    waiting = [press for press in queue if press.key not in (Keys.CPRResponse, Keys.SIGINT)]
+    if not waiting:
+        return False
+    if queue and queue[0].key == Keys.ControlJ:
+        queue.popleft()
+    return True
+
+
 def build_key_bindings() -> KeyBindings:
     """Inline chat bindings: Enter submits, Alt+Enter / Ctrl+J insert a newline."""
     from prompt_toolkit.filters import is_searching
@@ -1512,13 +1447,16 @@ def build_key_bindings() -> KeyBindings:
     @keys.add("enter", filter=~is_searching)
     def _enter(event: KeyPressEvent) -> None:
         buf = event.current_buffer
-        state = buf.complete_state
-        if state is not None and state.current_completion is not None:
-            buf.apply_completion(state.current_completion)
-            return
         if buf.document.text_before_cursor.endswith("\\") and not buf.document.text_after_cursor:
             buf.delete_before_cursor(1)
             buf.insert_text("\n")
+            return
+        if pasted_line_end(event):
+            buf.insert_text("\n")
+            return
+        state = buf.complete_state
+        if state is not None and state.current_completion is not None:
+            buf.apply_completion(state.current_completion)
             return
         buf.validate_and_handle()
 

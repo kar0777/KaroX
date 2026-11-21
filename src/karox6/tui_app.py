@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import re
 import sys
 from collections import deque
 from collections.abc import AsyncIterator, Callable
@@ -22,7 +23,7 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, ThreadedCompleter
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.filters import Condition, has_completions, is_searching
-from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples, fragment_list_width
+from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples
 from prompt_toolkit.history import History
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
@@ -41,83 +42,192 @@ from prompt_toolkit.widgets import SearchToolbar
 from karox6.tui import (
     _CLEAR_SCREEN,
     ChatApp,
-    StatusSnapshot,
-    _git_branch,
-    _glyphs,
-    _k,
-    _plain_text,
     _PromptInterrupt,
     build_completer,
     build_history,
+    pasted_line_end,
+)
+from karox6.tui_text import (
+    StatusSnapshot,
+    _git_branch,
+    _glyphs,
+    _plain_text,
+    narrow,
+    status_bar_fragments,
 )
 
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding.key_bindings import NotImplementedOrNone
+    from prompt_toolkit.layout.containers import WindowRenderInfo
+
+    from karox6.splash import Splash
 
 MAX_LOGICAL_LINES = 20_000
 _TRIM_BATCH = 2_000
 _WHEEL_LINES = 3
+_TAB = 4
+
+Run = tuple[str, str]  # (prompt_toolkit style, text without control characters)
+
+_SGR = re.compile("\x1b\\[([0-9;]*)m")
+_FG = {
+    30: "ansiblack",
+    31: "ansired",
+    32: "ansigreen",
+    33: "ansiyellow",
+    34: "ansiblue",
+    35: "ansimagenta",
+    36: "ansicyan",
+    37: "ansigray",
+    90: "ansibrightblack",
+    91: "ansibrightred",
+    92: "ansibrightgreen",
+    93: "ansibrightyellow",
+    94: "ansibrightblue",
+    95: "ansibrightmagenta",
+    96: "ansibrightcyan",
+    97: "ansiwhite",
+}
+_FLAGS = {1: "bold", 2: "dim", 3: "italic", 4: "underline", 7: "reverse"}
+_FLAG_OFF = {22: ("bold", "dim"), 23: ("italic",), 24: ("underline",), 27: ("reverse",)}
 
 
-def _parse_ansi_line(raw: str) -> StyleAndTextTuples:
-    expanded = raw.expandtabs(4)
-    if "\x1b" not in expanded:
-        return [("", expanded)] if expanded else []
-    return list(ANSI(expanded).__pt_formatted_text__())
+def _runs(text: str) -> list[Run]:
+    """``text`` (plain, or with SGR colour codes) as styled runs. The codes the chat itself
+    writes are read here directly (a run per colour change, not a fragment per character);
+    anything richer goes through prompt_toolkit's ANSI parser."""
+    if "\x1b" not in text:
+        return [("", text)] if text else []
+    out: list[Run] = []
+    color = ""
+    flags: list[str] = []
+    pos = 0
+    for match in _SGR.finditer(text):
+        if match.start() > pos:
+            out.append((" ".join([color, *flags]).strip(), text[pos : match.start()]))
+        pos = match.end()
+        for raw in (match.group(1) or "0").split(";"):
+            code = int(raw or 0)
+            if code == 0:
+                color, flags = "", []
+            elif code in _FG:
+                color = _FG[code]
+            elif code == 39:
+                color = ""
+            elif code in _FLAGS:
+                if _FLAGS[code] not in flags:
+                    flags.append(_FLAGS[code])
+            elif code in _FLAG_OFF:
+                flags = [f for f in flags if f not in _FLAG_OFF[code]]
+            else:  # 256 colours, true colour, backgrounds: the full parser knows them
+                return _merge(list(ANSI(text).__pt_formatted_text__()))
+    if "\x1b" in text[pos:]:  # some other escape sequence
+        return _merge(list(ANSI(text).__pt_formatted_text__()))
+    if pos < len(text):
+        out.append((" ".join([color, *flags]).strip(), text[pos:]))
+    return out
+
+
+def _merge(fragments: StyleAndTextTuples) -> list[Run]:
+    """Neighbouring fragments of one style as one run (the ANSI parser yields a fragment
+    per character)."""
+    out: list[Run] = []
+    style = ""
+    chars: list[str] = []
+    for item in fragments:
+        if item[0] != style and chars:
+            out.append((style, "".join(chars)))
+            chars = []
+        style = item[0]
+        chars.append(item[1])
+    if chars:
+        out.append((style, "".join(chars)))
+    return out
+
+
+def _extend(line: StyleAndTextTuples, style: str, text: str) -> None:
+    if not text:
+        return
+    if line and line[-1][0] == style:
+        line[-1] = (style, line[-1][1] + text)
+    else:
+        line.append((style, text))
+
+
+def _wrap_into(lines: list[StyleAndTextTuples], col: int, runs: list[Run], width: int) -> int:
+    """Append ``runs`` to the visual lines ``lines`` (the last one is open at cell ``col``),
+    breaking at ``width`` cells; returns the new column. Text whose characters all take one
+    cell is cut by slicing; other text goes character by character with its real widths."""
+    for style, text in runs:
+        if narrow(text):
+            pos = 0
+            while pos < len(text):
+                room = width - col
+                if room <= 0:
+                    lines.append([])
+                    col, room = 0, width
+                piece = text[pos : pos + room]
+                _extend(lines[-1], style, piece)
+                col += len(piece)
+                pos += len(piece)
+            continue
+        chars: list[str] = []
+        for ch in text:
+            cells = max(get_cwidth(ch), 0)
+            if col > 0 and col + cells > width:
+                _extend(lines[-1], style, "".join(chars))
+                chars = []
+                lines.append([])
+                col = 0
+            chars.append(ch)
+            col += cells
+        _extend(lines[-1], style, "".join(chars))
+    return col
 
 
 def _wrap_fragments(fragments: StyleAndTextTuples, width: int) -> list[StyleAndTextTuples]:
     """Wrap formatted fragments to terminal cell ``width``, respecting wide Unicode chars."""
     if width <= 0:
         return [fragments]
-    if not fragments:
-        return [[]]
-    lines: list[StyleAndTextTuples] = []
-    cur: StyleAndTextTuples = []
-    cur_style = ""
-    cur_chars: list[str] = []
-    col = 0
+    lines: list[StyleAndTextTuples] = [[]]
+    _wrap_into(lines, 0, [(item[0], item[1]) for item in fragments], width)
+    return lines
 
-    def flush_run() -> None:
-        nonlocal cur_chars
-        if cur_chars:
-            cur.append((cur_style, "".join(cur_chars)))
-            cur_chars = []
 
-    def finish_line() -> None:
-        nonlocal cur, col
-        flush_run()
-        lines.append(cur)
-        cur = []
-        col = 0
-
-    for item in fragments:
-        style = item[0]
-        text = item[1]
-        for ch in text:
-            cw = max(get_cwidth(ch), 0)
-            if col > 0 and col + cw > width:
-                finish_line()
-            if style != cur_style:
-                flush_run()
-                cur_style = style
-            cur_chars.append(ch)
-            col += cw
-    finish_line()
-    return lines or [[]]
+def _expand_tabs(text: str, start: int) -> str:
+    """Tabs as spaces up to the next multiple of four characters; ``start`` is how many
+    characters the line already holds."""
+    out: list[str] = []
+    col = start
+    for ch in text:
+        if ch == "\t":
+            pad = _TAB - col % _TAB
+            out.append(" " * pad)
+            col += pad
+        else:
+            out.append(ch)
+            col += 1
+    return "".join(out)
 
 
 class _TranscriptControl(UIControl):
-    """Scrollable, incrementally wrapped ANSI conversation pane."""
+    """Scrollable, incrementally wrapped conversation pane.
+
+    A logical line is a list of styled runs. Text that streams into the last line is
+    wrapped where the previous piece ended, so a long paragraph costs its new characters
+    per frame, not its whole length (a 30,000-character paragraph took 11 s of CPU before).
+    """
 
     def __init__(self) -> None:
-        self._raw_lines: list[str] = [""]
-        self._parsed_lines: list[StyleAndTextTuples] = [[]]
+        self._lines: list[list[Run]] = [[]]
+        self._chars: int = 0  # characters in the open (last) line, for tab stops
         self._wrap_width: int = 0
         self._wrapped_cache: list[list[StyleAndTextTuples]] = []
         self._visual_offsets: list[int] = []
         self._visual_lines: list[StyleAndTextTuples] = [[]]
         self._dirty_from: int = 0
+        # The open line as far as it is wrapped: (its index, runs wrapped, column reached).
+        self._tail: tuple[int, int, int] | None = None
 
         self.follow: bool = True
         self.scroll_top: int = 0
@@ -136,17 +246,16 @@ class _TranscriptControl(UIControl):
     @property
     def plain_text(self) -> str:
         """All currently stored logical text (without ANSI escapes), for diagnostics/tests."""
-        from karox6.tui import _ANSI
-
-        return _ANSI.sub("", "\n".join(self._raw_lines))
+        return "\n".join("".join(text for _, text in line) for line in self._lines)
 
     def clear(self) -> None:
-        self._raw_lines = [""]
-        self._parsed_lines = [[]]
+        self._lines = [[]]
+        self._chars = 0
         self._wrapped_cache = []
         self._visual_offsets = []
         self._visual_lines = [[]]
         self._dirty_from = 0
+        self._tail = None
         self.follow = True
         self.scroll_top = 0
         self.total_visual_lines = 1
@@ -160,29 +269,32 @@ class _TranscriptControl(UIControl):
             if not text:
                 return
         text = text.replace("\r\n", "\n").replace("\r", "")
-        parts = text.split("\n")
-        first_idx = len(self._raw_lines) - 1
-        self._raw_lines[-1] += parts[0]
-        self._parsed_lines[-1] = _parse_ansi_line(self._raw_lines[-1])
-        self._dirty_from = min(self._dirty_from, first_idx)
-        for part in parts[1:]:
-            self._raw_lines.append(part)
-            self._parsed_lines.append(_parse_ansi_line(part))
-        if len(self._raw_lines) > MAX_LOGICAL_LINES:
+        open_index = len(self._lines) - 1
+        for style, chunk in _runs(text):
+            for n, raw in enumerate(chunk.split("\n")):
+                if n:
+                    self._lines.append([])
+                    self._chars = 0
+                if raw:
+                    part = _expand_tabs(raw, self._chars) if "\t" in raw else raw
+                    self._lines[-1].append((style, part))
+                    self._chars += len(part)
+        self._dirty_from = min(self._dirty_from, open_index)
+        if len(self._lines) > MAX_LOGICAL_LINES:
             drop = _TRIM_BATCH
-            del self._raw_lines[:drop]
-            del self._parsed_lines[:drop]
+            del self._lines[:drop]
             self._wrapped_cache = []
             self._visual_offsets = []
             self._visual_lines = []
             self._dirty_from = 0
+            self._tail = None
             if not self.follow:
                 self.scroll_top = max(0, self.scroll_top - drop)
 
     def _displayed_logical_count(self) -> int:
-        if len(self._raw_lines) > 1 and self._raw_lines[-1] == "":
-            return len(self._raw_lines) - 1
-        return len(self._raw_lines)
+        if len(self._lines) > 1 and not self._lines[-1]:
+            return len(self._lines) - 1
+        return len(self._lines)
 
     def _sync_wrap(self, width: int) -> None:
         width = max(1, width)
@@ -193,9 +305,25 @@ class _TranscriptControl(UIControl):
             self._visual_offsets = []
             self._visual_lines = []
             self._dirty_from = 0
+            self._tail = None
 
         dirty = min(self._dirty_from, len(self._wrapped_cache), count)
-        if dirty < len(self._wrapped_cache):
+        tail = self._tail
+        if (
+            tail is not None
+            and dirty == tail[0] == len(self._wrapped_cache) - 1
+            and tail[0] < count
+            and self._visual_lines
+        ):
+            # Only the open line grew: wrap its new runs where the last frame stopped.
+            index, done, col = tail
+            line = self._lines[index]
+            before = len(self._visual_lines)
+            col = _wrap_into(self._visual_lines, col, line[done:], width)
+            self._wrapped_cache[index].extend(self._visual_lines[before:])
+            self._tail = (index, len(line), col)
+            dirty = index + 1
+        elif dirty < len(self._wrapped_cache):
             cut = self._visual_offsets[dirty]
             del self._visual_lines[cut:]
             del self._wrapped_cache[dirty:]
@@ -207,9 +335,11 @@ class _TranscriptControl(UIControl):
 
         for i in range(dirty, count):
             self._visual_offsets.append(len(self._visual_lines))
-            wrapped = _wrap_fragments(self._parsed_lines[i], width)
+            wrapped: list[StyleAndTextTuples] = [[]]
+            col = _wrap_into(wrapped, 0, self._lines[i], width)
             self._wrapped_cache.append(wrapped)
             self._visual_lines.extend(wrapped)
+            self._tail = (i, len(self._lines[i]), col) if i == len(self._lines) - 1 else None
 
         if not self._visual_lines:
             self._visual_lines = [[]]
@@ -282,6 +412,20 @@ class _TranscriptControl(UIControl):
             self.scroll_by(_WHEEL_LINES)
             return None
         return NotImplemented
+
+
+class _QuietScrollbar(ScrollbarMargin):
+    """The scrollbar only when there is something to scroll: a full-height bar beside a
+    conversation that fits its window says nothing. Its column stays reserved, so the
+    text does not re-wrap when the bar appears."""
+
+    @override
+    def create_margin(
+        self, window_render_info: WindowRenderInfo, width: int, height: int
+    ) -> StyleAndTextTuples:
+        if window_render_info.content_height <= window_render_info.window_height:
+            return []
+        return super().create_margin(window_render_info, width, height)
 
 
 class _FullScreenTurnView:
@@ -392,6 +536,7 @@ class FullScreenTui:
         model: str = "",
         provider: str = "",
         approval_mode: str = "ask",
+        splash: Splash | None = None,
     ) -> None:
         self._workspace = (workspace or Path.cwd()).resolve()
         self._home = home
@@ -438,7 +583,7 @@ class FullScreenTui:
             content=self._transcript,
             wrap_lines=False,
             get_vertical_scroll=lambda _w: self._transcript.scroll_top,
-            right_margins=[ScrollbarMargin(display_arrows=False)],
+            right_margins=[_QuietScrollbar(display_arrows=False)],
             always_hide_cursor=True,
         )
         self._status_window = Window(
@@ -535,9 +680,28 @@ class FullScreenTui:
             output=output,
         )
         self._app.ttimeoutlen = 0.12
+        if splash is not None:
+            self._adopt(splash)
 
         self._app_task: asyncio.Task[None] | None = None
         self._active: bool = False
+
+    def _adopt(self, splash: Splash) -> None:
+        """The start-up frame (karox6.splash) has already put the terminal into the
+        alternate screen and painted what the first frame shows. Entering again would
+        make some terminals save the cursor a second time (and put it back in the wrong
+        place on exit), so the app's own "enter" only moves the cursor home; the first
+        frame then redraws the same cells."""
+        output = self._app.output
+        enter = output.enter_alternate_screen
+
+        def enter_once() -> None:
+            if splash.take_over():
+                output.cursor_goto(0, 0)
+            else:
+                enter()
+
+        output.enter_alternate_screen = enter_once  # type: ignore[method-assign]
 
     # -- public properties & wiring ----------------------------------------------------
 
@@ -568,6 +732,10 @@ class FullScreenTui:
     def attach_app(self, chat_app: ChatApp) -> None:
         self._chat_app = chat_app
         self.invalidate()
+
+    def columns(self) -> int:
+        """Cells a line of the conversation can take (the scrollbar column left out)."""
+        return max(self._app.output.get_size().columns - 1, 20)
 
     def invalidate(self) -> None:
         if self._app.is_running and not self._app.is_done:
@@ -783,50 +951,23 @@ class FullScreenTui:
 
     def _status_bar_text(self) -> StyleAndTextTuples:
         snap = self._snapshot()
-        dot = self._glyph["dot"]
-        left: StyleAndTextTuples = [
-            ("class:status-bar", " "),
-            ("class:status-bar.model", _plain_text(snap.model)),
+        if snap.running and not snap.activity and self._turn_status_fn is not None:
+            from dataclasses import replace
+
+            snap = replace(snap, activity=self._turn_status_fn())
+        scrolled = 0 if self._transcript.follow else self._transcript.lines_below
+        queued = sum(1 for item in self._queued_inputs if isinstance(item, str))
+        fragments = status_bar_fragments(
+            snap,
+            self._glyph,
+            self._app.output.get_size().columns,
+            scrolled=scrolled,
+            queued=queued if self._turn_active else 0,
+        )
+        return [
+            (f"class:status-bar.{style}" if style else "class:status-bar", text)
+            for style, text in fragments
         ]
-        proj = _plain_text(snap.workspace_name)
-        if snap.branch:
-            proj = f"{proj} ({_plain_text(snap.branch)})"
-        left.append(("class:status-bar.dim", f"{dot}{proj}"))
-
-        activity = snap.activity
-        if not activity and self._turn_status_fn is not None:
-            activity = self._turn_status_fn()
-        if snap.running and activity:
-            left.append(("class:status-bar.dim", dot))
-            left.append(("class:status-bar.activity", _plain_text(activity)))
-        elif not self._transcript.follow and self._transcript.lines_below > 0:
-            left.append(("class:status-bar.dim", dot))
-            left.append(
-                (
-                    "class:status-bar.scroll",
-                    f"scrolled +{self._transcript.lines_below}L (End)",
-                )
-            )
-
-        right: StyleAndTextTuples = []
-        if snap.context_window:
-            ctx = f"ctx {_k(snap.context_used)}/{_k(snap.context_window)} ({snap.context_pct}%)"
-            tok = f"{_k(snap.total_tokens)} tok{dot}{ctx}" if snap.total_tokens else ctx
-            right.append(("class:status-bar.dim", tok + dot))
-        mode_style = {
-            "allow": "class:status-bar.allow",
-            "deny": "class:status-bar.deny",
-        }.get(snap.approval_mode, "class:status-bar.dim")
-        right.append((mode_style, f"approve:{snap.approval_mode}"))
-        right.append(("class:status-bar", " "))
-
-        width = self._app.output.get_size().columns
-        left_w = fragment_list_width(left)
-        right_w = fragment_list_width(right)
-        gap = width - left_w - right_w
-        if gap >= 2:
-            return [*left, ("class:status-bar", " " * gap), *right]
-        return [*left, ("class:status-bar.dim", dot), *right]
 
     def _question_banner_text(self) -> StyleAndTextTuples:
         dot = self._glyph["dot"]
@@ -909,7 +1050,7 @@ class FullScreenTui:
             self._queued_inputs.clear()
             if self._turn_interrupt_fn is not None:
                 self._turn_interrupt_fn()
-                event.app.invalidate()
+            event.app.invalidate()
 
         # -- inline question & secret dialogs --
 
@@ -1014,16 +1155,18 @@ class FullScreenTui:
 
         @keys.add("enter", filter=in_input & ~is_searching)
         def _enter(event: KeyPressEvent) -> None:
-            del event
             buf = self._input_buffer
-            state = buf.complete_state
-            if state is not None and state.current_completion is not None:
-                buf.apply_completion(state.current_completion)
-                return
             doc = buf.document
             if doc.text_before_cursor.endswith("\\") and not doc.text_after_cursor:
                 buf.delete_before_cursor(1)
                 buf.insert_text("\n")
+                return
+            if pasted_line_end(event):
+                buf.insert_text("\n")
+                return
+            state = buf.complete_state
+            if state is not None and state.current_completion is not None:
+                buf.apply_completion(state.current_completion)
                 return
             text = buf.text
             if text.strip():
@@ -1033,7 +1176,8 @@ class FullScreenTui:
             if self._read_future is not None and not self._read_future.done():
                 self._echo_user_message(text)
                 self._read_future.set_result(text)
-            else:
+            elif text.strip():
                 self._queued_inputs.append(text)
+                self.invalidate()  # the status bar counts what is waiting
 
         return keys
