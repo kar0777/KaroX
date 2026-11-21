@@ -1546,3 +1546,17 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   $0.055 / $0.049, median time to first token 2.6 s for all three. Two tasks say nothing
   about a difference; they join the sample. devt1 starts now as registered (trio, disc
   1, 3-6, 8-12, chunk 5, parallel 1, dev35 wheel).
+- 21:30 UTC, devt1 dispatched: run 44951155404 (bench commit bcfd3bb, dev35 wheel), two
+  chunks of five tasks on one runner each, one after the other.
+- Bench: opt-in arm `codex` (Codex CLI 0.171.0, bench commit 3116d6b): Codex speaks the
+  Responses API, the gateway bridges it to the lane's model under its own alias with the
+  same enforced profile and audit. Additive: the trio's agents, aliases and profile are
+  unchanged, so devt2 may run on this commit.
+- Pre-registered devc0 (plumbing only, not a comparison): arm `codex` alone, lane
+  freeinference (GLM-5.3-Flash; ReformBoss stays free for devt1/devt2, so the trio never
+  competes with it for the key's four slots), disc task 2 (isort-2750), 1 attempt,
+  parallel 1. Pass = Codex CLI installs in the task image, its requests reach the model
+  through the gateway (audit rows of harness `codex` with successful calls and tool use)
+  and the run ends on its own. If it passes, a codex arm may join a later same-model
+  comparison, registered separately; if it fails, the report says that Codex CLI could
+  not be measured on this gateway, and why. Its score is not read.
