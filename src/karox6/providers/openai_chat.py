@@ -50,6 +50,26 @@ _OVERFLOW_HINTS = (
 )
 
 
+# (what to change, the field the server's error names)
+_QUIRKS = (
+    ("max_completion_tokens", "max_completion_tokens"),
+    ("no_temperature", "temperature"),
+    ("no_stream_options", "stream_options"),
+    ("no_reasoning_effort", "reasoning_effort"),
+)
+_REFUSAL_WORDS = (
+    "unsupported",
+    "not supported",
+    "does not support",
+    "unknown",
+    "unrecognized",
+    "unexpected",
+    "extra inputs",
+    "not permitted",
+    "only the default",
+)
+
+
 @dataclass(slots=True)
 class OpenAIChatProvider:
     base_url: str
@@ -59,6 +79,9 @@ class OpenAIChatProvider:
     timeout_s: float = 900.0
     headers: dict[str, str] = field(default_factory=dict)
     stream_idle_s: float | None = STREAM_IDLE_S  # silence allowed once the answer flows
+    # What this server turned out not to accept (learned from its 400 answers, see
+    # ``_learn``): the request is then built without it for the rest of the session.
+    quirks: set[str] = field(default_factory=set)
     _client: httpx.AsyncClient | None = None
 
     def _http(self) -> httpx.AsyncClient:
@@ -68,6 +91,22 @@ class OpenAIChatProvider:
             timeout = httpx.Timeout(self.timeout_s, connect=30.0)
             self._client = httpx.AsyncClient(timeout=timeout)
         return self._client
+
+    def _learn(self, exc: ProviderError) -> bool:
+        """A request field this server refuses, read from its error: True when the next
+        request will differ (so it is worth sending again). OpenAI's reasoning models
+        want ``max_completion_tokens`` instead of ``max_tokens`` and no ``temperature``;
+        some compatible servers reject ``stream_options`` or ``reasoning_effort``."""
+        if exc.code != "bad_request" or exc.status not in (400, 422):
+            return False
+        text = str(exc).lower()
+        if not any(word in text for word in _REFUSAL_WORDS):
+            return False
+        for quirk, field_name in _QUIRKS:
+            if quirk not in self.quirks and field_name in text:
+                self.quirks.add(quirk)
+                return True
+        return False
 
     async def aclose(self) -> None:
         if self._client is not None:
@@ -92,19 +131,34 @@ class OpenAIChatProvider:
                 }
                 for t in request.tools
             ]
+        quirks = self.quirks
         if request.max_output_tokens:
-            body["max_tokens"] = request.max_output_tokens
-        if request.temperature is not None:
+            name = "max_completion_tokens" if "max_completion_tokens" in quirks else "max_tokens"
+            body[name] = request.max_output_tokens
+        if request.temperature is not None and "no_temperature" not in quirks:
             body["temperature"] = request.temperature
-        if request.reasoning_effort:
+        if request.reasoning_effort and "no_reasoning_effort" not in quirks:
             body["reasoning_effort"] = request.reasoning_effort
         if self.stream:
             body["stream"] = True
-            body["stream_options"] = {"include_usage": True}
+            if "no_stream_options" not in quirks:
+                body["stream_options"] = {"include_usage": True}
         body.update(request.extra_body)
         return body
 
     async def complete(
+        self, request: ModelRequest, on_delta: DeltaCallback | None = None
+    ) -> ModelResponse:
+        while True:
+            try:
+                return await self._attempt(request, on_delta)
+            except ProviderError as exc:
+                # A field the server refuses is dropped (or renamed) and the request
+                # sent again at once: nothing was generated or billed for a 400.
+                if not self._learn(exc):
+                    raise
+
+    async def _attempt(
         self, request: ModelRequest, on_delta: DeltaCallback | None = None
     ) -> ModelResponse:
         import httpx

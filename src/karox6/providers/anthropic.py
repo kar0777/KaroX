@@ -17,6 +17,8 @@ from karox6.providers.base import (
     is_empty,
 )
 
+CACHE_MESSAGE_BREAKPOINTS = 2
+
 
 @dataclass(slots=True)
 class AnthropicProvider(StreamProvider):
@@ -62,10 +64,19 @@ class AnthropicProvider(StreamProvider):
                 messages[-1]["content"].extend(blocks)
             else:
                 messages.append({"role": role, "content": blocks})
+        # Cache breakpoints (4 allowed; the system block below is one): the end of the
+        # conversation, where this request writes its cache entry, and the end of the
+        # user message before it, where the previous request wrote its own. The second
+        # one makes the read exact: without it the API only looks 20 blocks back from
+        # the new breakpoint, and a step with many parallel tool calls adds more blocks
+        # than that, so the whole conversation was written to the cache again at 1.25x.
+        marked = 0
         for msg in reversed(messages):
             if msg["role"] == "user" and msg["content"]:
                 msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
-                break
+                marked += 1
+                if marked == CACHE_MESSAGE_BREAKPOINTS:
+                    break
         body: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
