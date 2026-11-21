@@ -83,6 +83,15 @@ TRUNCATION_NOTICE = (
     "Continue from where it stopped. Keep each response shorter: split large file contents "
     "into several smaller write or edit calls."
 )
+# An empty reply (reasoning only, no text and no tool call) repeats when the same request
+# is sent again: some providers cache identical requests and replay the empty answer
+# (gtrio2: 11 of 24 KaroX runs died this way on Dahl while the retries came back in ~1 s
+# with the same tokens). The notice changes the request and tells the model what is missing.
+EMPTY_REPLY_NOTICE = (
+    "Your previous reply was empty: no text and no tool call reached me. Continue the task "
+    "now: call the next tool you need, or give your final answer if you are done."
+)
+MAX_EMPTY_REPLIES = 3  # per run; after that the run ends with the provider's error
 FINAL_CALL_STEPS = 30  # after the wrap-up notice, ask for the final answer
 WRAP_UP_NOTICE = (
     "This run has taken {steps} steps, and every further step re-sends the whole "
@@ -235,6 +244,7 @@ class Session:
         self._append(Message("user", prompt))
         steps = 0
         truncations = 0
+        empties = 0  # empty replies answered with EMPTY_REPLY_NOTICE
         reminded = 0  # wrap-up notices sent (a truncated step may skip the exact count)
         warned = False  # deadline notice sent
         reviewed = False  # the independent review ran (once per run)
@@ -250,6 +260,10 @@ class Session:
                 try:
                     response = await self._call_model(steps, started, emit)
                 except ProviderError as exc:
+                    if exc.code == "empty_response" and empties < MAX_EMPTY_REPLIES:
+                        empties += 1
+                        self._notice("empty", EMPTY_REPLY_NOTICE, emit)
+                        continue
                     # The conversation outgrew what the provider accepts (our estimate was
                     # low, or the route's real window is smaller than configured): shrink
                     # it once and retry instead of losing the run.

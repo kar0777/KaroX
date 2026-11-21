@@ -208,6 +208,25 @@ def test_provider_errors(tmp_path, code, status, event):
     assert any(e.type == event for e in events)
 
 
+def test_empty_reply_is_answered_with_a_notice_not_a_resend(tmp_path):
+    empty = ProviderError("empty_response", "the model returned no text and no tool calls")
+    provider = ScriptedProvider([Turn(error=empty), Turn(text="done")])
+    session = Session(config(tmp_path, retry=RetryPolicy(max_retries=0)), provider)
+    events = run(session)
+    assert finish(events).status == "completed"
+    # the request after the empty reply differs from the one before it
+    assert provider.requests[1].messages[-1].content.startswith("Your previous reply was empty")
+    assert len(provider.requests[1].messages) == len(provider.requests[0].messages) + 1
+
+
+def test_empty_replies_end_the_run_after_the_cap(tmp_path):
+    empty = ProviderError("empty_response", "the model returned no text and no tool calls")
+    provider = ScriptedProvider([Turn(error=empty) for _ in range(5)])
+    events = run(Session(config(tmp_path, retry=RetryPolicy(max_retries=0)), provider))
+    assert finish(events).status == "error"
+    assert len(provider.requests) == 4  # the first reply and three notices
+
+
 def test_persistence_resume(tmp_path):
     cfg = config(tmp_path)
     original = Session(cfg, ScriptedProvider([Turn(text="first")]))
