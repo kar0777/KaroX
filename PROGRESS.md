@@ -1696,3 +1696,17 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   Estimate: 30-80 requests (the other CLIs needed 24-42 on this task). Its score is not
   read and it is not part of any comparison; a refused or failed upstream again means
   "not measurable tonight", not "no".
+- devt2 result (run 44958999941, 22:53-23:32 UTC; trio, ReformBoss, disc 17 and 20, one
+  runner, karox 6.0.0.dev36 / opencode v2.3.2 / DSH 0.2.2-rc.5; data and `trio_report.md`
+  in `karox6-bench-data/runs/devt2`). Both tasks valid (4-11% of the requests refused for
+  the 4-in-flight limit, none ended a trial). Solved: karox6 1 (fastapi-deprecation),
+  opencode_v2 1 (the same), deepseek_harness 2. On the two tasks named as KaroX losses
+  KaroX now solves the one it lost to an empty-reply ending on Dahl and still misses
+  claude-code-by-agents, as OpenCode does. Usage, karox6 / opencode_v2 / DSH: calls 148 /
+  180 / 190, input 13.9M / 16.8M / 16.0M (97-98% cached), output 149k / 127k / 146k
+  (reasoning 106k / 80k / 102k), agent time 24.0 / 28.2 / 31.9 min, cost-equivalent
+  $0.171 / $0.167 / $0.171. On these longer tasks KaroX is the quickest and makes the
+  fewest calls, at the same cost; the surplus seen on disc 1-12 is not there. Requests:
+  565 (2,140 since the reset).
+- 23:34 UTC, devc2 dispatched: run 44962415993 (bench be12460, codex alone, ReformBoss,
+  disc 2). devt2b waits for it to end.
