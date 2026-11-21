@@ -166,6 +166,8 @@ class AnthropicProvider(StreamProvider):
                     "stop_sequence": "stop",
                     "tool_use": "tool_calls",
                     "max_tokens": "length",
+                    "refusal": "content_filter",  # stopped by a safeguard: not an answer
+                    "model_context_window_exceeded": "window",
                 }.get(str(raw), "other")
                 usage.output_tokens = int((event.get("usage") or {}).get("output_tokens") or 0)
             elif kind == "message_stop":
@@ -187,6 +189,12 @@ class AnthropicProvider(StreamProvider):
         )
         if not done:
             raise ProviderError("transport", "stream ended before the response finished")
+        if finish == "window":
+            # Input plus this reply filled the model's window: the conversation has to
+            # shrink before the step is asked again; "continue" would hit the same wall.
+            raise ProviderError(
+                "context_window", "the reply stopped at the model's context window limit"
+            )
         calls = [
             ToolCall(
                 id=b.get("id", ""),

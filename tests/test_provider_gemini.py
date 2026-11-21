@@ -9,16 +9,15 @@ from karox6.providers.base import ModelRequest, ProviderError, ToolSpec
 from karox6.providers.gemini import GeminiProvider
 
 
-def run(events, status=200, headers=None, request=None):
+def run(events, status=200, headers=None, request=None, body=None):
     captured = {}
 
     def handler(req):
         captured["body"] = json.loads(req.content)
         captured["url"] = str(req.url)
         if status != 200:
-            return httpx.Response(
-                status, text="prompt is too long" if status == 400 else "error", headers=headers
-            )
+            text = body or ("prompt is too long" if status == 400 else "error")
+            return httpx.Response(status, text=text, headers=headers)
         data = "".join("data: " + json.dumps(e) + "\n\n" for e in events)
         return httpx.Response(200, text=data, headers={"content-type": "text/event-stream"})
 
@@ -162,3 +161,57 @@ def test_signatures_roundtrip():
     assert contents[0]["parts"][0]["thoughtSignature"] == "textsig"
     assert contents[0]["parts"][1]["thoughtSignature"] == "callsig"
     assert contents[1]["parts"][0]["functionResponse"]["name"] == "lookup"
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (
+            {
+                "code": 429,
+                "message": "Resource has been exhausted.",
+                "status": "RESOURCE_EXHAUSTED",
+            },
+            "rate_limit",
+        ),
+        ({"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}, "server"),
+        (
+            {"code": 500, "message": "An internal error has occurred.", "status": "INTERNAL"},
+            "server",
+        ),
+        (
+            {
+                "code": 400,
+                "message": "The input token count (1200000) exceeds the maximum number of tokens "
+                "allowed (1048576).",
+                "status": "INVALID_ARGUMENT",
+            },
+            "context_window",
+        ),
+        (
+            {
+                "code": 400,
+                "message": "Invalid JSON payload received.",
+                "status": "INVALID_ARGUMENT",
+            },
+            "bad_request",
+        ),
+        ({"code": 403, "message": "Permission denied.", "status": "PERMISSION_DENIED"}, "auth"),
+        ({"code": 504, "message": "Deadline expired.", "status": "DEADLINE_EXCEEDED"}, "timeout"),
+    ],
+)
+def test_an_error_inside_the_stream_keeps_its_kind_and_message(error, code):
+    with pytest.raises(ProviderError) as exc:
+        run([*TEXT, {"error": error}])
+    assert exc.value.code == code
+    assert error["message"] in str(exc.value)
+
+
+def test_too_many_input_tokens_is_a_context_overflow():
+    message = (
+        "The input token count (1200000) exceeds the maximum number of tokens allowed (1048576)."
+    )
+    error = {"error": {"code": 400, "message": message, "status": "INVALID_ARGUMENT"}}
+    with pytest.raises(ProviderError) as exc:
+        run([], 400, body=json.dumps(error))
+    assert exc.value.code == "context_window"

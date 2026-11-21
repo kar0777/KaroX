@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from karox6.providers.base import STREAM_IDLE_S, ProviderError, stream_lines
-from karox6.providers.openai_chat import _http_error
+from karox6.providers.openai_chat import _http_error, _sse_error_status
 
 if TYPE_CHECKING:
     import httpx
@@ -72,20 +72,39 @@ def _mapped_error(status: int, text: str, headers: Any) -> ProviderError:
     return _http_error(status, text, headers)
 
 
+# What the providers call an error sent inside a stream, as the HTTP status of the same
+# refusal (Anthropic: its ``type``; Gemini: the ``status`` beside a numeric ``code``).
+_NAMED_STATUS = {
+    "invalid_request_error": 400,
+    "invalid_argument": 400,
+    "failed_precondition": 400,
+    "authentication_error": 401,
+    "unauthenticated": 401,
+    "permission_error": 403,
+    "permission_denied": 403,
+    "not_found_error": 404,
+    "not_found": 404,
+    "request_too_large": 413,
+    "rate_limit_error": 429,
+    "resource_exhausted": 429,
+    "unavailable": 503,
+    "deadline_exceeded": 504,
+    "overloaded_error": 529,
+}
+
+
 def stream_error(error: Any) -> ProviderError:
+    """An error sent inside the stream, classified like the HTTP refusal it stands for.
+    Anthropic names it by ``type`` ("overloaded_error"), Gemini by an HTTP ``code`` plus a
+    ``status`` name ("RESOURCE_EXHAUSTED"), the Responses API by a string ``code``
+    ("rate_limit_exceeded"). The names stay in the message: quota and context-window
+    wording is recognised there, and the user sees what the provider called it."""
     if not isinstance(error, dict):
         return _mapped_error(500, str(error), {})
-    kind = str(error.get("type") or error.get("status") or error.get("code") or "")
-    status = (
-        int(kind)
-        if kind.isdigit()
-        else {
-            "rate_limit_error": 429,
-            "resource_exhausted": 429,
-            "authentication_error": 401,
-            "permission_denied": 403,
-            "invalid_request_error": 400,
-            "overloaded_error": 529,
-        }.get(kind.lower(), 500)
-    )
-    return _mapped_error(status, str(error.get("message") or error), {})
+    names = [str(error[key]) for key in ("code", "type", "status") if error.get(key) is not None]
+    labels = [name for name in names if not name.isdigit()]
+    numbers = [int(name) for name in names if name.isdigit() and 400 <= int(name) < 600]
+    named = [_NAMED_STATUS[label.lower()] for label in labels if label.lower() in _NAMED_STATUS]
+    status = (numbers or named or [_sse_error_status(None, " ".join(labels))])[0]
+    text = ": ".join([*labels, str(error.get("message") or error)])
+    return _mapped_error(status, text, {})

@@ -37,6 +37,13 @@ _CONTEXT_HINTS = (
     "maximum context",
     "too many tokens",
     "context window",
+    # the same refusal in other servers' words
+    "prompt is too long",  # Anthropic: prompt is too long: N tokens > M maximum
+    "exceed context limit",  # Anthropic: input length and `max_tokens` exceed context limit
+    "exceeds the maximum number of tokens",  # Gemini: The input token count (N) exceeds ...
+    "maximum prompt length",  # xAI: This model's maximum prompt length is N but ...
+    "exceeds the available context size",  # llama.cpp server
+    "input is too long",  # Bedrock: Input is too long for requested model.
 )
 # In a 5xx body only explicit overflow wording counts ("failed to load context window
 # configuration" is a gateway fault to retry, not an overflow).
@@ -47,6 +54,11 @@ _OVERFLOW_HINTS = (
     "exceeds the context",
     "exceed the context",
     "context length exceeded",
+    "prompt is too long",
+    "exceed context limit",
+    "maximum prompt length",
+    "exceeds the available context size",
+    "exceeds the maximum number of tokens",
 )
 
 
