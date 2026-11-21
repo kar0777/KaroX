@@ -1675,3 +1675,24 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   The compaction A/B (disc 18, 19; two KaroX arms; ab2: 547 and 329 requests, ~900
   together, 1,100 with a margin) starts only if devt2 and devt2b leave at least 1,100
   requests and it can end before 03:40 UTC; otherwise it is not run today.
+- 22:53 UTC, devt2 dispatched: run 44958999941 (bench b9696e8, dev36 wheel named
+  explicitly), one job, disc 17 then 20.
+- devc1 result (run 44955966673, 22:17-23:05 UTC; data in `karox6-bench-data/runs/devc1`):
+  FAIL, and again no answer about the model path, this time for a reason outside the
+  bench: FreeInference refused all 30 requests with 503 "FreeInference is temporarily
+  paused due to a security incident" (the gateway retried each 12 times; devc0's 44
+  minutes were most likely the same outage). What the run does show: the artifact comes
+  back now (audit, `codex.jsonl`, the session file); Codex CLI 0.171.0 installs in the
+  task image and starts; its requests reach the gateway as `POST /v1/responses` under the
+  alias `hard12-codex` and are logged with harness `codex`. Two faults of the arm, fixed
+  in bench be12460: Codex refuses to create its helper binaries (the `apply_patch` alias)
+  under /tmp, so CODEX_HOME is now `$HOME/.codex-hard12`; and the alias is not a model
+  Codex knows ("Model metadata for `hard12-codex` not found"), so the 1M window is set
+  in its config.
+- Pre-registered devc2 (plumbing only, not a comparison, same pass rule as devc0): arm
+  `codex` alone on the lane that works tonight, ReformBoss (the alias exists there since
+  3116d6b), disc task 2, 1 attempt, parallel 1, bench be12460. It runs between devt2 and
+  devt2b, never beside them (one ReformBoss run at a time; one request in flight).
+  Estimate: 30-80 requests (the other CLIs needed 24-42 on this task). Its score is not
+  read and it is not part of any comparison; a refused or failed upstream again means
+  "not measurable tonight", not "no".
