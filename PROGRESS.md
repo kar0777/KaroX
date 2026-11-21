@@ -1528,3 +1528,10 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   notice and each next reply came through (0 of 3 cut again; baseline 12 of 74); no run
   ended on "output repeatedly cut off". Three events are too few to call it an effect.
   No empty_response endings. The comparison stays on ReformBoss (devs1 after 21:00 UTC).
+- 20:58 UTC, before devs1: the comparison runs keep the registered wheel, 6.0.0.dev35 (it
+  already ran in the bench images in devd1). 6.0.0.dev36 (chat UI, /undo, pictures, /mcp,
+  provider dialects) differs on the headless path only in code that does not fire there:
+  an OpenAI-compatible 400 that names a refused request field is now retried without it
+  (the gateway sets those fields itself), `edit` reports the line of its change in its
+  metadata (not in the text the model reads), and a user message may carry pictures.
+  No prompt, tool description or loop change since dev35.
