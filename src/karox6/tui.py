@@ -20,13 +20,15 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from karox6 import __version__
 from karox6.core import events as ev
 from karox6.core.digest import brief, is_tool_failure, outcome
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import Completer
     from prompt_toolkit.history import History
@@ -38,11 +40,46 @@ if TYPE_CHECKING:
     from karox6.core.config import SessionConfig
     from karox6.core.session import Session
     from karox6.tools.base import ApprovalRequest, Tool
-    from karox6.tui_terminal import TurnDisplay
+
+
+class TurnView(Protocol):
+    """Live turn presentation used by ChatApp._run_with_display."""
+
+    async def __aenter__(self) -> TurnView: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None: ...
+
+    def write(self, text: str) -> None: ...
+
+    def pause(self) -> contextlib.AbstractAsyncContextManager[None]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class StatusSnapshot:
+    """Current chat metadata displayed by the full-screen status bar."""
+
+    model: str
+    provider: str
+    workspace_name: str
+    branch: str
+    approval_mode: str
+    running: bool
+    activity: str
+    total_tokens: int
+    context_used: int
+    context_window: int
+    context_pct: int
+    session_id: str | None
+
 
 ReadLine = Callable[[str], Awaitable[str]]  # raises EOFError at end of input
 Write = Callable[[str], None]
-DisplayFactory = Callable[[Write, Callable[[], str], Callable[[], None]], "TurnDisplay | None"]
+DisplayFactory = Callable[[Write, Callable[[], str], Callable[[], None]], "TurnView | None"]
 
 APPROVAL_MODES = ("ask", "allow", "deny")
 _SESSION_COMMANDS = frozenset(
@@ -151,6 +188,7 @@ _HELP_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("Enter / Alt+Enter", "send message / insert newline (Ctrl+J or trailing \\ also work)"),
     ("Tab", "complete /commands, arguments and @file paths"),
     ("Ctrl+R", "search persistent input history"),
+    ("PgUp / PgDn / End", "scroll conversation (mouse wheel too; End / Ctrl+End jumps to bottom)"),
     ("Esc or Ctrl+C", "stop the running turn"),
     ("Ctrl+D", "exit chat at an empty prompt"),
 )
@@ -459,7 +497,8 @@ class ChatApp:
         self._before_turn = before_turn
         self._session_task: asyncio.Task[Session] | None = None
         self._display_factory = display_factory
-        self._display: TurnDisplay | None = None
+        self._display: TurnView | None = None
+        self._branch: str | None = None
         self._turn_started = 0.0
         self._phase = ""
         self._active_tools: dict[str, ev.ToolStarted] = {}
@@ -563,12 +602,61 @@ class ChatApp:
             lines.append(line)
             return "\n".join(lines)
 
+    def _branch_name(self) -> str:
+        if self._branch is None:
+            self._branch = _git_branch(Path(self.config.workspace))
+        return self._branch
+
+    def status_snapshot(self) -> StatusSnapshot:
+        """Current state for the full-screen status bar (never forces session init)."""
+        cfg = self.config
+        ws = Path(cfg.workspace)
+        has_session = self._initialize is None and hasattr(self, "session")
+        if has_session:
+            s = self.session
+            u = s.usage
+            total_tokens = u.input_tokens + u.output_tokens
+            used = s.context_tokens() if s.messages else 0
+            window = cfg.effective_window(s._learned_window)
+            pct = min(round(used / window * 100), 100) if window else 0
+            session_id: str | None = s.session_id
+        else:
+            total_tokens = 0
+            used = 0
+            window = cfg.effective_window(None)
+            pct = 0
+            session_id = None
+        return StatusSnapshot(
+            model=cfg.model,
+            provider=cfg.provider_name,
+            workspace_name=ws.name or str(ws),
+            branch=self._branch_name(),
+            approval_mode=self.approval_mode,
+            running=self._turn_running,
+            activity=self._progress() if self._turn_running else "",
+            total_tokens=total_tokens,
+            context_used=used,
+            context_window=window,
+            context_pct=pct,
+            session_id=session_id,
+        )
+
+    def exit_summary(self) -> str:
+        """One-line summary printed to the normal screen after leaving full-screen TUI."""
+        if self._initialize is None and hasattr(self, "session"):
+            sid = self.session.session_id
+            count = len(self.session.messages)
+            if count:
+                return f"Session {sid} ({count} messages) — resume: karox6 chat --resume {sid}"
+            return f"Session {sid} (empty) — resume previous: karox6 chat --resume last"
+        return "KaroX exited — resume previous: karox6 chat --resume last"
+
     def _banner(self) -> str:
         """The welcome card: what runs where, and the keys a new user needs first."""
         cfg = self.config
         dot = self.glyph["dot"]
         project = _plain_text(str(cfg.workspace))
-        branch = _git_branch(Path(cfg.workspace))
+        branch = self._branch_name()
         if branch:
             project += self.paint("dim", f"{dot}{_plain_text(branch)}")
         rows = [
@@ -987,7 +1075,13 @@ class ChatApp:
     async def _set_key(self) -> None:
         from karox6.credentials import save_key
 
-        key = (await self.read_secret("API key (hidden; Enter keeps the current one): ")).strip()
+        try:
+            key = (
+                await self.read_secret("API key (hidden; Enter keeps the current one): ")
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            self.write("key unchanged\n")
+            return
         if not key:
             self.write("key unchanged\n")
             return
@@ -1002,7 +1096,13 @@ class ChatApp:
         from karox6.providers import make_provider
         from karox6.setup import run_setup
 
-        choice = await run_setup(self.read_answer, self.read_secret, self.write, self.config.home)
+        try:
+            choice = await run_setup(
+                self.read_answer, self.read_secret, self.write, self.config.home
+            )
+        except (EOFError, KeyboardInterrupt):
+            self.write("setup cancelled\n")
+            return
         if choice is None:
             return
         key = choice.key or getattr(self.provider, "api_key", None)
@@ -1240,7 +1340,7 @@ def _k(n: int) -> str:
 
 def terminal_display(
     write: Write, status: Callable[[], str], interrupt: Callable[[], None]
-) -> TurnDisplay | None:
+) -> TurnView | None:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
     try:
@@ -1425,17 +1525,8 @@ def build_key_bindings() -> KeyBindings:
     return keys
 
 
-def build_prompt_session(
-    *,
-    history: Path | History | None = None,
-    workspace: Path | None = None,
-    home: Path | None = None,
-    encoding: str | None = None,
-    input: Input | None = None,
-    output: Output | None = None,
-) -> PromptSession[str]:
-    """Create a configured inline PromptSession (testable with PipeInput + DummyOutput)."""
-    from prompt_toolkit import PromptSession
+def build_history(history: Path | History | None = None) -> History:
+    """Persistent file-backed history (loaded in a thread) or in-memory history."""
     from prompt_toolkit.history import FileHistory, InMemoryHistory, ThreadedHistory
 
     class ChatHistory(FileHistory):
@@ -1448,11 +1539,24 @@ def build_prompt_session(
                 Path(os.fsdecode(self.filename)).parent.mkdir(parents=True, exist_ok=True)
                 super().store_string(string)
 
-    store: History
     if isinstance(history, Path):
-        store = ThreadedHistory(ChatHistory(history))
-    else:
-        store = history if history is not None else InMemoryHistory()
+        return ThreadedHistory(ChatHistory(history))
+    return history if history is not None else InMemoryHistory()
+
+
+def build_prompt_session(
+    *,
+    history: Path | History | None = None,
+    workspace: Path | None = None,
+    home: Path | None = None,
+    encoding: str | None = None,
+    input: Input | None = None,
+    output: Output | None = None,
+) -> PromptSession[str]:
+    """Create a configured inline PromptSession (testable with PipeInput + DummyOutput)."""
+    from prompt_toolkit import PromptSession
+
+    store = build_history(history)
     more = _glyphs(encoding or getattr(sys.stdout, "encoding", None))["more"]
     resolved_home = home or (history.parent if isinstance(history, Path) else None)
     return PromptSession(
