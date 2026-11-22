@@ -75,6 +75,9 @@ def environment_block(workspace: Path, shell: ShellInfo) -> str:
     hint = python_hint()
     if hint:
         lines.append(f"- {hint}")
+    interp = python_interpreter(workspace)
+    if interp:
+        lines.append(f"- {interp}")
     lines.extend(f"- {item}" for item in project_inventory(workspace))
     return "\n".join(lines)
 
@@ -149,6 +152,73 @@ def project_inventory(workspace: Path, max_items: int = 12) -> list[str]:
             out.append(f"{name} targets: {names(targets)}" if targets else name)
             break
     return [line if len(line) <= 400 else line[:400] + "..." for line in out]
+
+
+INTERPRETER_MAX_CHARS = 158  # leaves room for "- " so the bullet line stays <= 160
+_VENV_DIRS = (".venv", "venv")
+_VENV_PYTHONS_WIN = ("Scripts/python.exe", "Scripts/python", "bin/python", "bin/python3")
+_VENV_PYTHONS_POSIX = ("bin/python", "bin/python3", "Scripts/python.exe", "Scripts/python")
+_PYVENV_VERSION_RE = re.compile(r"(\d+(?:\.\d+)+(?:(?:a|b|rc)\d+)?)")
+
+
+def _cap_interpreter_line(line: str) -> str:
+    clean = " ".join(line.split())
+    if len(clean) <= INTERPRETER_MAX_CHARS:
+        return clean
+    return clean[: INTERPRETER_MAX_CHARS - 3] + "..."
+
+
+def _venv_python_version(venv_dir: Path) -> str | None:
+    """Read Python version from ``pyvenv.cfg`` without spawning a subprocess."""
+    cfg = venv_dir / "pyvenv.cfg"
+    try:
+        if not cfg.is_file() or cfg.stat().st_size > 64 * 1024:
+            return None
+        body = cfg.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    values: dict[str, str] = {}
+    for raw_line in body.splitlines():
+        if "=" not in raw_line:
+            continue
+        key, _, val = raw_line.partition("=")
+        k = key.strip().lower()
+        if k in ("version", "version_info") and k not in values:
+            v = val.strip()
+            if v:
+                values[k] = v
+    raw = values.get("version") or values.get("version_info")
+    if not raw:
+        return None
+    match = _PYVENV_VERSION_RE.match(raw)
+    return match.group(1) if match else raw.split()[0][:32]
+
+
+def python_interpreter(workspace: Path) -> str | None:
+    """One-line description of the Python interpreter tests would run under: the project
+    virtualenv if present, otherwise ``python3``/``python`` on PATH. Omitted when nothing
+    is found."""
+    is_windows = platform.system() == "Windows"
+    candidates = _VENV_PYTHONS_WIN if is_windows else _VENV_PYTHONS_POSIX
+    for venv in _VENV_DIRS:
+        venv_dir = workspace / venv
+        for exe in candidates:
+            if (venv_dir / exe).is_file():
+                version = _venv_python_version(venv_dir)
+                ver = f" (Python {version})" if version else ""
+                return _cap_interpreter_line(f"Python interpreter: {venv}/{exe}{ver}")
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if not found:
+            continue
+        if (
+            is_windows
+            and "\\windowsapps\\" in found.lower().replace("/", "\\")
+            and not _answers_version(found)
+        ):
+            continue
+        return _cap_interpreter_line(f"Python interpreter: {found}")
+    return None
 
 
 def python_hint() -> str | None:

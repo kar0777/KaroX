@@ -398,3 +398,166 @@ def test_edit_next_to_latin1_bytes_shows_and_logs_clean_text(ctx):
     result = edit(ctx, "y = 1", "y = 2")
     assert not result.is_error
     json.dumps(result.content, ensure_ascii=False).encode("utf-8")  # no lone surrogate
+
+
+def test_edit_multi_hunk_success_and_evolving_text(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("".join(f"line{i}\n" for i in range(1, 31)))
+    read(ctx)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "line2\n", "new_string": "TWO\n"},
+            {"old_string": "TWO\nline3\n", "new_string": "TWO_FINAL\nline3\n"},
+            {"old_string": "line25\n", "new_string": "TWENTY_FIVE\n"},
+        ],
+    )
+    assert not result.is_error
+    text = path.read_text()
+    assert "TWO_FINAL\nline3\n" in text
+    assert "TWENTY_FIVE\n" in text
+    assert "2: TWO_FINAL" in result.content
+    assert "25: TWENTY_FIVE" in result.content
+    assert result.meta["edits"] == 3
+    assert result.meta["lines"] == [2, 2, 25]
+
+
+def test_edit_multi_hunk_replace_all(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("tag = 1\nfoo = 1\ntag = 2\n")
+    read(ctx)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "tag", "new_string": "key", "replace_all": True},
+            {"old_string": "foo = 1", "new_string": "bar = 2"},
+        ],
+    )
+    assert not result.is_error
+    assert path.read_text() == "key = 1\nbar = 2\nkey = 2\n"
+
+
+def test_edit_multi_hunk_failure_rolls_back_and_names_index(ctx):
+    path = ctx.workspace / "file"
+    original = "alpha\nbeta\ngamma\n"
+    path.write_text(original)
+    read(ctx)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "alpha", "new_string": "ALPHA"},
+            {"old_string": "missing_text", "new_string": "X"},
+        ],
+    )
+    assert result.is_error
+    assert "edits[1]" in result.content
+    assert "No edits were applied" in result.content
+    assert path.read_text() == original
+
+    identical = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "alpha", "new_string": "ALPHA"},
+            {"old_string": "beta", "new_string": "beta"},
+        ],
+    )
+    assert identical.is_error
+    assert "edits[1]" in identical.content
+    assert "No edits were applied" in identical.content
+    assert path.read_text() == original
+
+    empty_old = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "alpha", "new_string": "ALPHA"},
+            {"old_string": "", "new_string": "X"},
+        ],
+    )
+    assert empty_old.is_error
+    assert "edits[1]" in empty_old.content
+    assert "No edits were applied" in empty_old.content
+    assert path.read_text() == original
+
+
+def test_edit_multi_hunk_validation_and_empty_edits(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("a\nb\n")
+    read(ctx)
+    # Empty edits with no single old_string/new_string fails as missing single form.
+    assert call(EditTool(), ctx, file_path="file", edits=[]).is_error
+    # Passing both single form and edits fails with "No edits were applied".
+    both = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        old_string="a",
+        new_string="c",
+        edits=[{"old_string": "b", "new_string": "d"}],
+    )
+    assert both.is_error
+    assert "No edits were applied" in both.content
+    # Malformed hunk names its index and states no edits were applied.
+    bad = call(EditTool(), ctx, file_path="file", edits=[{"old_string": "a"}])
+    assert bad.is_error
+    assert "edits[0]" in bad.content
+    assert "No edits were applied" in bad.content
+    assert path.read_text() == "a\nb\n"
+    # Empty edits=[] is treated as absent so the single form works unchanged.
+    single = call(EditTool(), ctx, file_path="file", old_string="a", new_string="A", edits=[])
+    assert not single.is_error
+    assert path.read_text() == "A\nb\n"
+    # Schema-filled empty old_string/new_string alongside edits works.
+    multi = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        old_string="",
+        new_string="",
+        edits=[{"old_string": "b", "new_string": "B"}],
+    )
+    assert not multi.is_error
+    assert path.read_text() == "A\nB\n"
+
+
+def test_edit_multi_hunk_mixed_line_endings(ctx):
+    path = ctx.workspace / "file"
+    raw = (
+        b"header1 = 1\r\nheader2 = 2\r\n"
+        b"line_a = 10\nmid1 = 1\r\nmid2 = 2\r\nmid3 = 3\r\nmid4 = 4\r\n"
+        b"mid5 = 5\r\nmid6 = 6\r\nmid7 = 7\r\nmid8 = 8\r\n"
+        b"line_b = 20\ntail1 = 1\r\ntail2 = 2\r\n"
+    )
+    path.write_bytes(raw)
+    read(ctx)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "line_a = 10", "new_string": "line_a = 100"},
+            {"old_string": "line_b = 20", "new_string": "line_b = 200"},
+        ],
+    )
+    assert not result.is_error
+    written = path.read_bytes()
+    assert b"header1 = 1\r\n" in written
+    assert b"mid4 = 4\r\n" in written
+    assert b"line_a = 100\n" in written
+    assert b"line_b = 200\n" in written
+    assert "3: line_a = 100" in result.content
+    assert "12: line_b = 200" in result.content
+    assert "mid4 = 4" not in result.content
+
+
+def test_edit_tool_description_mentions_edits():
+    assert "`edits`" in EditTool.description

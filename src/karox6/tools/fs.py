@@ -10,10 +10,12 @@ punctuation) is tried; a fallback is used only when it matches exactly one place
 from __future__ import annotations
 
 import asyncio
+import difflib
 import re
 import stat
 import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -262,13 +264,147 @@ class WriteTool:
         return ToolResult(f"{verb} {shown} ({lines} lines).", meta={"path": str(path)})
 
 
+@dataclass(frozen=True, slots=True)
+class _EditHunk:
+    old: str
+    new: str
+    replace_all: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _AppliedHunk:
+    old_n: str
+    new_n: str
+    count: int
+    how: str
+    line: int | None
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower == "true":
+            return True
+        if lower == "false":
+            return False
+    return bool(value)
+
+
+def _multi_fail(msg: str, is_multi: bool) -> str:
+    if not is_multi:
+        return msg
+    sep = "\n" if "\n" in msg else " "
+    return f"{msg}{sep}No edits were applied; the file is unchanged."
+
+
+def _parse_edit_hunks(args: dict[str, Any]) -> tuple[list[_EditHunk], bool] | str:
+    """Return ``(hunks, is_multi)`` or an error message."""
+    raw_edits = args.get("edits")
+    old_arg = args.get("old_string")
+    new_arg = args.get("new_string")
+    has_edits = raw_edits is not None and raw_edits != []
+    if has_edits:
+        has_single = (old_arg is not None and old_arg != "") or (
+            new_arg is not None and new_arg != ""
+        )
+        if has_single:
+            return _multi_fail(
+                "invalid arguments: pass either old_string/new_string or edits, not both.",
+                True,
+            )
+        if not isinstance(raw_edits, list) or not raw_edits:
+            return _multi_fail("invalid arguments: 'edits' must be a non-empty array.", True)
+        hunks: list[_EditHunk] = []
+        for idx, item in enumerate(raw_edits):
+            if not isinstance(item, dict):
+                return _multi_fail(f"invalid arguments: edits[{idx}] must be an object.", True)
+            old = item.get("old_string")
+            new = item.get("new_string")
+            if old is None or new is None:
+                return _multi_fail(
+                    f"invalid arguments: edits[{idx}] requires 'old_string' and 'new_string'.",
+                    True,
+                )
+            if not isinstance(old, str) or not isinstance(new, str):
+                return _multi_fail(
+                    f"invalid arguments: edits[{idx}] 'old_string' and 'new_string' "
+                    "must be strings.",
+                    True,
+                )
+            hunks.append(_EditHunk(old, new, _parse_bool(item.get("replace_all"))))
+        return hunks, True
+
+    if old_arg is None:
+        return "invalid arguments: missing required 'old_string' (or 'edits')."
+    if new_arg is None:
+        return "invalid arguments: missing required 'new_string' (or 'edits')."
+    return (
+        [_EditHunk(str(old_arg), str(new_arg), _parse_bool(args.get("replace_all")))],
+        False,
+    )
+
+
+def _can_keep_mixed(raw: str, hunks: list[_EditHunk]) -> bool:
+    """True when every hunk matches raw mixed-ending text with the same count as LF."""
+    current = raw
+    for hunk in hunks:
+        old_n = hunk.old.replace("\r\n", "\n")
+        new_n = hunk.new.replace("\r\n", "\n")
+        if old_n not in current or current.count(old_n) != text_lf_count(current, old_n):
+            return False
+        current = (
+            current.replace(old_n, new_n) if hunk.replace_all else current.replace(old_n, new_n, 1)
+        )
+    return True
+
+
+def _preflight_hunks(
+    text: str,
+    hunks: list[_EditHunk],
+    *,
+    is_multi: bool,
+    shown: str,
+    unsure: str,
+) -> tuple[str, list[_AppliedHunk]] | str:
+    current = text
+    applied: list[_AppliedHunk] = []
+    for idx, hunk in enumerate(hunks):
+        prefix = f"edits[{idx}]: " if is_multi else ""
+        old_n = hunk.old.replace("\r\n", "\n")
+        new_n = hunk.new.replace("\r\n", "\n")
+        result = apply_edit(current, old_n, new_n, hunk.replace_all)
+        if isinstance(result, str):
+            return _multi_fail(f"{prefix}{result.replace('{path}', shown)}", is_multi)
+        next_text, count, how = result
+        if unsure and how != "exactly":
+            return _multi_fail(
+                f"{prefix}old_string matches {shown} only approximately ({how}) and the file "
+                f"{unsure}. Read it, then retry.",
+                is_multi,
+            )
+        if unsure and count != 1:
+            return _multi_fail(
+                f"{prefix}replace_all would change {count} places in {shown}, which "
+                f"{unsure}. Read it, then retry.",
+                is_multi,
+            )
+        line = (
+            current.count("\n", 0, current.find(old_n)) + 1
+            if count == 1 and how == "exactly"
+            else None
+        )
+        applied.append(_AppliedHunk(old_n, new_n, count, how, line))
+        current = next_text
+    return current, applied
+
+
 class EditTool:
     name = "edit"
     description = (
         "Edit an existing UTF-8 text file by replacing literal text. `old_string` must match "
         "exactly one place in the file (include enough surrounding lines to make it unique) "
         "unless `replace_all` is true; do not include the `N: ` line-number prefixes shown by "
-        "read."
+        "read. Use `edits` for several changes to one file in one call."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -277,26 +413,52 @@ class EditTool:
             "old_string": {"type": "string", "description": "Exact text to replace."},
             "new_string": {"type": "string", "description": "Replacement text."},
             "replace_all": {"type": "boolean", "description": "Replace every occurrence."},
+            "edits": {
+                "type": "array",
+                "description": (
+                    "Ordered list of replacements in this file instead of "
+                    "old_string/new_string (all-or-nothing)."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_string": {"type": "string", "description": "Exact text to replace."},
+                        "new_string": {"type": "string", "description": "Replacement text."},
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Replace every occurrence.",
+                        },
+                    },
+                    "required": ["old_string", "new_string"],
+                },
+            },
         },
-        "required": ["file_path", "old_string", "new_string"],
+        "required": ["file_path"],
     }
     read_only = False
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         path = ctx.resolve(str(args.get("file_path") or args.get("path") or ""))
         shown = _display(path, ctx)
-        old = str(args["old_string"])
-        new = str(args["new_string"])
+        parsed = _parse_edit_hunks(args)
+        if isinstance(parsed, str):
+            return ToolResult(f"Error: {parsed}", is_error=True)
+        hunks, is_multi = parsed
         if not path.exists():
-            hint = " Use write to create a new file." if old == "" else ""
-            return ToolResult(f"Error: {shown} does not exist.{hint}", is_error=True)
-        if old == new:
-            return ToolResult("Error: old_string and new_string are identical.", is_error=True)
-        if old == "":
-            return ToolResult(
-                "Error: old_string is empty. Quote the text to replace, or use write.",
-                is_error=True,
-            )
+            hint = " Use write to create a new file." if any(h.old == "" for h in hunks) else ""
+            msg = _multi_fail(f"{shown} does not exist.{hint}", is_multi)
+            return ToolResult(f"Error: {msg}", is_error=True)
+        for idx, hunk in enumerate(hunks):
+            prefix = f"edits[{idx}]: " if is_multi else ""
+            if hunk.old == hunk.new:
+                msg = _multi_fail(f"{prefix}old_string and new_string are identical.", is_multi)
+                return ToolResult(f"Error: {msg}", is_error=True)
+            if hunk.old == "":
+                msg = _multi_fail(
+                    f"{prefix}old_string is empty. Quote the text to replace, or use write.",
+                    is_multi,
+                )
+                return ToolResult(f"Error: {msg}", is_error=True)
         # An exact, unique old_string proves the agent knows the text it replaces, even if
         # it saw the file only through shell output or the file changed since its last
         # read (its own shell command, a formatter). Only a fuzzy match needs a fresh read.
@@ -308,9 +470,13 @@ class EditTool:
         try:
             data = path.read_bytes()
         except OSError as exc:
-            return ToolResult(f"Error: cannot read {shown}: {exc}", is_error=True)
+            return ToolResult(
+                f"Error: {_multi_fail(f'cannot read {shown}: {exc}', is_multi)}", is_error=True
+            )
         if _is_binary(data):
-            return ToolResult(f"Error: {shown} is a binary file.", is_error=True)
+            return ToolResult(
+                f"Error: {_multi_fail(f'{shown} is a binary file.', is_multi)}", is_error=True
+            )
         had_bom = data.startswith(b"\xef\xbb\xbf")
         # surrogateescape keeps bytes that are not UTF-8 (a Latin-1 fixture) as they were
         # instead of turning them into U+FFFD on write.
@@ -318,34 +484,26 @@ class EditTool:
         crlfs = raw.count("\r\n")
         mixed = 0 < crlfs < raw.count("\n")
         crlf = crlfs > 0 and not mixed
-        old_n = old.replace("\r\n", "\n")
-        new_n = new.replace("\r\n", "\n")
-        replace_all = bool(args.get("replace_all"))
-
-        result: tuple[str, int, str] | str
-        if mixed and old_n in raw and raw.count(old_n) == text_lf_count(raw, old_n):
+        if mixed and _can_keep_mixed(raw, hunks):
             # Mixed line endings: edit the text as it is, so lines outside the edit keep
             # their own endings.
-            result = apply_edit(raw, old_n, new_n, replace_all)
             text = raw
         else:
             text = raw.replace("\r\n", "\n") if crlfs else raw
-            result = apply_edit(text, old_n, new_n, replace_all)
-        if isinstance(result, str):
-            return ToolResult(f"Error: {result.replace('{path}', shown)}", is_error=True)
-        updated, count, how = result
-        if unsure and how != "exactly":
-            return ToolResult(
-                f"Error: old_string matches {shown} only approximately ({how}) and the file "
-                f"{unsure}. Read it, then retry.",
-                is_error=True,
-            )
-        if unsure and count != 1:
-            return ToolResult(
-                f"Error: replace_all would change {count} places in {shown}, which "
-                f"{unsure}. Read it, then retry.",
-                is_error=True,
-            )
+        text_lf = text.replace("\r\n", "\n")
+
+        preflight = await asyncio.to_thread(
+            _preflight_hunks,
+            text,
+            hunks,
+            is_multi=is_multi,
+            shown=shown,
+            unsure=unsure,
+        )
+        if isinstance(preflight, str):
+            return ToolResult(f"Error: {_shown_text(preflight)}", is_error=True)
+        updated, applied = preflight
+        updated_lf = updated.replace("\r\n", "\n")
         if crlf:
             updated = updated.replace("\n", "\r\n")
         payload = updated.encode("utf-8", "surrogateescape")
@@ -354,20 +512,49 @@ class EditTool:
         try:
             write_atomic(path, payload)
         except OSError as exc:
-            return ToolResult(f"Error: cannot write {shown}: {exc}", is_error=True)
+            return ToolResult(
+                f"Error: {_multi_fail(f'cannot write {shown}: {exc}', is_multi)}", is_error=True
+            )
         ctx.files.record_write(path, observe=not unsure)
-        note = f" (matched {how})" if how != "exactly" else ""
-        plural = "s" if count != 1 else ""
-        snippet = (
-            _shown_text(changed_snippet(text, updated.replace("\r\n", "\n"))) if count == 1 else ""
-        )
-        copies = await _copies_note(ctx, path, old_n, new_n) if ctx.copy_notes else ""
-        meta: dict[str, Any] = {"path": str(path), "match": how}
-        if count == 1 and how == "exactly":
-            # 1-based line where the replaced text began (the chat numbers its preview)
-            meta["line"] = text.count("\n", 0, text.find(old_n)) + 1
+
+        if not is_multi:
+            step = applied[0]
+            note = f" (matched {step.how})" if step.how != "exactly" else ""
+            plural = "s" if step.count != 1 else ""
+            snippet = _shown_text(changed_snippet(text_lf, updated_lf)) if step.count == 1 else ""
+            copies = await _copies_note(ctx, path, step.old_n, step.new_n) if ctx.copy_notes else ""
+            meta: dict[str, Any] = {"path": str(path), "match": step.how}
+            if step.line is not None:
+                # 1-based line where the replaced text began (the chat numbers its preview)
+                meta["line"] = step.line
+            return ToolResult(
+                f"Edited {shown}: replaced {step.count} occurrence{plural}{note}.{snippet}{copies}",
+                meta=meta,
+            )
+
+        total_count = sum(s.count for s in applied)
+        fuzzy = [f"edits[{i}] {s.how}" for i, s in enumerate(applied) if s.how != "exactly"]
+        note = f" (matched {', '.join(fuzzy)})" if fuzzy else ""
+        edits_word = "edit" if len(applied) == 1 else "edits"
+        repl_word = "replacement" if total_count == 1 else "replacements"
+        has_targeted = any(s.count == 1 for s in applied)
+        snippet = _shown_text(changed_snippets(text_lf, updated_lf)) if has_targeted else ""
+        copies = ""
+        if ctx.copy_notes:
+            notes = [await _copies_note(ctx, path, s.old_n, s.new_n) for s in applied]
+            copies = "".join(n for n in notes if n)
+        hunk_lines = [s.line for s in applied]
+        meta = {
+            "path": str(path),
+            "edits": len(applied),
+            "match": "exactly" if not fuzzy else "fuzzy",
+        }
+        if any(ln is not None for ln in hunk_lines):
+            meta["lines"] = hunk_lines
+            meta["line"] = next(ln for ln in hunk_lines if ln is not None)
         return ToolResult(
-            f"Edited {shown}: replaced {count} occurrence{plural}{note}.{snippet}{copies}",
+            f"Edited {shown}: applied {len(applied)} {edits_word} "
+            f"({total_count} {repl_word}){note}.{snippet}{copies}",
             meta=meta,
         )
 
@@ -420,6 +607,51 @@ def changed_snippet(before: str, after: str) -> str:
     body = "\n".join(f"{n + 1}: {lines[n]}" for n in shown)
     more = "\n..." if end > shown[-1] else ""
     return f"\nThe edited region now reads:\n{body}{more}"
+
+
+def changed_snippets(before: str, after: str, max_lines: int = SNIPPET_MAX_LINES * 2) -> str:
+    """Changed regions of ``after`` with surrounding context, numbered as read shows them."""
+    if before == after:
+        return ""
+    before_lines = before.split("\n")
+    if len(before_lines) > 1 and before_lines[-1] == "":
+        before_lines.pop()
+    after_lines = after.split("\n")
+    if len(after_lines) > 1 and after_lines[-1] == "":
+        after_lines.pop()
+    if len(before_lines) > 10_000 or len(after_lines) > 10_000:
+        return changed_snippet(before, after)
+    groups = list(
+        difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=True).get_grouped_opcodes(
+            SNIPPET_CONTEXT
+        )
+    )
+    if not groups:
+        return ""
+    if len(groups) == 1:
+        return changed_snippet(before, after)
+    chunks: list[str] = []
+    remaining = max_lines
+    truncated = False
+    for group in groups:
+        if remaining <= 0:
+            truncated = True
+            break
+        j1 = group[0][3]
+        j2 = group[-1][4]
+        span = j2 - j1
+        take = min(span, remaining)
+        if take < span:
+            truncated = True
+        chunk_lines = [f"{n + 1}: {after_lines[n]}" for n in range(j1, j1 + take)]
+        if chunk_lines:
+            chunks.append("\n".join(chunk_lines))
+            remaining -= take
+    if not chunks:
+        return ""
+    body = "\n...\n".join(chunks)
+    more = "\n..." if truncated else ""
+    return f"\nThe edited regions now read:\n{body}{more}"
 
 
 # --- matching -----------------------------------------------------------------
