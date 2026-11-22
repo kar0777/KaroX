@@ -36,12 +36,10 @@ _BASH_PIPESTATUS_TRAP = (
     '"command exit"|"command exit"[[:space:]]*) ;; '
     '*) [[ -n "${KAROX_PIPESTATUS_FILE:-}" ]] && '
     'builtin printf "%s\\n" "${__karox_p[@]}" >"$KAROX_PIPESTATUS_FILE" 2>/dev/null || true ;; '
-    "esac' EXIT\n"
+    "esac' EXIT; "
 )
 
-_SH_PIPESTATUS_TRAP = (
-    'if [ -n "${BASH_VERSION:-}" ]; then ' + _BASH_PIPESTATUS_TRAP.rstrip("\n") + "; fi\n"
-)
+_SH_PIPESTATUS_TRAP = 'if [ -n "${BASH_VERSION:-}" ]; then ' + _BASH_PIPESTATUS_TRAP + "fi; "
 
 ENV_OVERRIDES = {
     "NO_COLOR": "1",
@@ -195,14 +193,38 @@ def read_pipestatus(status_path: Path | None) -> list[int] | None:
     return codes or None
 
 
+def normalize_exit_code(returncode: int | None, pipestatus: list[int] | None) -> int | None:
+    """Restore pre-trap ``-N`` semantics when bash encodes a signal death as ``128 + N``.
+
+    Without an EXIT trap, bash exec-optimizes a single final command so a child killed by
+    signal ``N`` (e.g. SIGSEGV = 11) terminates bash itself with ``-N`` (``[exit code: -11]``).
+    With the PIPESTATUS EXIT trap installed, bash must wait for the child and exit with
+    ``128 + N`` (e.g. 139). When the trap recorded ``pipestatus`` (ruling out an explicit
+    ``exit 139``, which skips writing the side-channel file) and ``returncode`` is in the
+    POSIX/RT signal range ``129..192`` matching the final stage, map it back to ``-N``.
+    """
+    if (
+        returncode is not None
+        and pipestatus
+        and 129 <= returncode <= 192
+        and pipestatus[-1] == returncode
+    ):
+        return -(returncode - 128)
+    return returncode
+
+
 def format_exit_marker(
     returncode: int | None, pipestatus: list[int] | None
 ) -> tuple[str, list[int] | None]:
     """Build ``[exit code: N]`` plus ``[pipeline exit codes: ...]`` when masked/non-zero."""
-    marker = f"[exit code: {returncode}]"
-    if pipestatus and len(pipestatus) > 1 and any(code != 0 for code in pipestatus):
-        joined = " ".join(str(code) for code in pipestatus)
-        return f"{marker} [pipeline exit codes: {joined}]", pipestatus
+    effective = normalize_exit_code(returncode, pipestatus)
+    marker = f"[exit code: {effective}]"
+    if pipestatus and len(pipestatus) > 1:
+        # Ignore SIGPIPE (141) in non-last stages (e.g. `yes | head -n 1`).
+        non_last_fail = any(code not in (0, 141) for code in pipestatus[:-1])
+        if non_last_fail or pipestatus[-1] != 0:
+            joined = " ".join(str(code) for code in pipestatus)
+            return f"{marker} [pipeline exit codes: {joined}]", pipestatus
     return marker, None
 
 
@@ -331,8 +353,9 @@ class ShellTool:
         text, _complete = run.output_text()
         if finished:
             pipestatus = read_pipestatus(pipestatus_path)
+            exit_code = normalize_exit_code(run.returncode, pipestatus)
             marker, reported_pipe = format_exit_marker(run.returncode, pipestatus)
-            meta: dict[str, Any] = {"exit_code": run.returncode}
+            meta: dict[str, Any] = {"exit_code": exit_code}
             if reported_pipe is not None:
                 meta["pipeline_exit_codes"] = reported_pipe
             if run.active:  # a process it started (`server &`) still writes to the output
@@ -344,11 +367,13 @@ class ShellTool:
                     else ""
                 )
                 marker = (
-                    f"[exit code: {run.returncode}; a process it started is still running and "
+                    f"[exit code: {exit_code}; a process it started is still running and "
                     f"writing to this output: background job {job.id}. Use job_output to "
                     f"read it, job_kill to stop it.]{pipe_suffix}"
                 )
                 meta["job_id"] = job.id
+            else:
+                run.close_job()
         else:
             if pipestatus_path is not None:
                 with contextlib.suppress(OSError):

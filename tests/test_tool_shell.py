@@ -15,7 +15,9 @@ from karox6.tools.shell import (
     ShellInfo,
     ShellTool,
     detect_shell,
+    format_exit_marker,
     is_msys_bash,
+    normalize_exit_code,
     wrap_command_for_pipestatus,
 )
 
@@ -589,3 +591,94 @@ def test_pipeline_sh_flavor_actually_executes(ctx):
     explicit = shell(sh_ctx, command="false | cat; exit 3")
     assert explicit.meta["exit_code"] == 3, explicit.content
     assert "pipeline_exit_codes" not in explicit.meta
+
+
+def test_pipeline_wrapper_same_line_preserves_line_numbers_and_comments(ctx, tmp_path):
+    bash_shell = ShellInfo("bash", "/bin/bash", "bash")
+    sh_shell = ShellInfo("bash", "/bin/sh", "sh")
+    wrapped_bash, _ = wrap_command_for_pipestatus("echo hi", bash_shell, tmp_path / "ps")
+    wrapped_sh, _ = wrap_command_for_pipestatus("echo hi", sh_shell, tmp_path / "ps")
+    assert "\n" not in wrapped_bash
+    assert "\n" not in wrapped_sh
+
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash syntax")
+
+    lineno = shell(ctx, command='echo "L1=$LINENO"\necho "L2=$LINENO"')
+    assert lineno.meta["exit_code"] == 0, lineno.content
+    assert "L1=1" in lineno.content
+    assert "L2=2" in lineno.content
+
+    comment = shell(ctx, command='# leading comment\necho "L2=$LINENO"')
+    assert comment.meta["exit_code"] == 0, comment.content
+    assert "L2=2" in comment.content
+
+    syntax_err = shell(ctx, command="echo ok\nif then")
+    assert syntax_err.meta["exit_code"] != 0
+    assert "line 2:" in syntax_err.content
+
+
+def test_pipeline_ignores_sigpipe_141_in_non_last_stages(ctx):
+    assert format_exit_marker(0, [141, 0]) == ("[exit code: 0]", None)
+    assert format_exit_marker(0, [141, 141, 0]) == ("[exit code: 0]", None)
+    assert format_exit_marker(0, [1, 141, 0]) == (
+        "[exit code: 0] [pipeline exit codes: 1 141 0]",
+        [1, 141, 0],
+    )
+    assert format_exit_marker(141, [0, 141]) == (
+        "[exit code: -13] [pipeline exit codes: 0 141]",
+        [0, 141],
+    )
+
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash pipeline statuses")
+
+    sigpipe_sim = shell(ctx, command="(exit 141) | true")
+    assert sigpipe_sim.meta["exit_code"] == 0
+    assert "pipeline_exit_codes" not in sigpipe_sim.meta
+    assert "[pipeline exit codes:" not in sigpipe_sim.content
+
+    head_pipe = shell(ctx, command="yes | head -n 1")
+    assert head_pipe.meta["exit_code"] == 0
+    assert "pipeline_exit_codes" not in head_pipe.meta
+    assert "[pipeline exit codes:" not in head_pipe.content
+
+
+def test_signal_death_restores_negative_exit_code_marker(ctx):
+    assert normalize_exit_code(139, [139]) == -11
+    assert format_exit_marker(139, [139]) == ("[exit code: -11]", None)
+    # Explicit `exit 139` skips writing pipestatus, so it stays 139.
+    assert normalize_exit_code(139, None) == 139
+    assert format_exit_marker(139, None) == ("[exit code: 139]", None)
+    # 255 is not a POSIX signal code.
+    assert normalize_exit_code(255, [255]) == 255
+
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash signal reporting")
+
+    explicit = shell(ctx, command="exit 139")
+    assert explicit.meta["exit_code"] == 139
+    assert explicit.content.endswith("[exit code: 139]")
+
+    if sys.platform != "win32":
+        segv = shell(ctx, command=python("import os, signal; os.kill(os.getpid(), signal.SIGSEGV)"))
+        assert segv.meta["exit_code"] == -11
+        assert segv.content.endswith("[exit code: -11]")
+    else:
+        # In Git Bash, waiting on a signal-killed background child yields exit code 128+11=139.
+        sig_wait = shell(ctx, command="sleep 10 & p=$!; kill -11 $p; wait $p")
+        assert sig_wait.meta["exit_code"] == -11, sig_wait.content
+        assert sig_wait.content.endswith("[exit code: -11]"), sig_wait.content
+
+
+def test_pipeline_wrapper_user_exit_trap_and_exec(ctx):
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash syntax")
+
+    user_trap = shell(ctx, command="trap 'echo USER_TRAP' EXIT; false | cat")
+    assert user_trap.meta["exit_code"] == 0
+    assert "USER_TRAP" in user_trap.content
+
+    via_exec = shell(ctx, command="exec echo via-exec")
+    assert via_exec.meta["exit_code"] == 0
+    assert "via-exec" in via_exec.content
