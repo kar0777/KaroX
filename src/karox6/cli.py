@@ -207,7 +207,7 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     chat.add_argument(
         "--theme",
         choices=["auto", "mid", "dark", "light", "ansi"],
-        default=None,
+        default=argparse.SUPPRESS,  # not None: that would shadow config.toml's `theme`
         help="colours: auto (default), dark, light, mid (any background), ansi (16 colours)",
     )
     chat.add_argument(
@@ -488,17 +488,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _update(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     from karox6 import update
+    from karox6.tui_text import _plain_text
 
     source = update.Source.from_settings(settings, args.repo, args.branch)
 
     def out(line: str) -> None:
-        sys.stdout.write(line + "\n")
+        # progress/subject lines carry bytes the remote repo wrote — never raw to a tty
+        sys.stdout.write(_plain_text(line) + "\n")
         sys.stdout.flush()
 
     try:
         result = update.run_update(source, out, force=args.force, check_only=args.check)
     except update.UpdateError as exc:
-        sys.stderr.write(f"karox: update failed: {exc}\n")
+        sys.stderr.write(f"karox: update failed: {_plain_text(str(exc))}\n")
         return 1
     for line in update.describe(result):
         out(line)
@@ -850,20 +852,22 @@ def _start_update_check(args: argparse.Namespace, home: Path, app: Any) -> None:
     """Look for a newer KaroX in the background (at most once a day; see karox6.update):
     a daemon thread, so neither the first frame nor the exit waits for the network. Off
     with ``update_check = false`` or KAROX_UPDATE_CHECK=0, and when KaroX runs from a
-    source tree (KAROX_UPDATE_CHECK=1 turns it on there)."""
+    source tree; KAROX_UPDATE_CHECK=1 forces it on either way."""
     import asyncio
     import threading
 
-    wanted = os.environ.get("KAROX_UPDATE_CHECK", "")
-    if wanted == "0" or getattr(args, "update_check", True) is False:
-        return
     from karox6 import update
 
-    if wanted != "1" and update.from_checkout():
-        return
+    # /update installs from this source even when the background check below is off.
     settings = {k: getattr(args, k, None) for k in ("update_repo", "update_branch")}
     source = update.Source.from_settings(settings)
     app.update_source = source
+
+    wanted = os.environ.get("KAROX_UPDATE_CHECK", "")
+    if wanted == "0" or (
+        wanted != "1" and (getattr(args, "update_check", True) is False or update.from_checkout())
+    ):
+        return
     loop = asyncio.get_running_loop()
 
     def check() -> None:

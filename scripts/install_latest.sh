@@ -56,8 +56,15 @@ echo "fetching $BRANCH from $REPO ..."
 git clone --quiet --filter=blob:none --single-branch --branch "$BRANCH" "$REPO" "$CLONE" \
     || fail "cannot clone $BRANCH from $REPO"
 COMMIT=$(git -C "$CLONE" rev-parse HEAD)
-printf '"""Written by install_latest.sh: where this build came from."""\n\nREPO = %s\nBRANCH = %s\nCOMMIT = %s\n' \
-    "r'$REPO'" "r'$BRANCH'" "r'$COMMIT'" > "$CLONE/src/karox6/_build.py"
+# Python repr() of the values (what `karox6 update` does): a repo or branch with a '
+# or a trailing \ must not produce an invalid _build.py and a build that fails.
+"$PY" - "$CLONE/src/karox6/_build.py" "$REPO" "$BRANCH" "$COMMIT" <<'EOF' || fail "cannot write _build.py"
+import sys
+with open(sys.argv[1], "w", encoding="utf-8", newline="\n") as f:
+    f.write('"""Written by install_latest.sh: where this build came from."""\n\n')
+    for name, value in zip(("REPO", "BRANCH", "COMMIT"), sys.argv[2:]):
+        f.write("{} = {!r}\n".format(name, value))
+EOF
 
 echo "building ..."
 "$PY" -m pip wheel --disable-pip-version-check --no-deps --quiet --wheel-dir "$TEMP/dist" "$CLONE" \

@@ -32,12 +32,15 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from karox6.tui_text import _plain_text
 
 DEFAULT_REPO = "https://github.com/kar0777/KaroX.git"
 DEFAULT_BRANCH = "karox6/main"
@@ -177,6 +180,7 @@ def run_update(
     workdir: Path | None = None,
 ) -> Result:
     """Clone, compare, build, check and install; raises :class:`UpdateError` on failure."""
+    _ABORT.clear()  # a new update re-arms; abort() only stops the one in flight
     python = python or sys.executable
     if shutil.which("git") is None:
         raise UpdateError(
@@ -406,9 +410,12 @@ def _move_launchers(python: str, wheel: Path) -> dict[Path, Path]:
 
 def _restore_launchers(moved: dict[Path, Path]) -> None:
     for exe, old in moved.items():
-        if not exe.exists():
-            with contextlib.suppress(OSError):
-                old.rename(exe)
+        # A partial exe pip managed to write before failing must not shadow the good
+        # launcher that was moved aside — remove it, then restore unconditionally.
+        with contextlib.suppress(OSError):
+            exe.unlink()
+        with contextlib.suppress(OSError):
+            old.rename(exe)
 
 
 def _cleanup_old_launchers(python: str | None = None) -> None:
@@ -439,11 +446,18 @@ def check_cached(
     state: dict[str, Any] = {}
     with contextlib.suppress(OSError, ValueError):
         state = json.loads(path.read_text(encoding="utf-8"))
+    # An unreadable timestamp counts as "never fresh": the check refetches and the
+    # corrupt state heals on write. float() inside the suppress — a string value used
+    # to kill the daemon thread before fetch/write, disabling the check for good.
+    checked = float("inf")
+    if isinstance(state, dict):
+        with contextlib.suppress(TypeError, ValueError):
+            checked = float(state.get("checked", 0))
     fresh = (
         isinstance(state, dict)
         and state.get("repo") == source.repo
         and state.get("branch") == source.branch
-        and 0 <= now - float(state.get("checked", 0)) < CHECK_EVERY_S
+        and 0 <= now - checked < CHECK_EVERY_S
     )
     if not fresh:
         try:
@@ -478,8 +492,10 @@ def check_cached(
 
 
 def remote_head(source: Source, timeout: float = 8.0) -> tuple[str, str]:
-    """(version, commit) at the tip of the branch, without cloning: ``git ls-remote`` for
-    the commit and, for GitHub, the raw version file."""
+    """(version, commit) at the tip of the branch, without a full clone: ``git ls-remote``
+    for the commit, the raw version file on GitHub, and a blobless one-commit clone for
+    every other host (they have no raw-file URL, so the version used to come back as ""
+    and the daily check silently reported nothing forever)."""
     commit = ""
     if shutil.which("git"):
         proc = _run(
@@ -501,6 +517,34 @@ def remote_head(source: Source, timeout: float = 8.0) -> tuple[str, str]:
         if response.status_code == 200:
             found = _VERSION_LINE.search(response.text)
             version = found.group(1) if found else ""
+    if not version and shutil.which("git"):
+        tmp = Path(tempfile.mkdtemp(prefix="karox6-head-"))
+        try:
+            clone = tmp / "r"
+            proc = _run(
+                [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--depth",
+                    "1",
+                    "--filter=blob:none",
+                    "--branch",
+                    source.branch,
+                    source.repo,
+                    str(clone),
+                ],
+                timeout=timeout,
+            )
+            if proc.returncode == 0:
+                head = _git(clone, "rev-parse", "HEAD", check=False).strip()
+                if head:
+                    commit = head  # ls-remote's sha or the moved tip — the fetched one
+                show = _git(clone, "show", "HEAD:src/karox6/__init__.py", check=False)
+                found = _VERSION_LINE.search(show)
+                version = found.group(1) if found else ""
+        finally:
+            _remove_tree(tmp)
     return version, commit
 
 
@@ -509,25 +553,47 @@ def describe(result: Result) -> list[str]:
     old = result.old.version + (f" ({result.old.commit[:7]})" if result.old.commit else "")
     new = f"{result.new_version} ({result.new_commit[:7]})"
     if result.status == "current":
-        return [f"KaroX {old} is up to date."]
-    if result.status == "older":
-        return [
+        lines = [f"KaroX {old} is up to date."]
+    elif result.status == "older":
+        lines = [
             f"KaroX {old} is newer than the branch ({new}); nothing to do "
             "(`karox6 update --force` installs the branch's build anyway)."
         ]
-    head = (
-        f"updated: {old} -> {new}"
-        if result.status == "updated"
-        else f"update available: {old} -> {new}"
-    )
-    lines = [head]
-    if result.changes:
-        lines.append("changes:")
-        lines += [f"  {line}" for line in result.changes]
-    return lines
+    else:
+        head = (
+            f"updated: {old} -> {new}"
+            if result.status == "updated"
+            else f"update available: {old} -> {new}"
+        )
+        lines = [head]
+        if result.changes:
+            lines.append("changes:")
+            lines += [f"  {line}" for line in result.changes]
+    # Versions and commit subjects are bytes the remote repo wrote — strip terminal
+    # controls before they reach a tty (`karox6 update`, the chat's /update).
+    return [_plain_text(line) for line in lines]
 
 
 # -- helpers -------------------------------------------------------------------------------
+
+
+_ABORT = threading.Event()
+_CHILDREN: set[subprocess.Popen[str]] = set()
+_CHILDREN_LOCK = threading.Lock()
+
+
+def abort() -> None:
+    """Stop a running update now: kill its child process trees (git clone and its
+    helpers, pip and its builds) and refuse new ones until the next ``run_update``
+    re-arms. Without this a quit or Ctrl+C left the worker thread sitting on 600s/900s
+    subprocess timeouts and hung the process."""
+    from karox6.tools.proc import kill_tree
+
+    _ABORT.set()
+    with _CHILDREN_LOCK:
+        children = list(_CHILDREN)
+    for proc in children:
+        kill_tree(proc.pid)  # every writer dies -> the blocked communicate() sees EOF
 
 
 def _run(argv: list[str], timeout: float = 120) -> subprocess.CompletedProcess[str]:
@@ -535,22 +601,45 @@ def _run(argv: list[str], timeout: float = 120) -> subprocess.CompletedProcess[s
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     env.pop("PYTHONPATH", None)  # the target interpreter's own packages, not a source tree
     env["PYTHONIOENCODING"] = "utf-8"
+    if _ABORT.is_set():
+        raise UpdateError("the update was stopped")
+    from karox6.lifetime import join_karox_job
+    from karox6.tools.proc import kill_tree
+
     try:
-        return subprocess.run(
+        join_karox_job()  # Windows: a KaroX that dies hard takes the child with it
+        proc = subprocess.Popen(
             argv,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=timeout,
             env=env,
-            check=False,
+            start_new_session=sys.platform != "win32",  # killpg() needs a group leader
         )
-    except subprocess.TimeoutExpired as exc:
-        raise UpdateError(f"`{' '.join(argv[:3])} ...` took longer than {timeout:.0f}s") from exc
     except OSError as exc:
         raise UpdateError(f"cannot run {argv[0]}: {exc}") from exc
+    with _CHILDREN_LOCK:
+        _CHILDREN.add(proc)
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            kill_tree(proc.pid)
+            proc.wait()
+            raise UpdateError(
+                f"`{' '.join(argv[:3])} ...` took longer than {timeout:.0f}s"
+            ) from exc
+        except KeyboardInterrupt:  # Ctrl+C: the child is in its own session, kill it
+            kill_tree(proc.pid)
+            proc.wait()
+            raise
+    finally:
+        with _CHILDREN_LOCK:
+            _CHILDREN.discard(proc)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 def _git(cwd: Path, *args: str, what: str = "", check: bool = True, timeout: float = 120) -> str:
@@ -566,7 +655,8 @@ def _git_ok(cwd: Path, *args: str) -> bool:
 
 def _tail(proc: subprocess.CompletedProcess[str], lines: int = 15) -> str:
     text = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip().splitlines()
-    return "\n".join(f"  {line}" for line in text[-lines:]) or "  (no output)"
+    # git/pip stderr lands in UpdateError text that is painted raw — no CSI/OSC through.
+    return "\n".join(f"  {_plain_text(line)}" for line in text[-lines:]) or "  (no output)"
 
 
 def _remove_tree(path: Path) -> None:

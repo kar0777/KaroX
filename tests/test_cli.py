@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
+import threading
+import types
 
 import pytest
 
-from karox6 import __version__
+from karox6 import __version__, cli
 from karox6.cli import main
 from karox6.sysinfo import rss_mb
 
@@ -229,3 +232,52 @@ def test_max_cost_without_prices_is_refused(tmp_path):
     args = cli._parser().parse_args(["run", "--model", "m", "--max-cost", "1", "task"])
     with pytest.raises(ValueError, match="price"):
         cli._session_config(args, tmp_path, tmp_path, stream_deltas=False)
+
+
+def test_config_theme_is_the_chat_default():
+    """`theme = "light"` in config.toml used to be dead: set_defaults ran before
+    add_argument("--theme", default=None), and argparse's own default shadowed it."""
+    args = cli._parser({"theme": "light"}).parse_args(["chat", "--model", "m"])
+    assert args.theme == "light"
+    args = cli._parser({"theme": "light"}).parse_args(["chat", "--model", "m", "--theme", "dark"])
+    assert args.theme == "dark"  # a flag still wins
+    assert not hasattr(cli._parser().parse_args(["chat", "--model", "m"]), "theme")
+
+
+def test_update_source_is_set_when_the_check_is_off(tmp_path, monkeypatch):
+    """update_check = false (or a source tree) skips the daily check, but /update must
+    still install from the configured repository — not the hard-coded default."""
+    from karox6 import update
+
+    monkeypatch.delenv("KAROX_UPDATE_CHECK", raising=False)
+    args = cli._parser(
+        {
+            "update_repo": "https://example.test/mine.git",
+            "update_branch": "mine/main",
+            "update_check": False,
+        }
+    ).parse_args(["chat", "--model", "m"])
+    app = types.SimpleNamespace(update_source=None)
+    cli._start_update_check(args, tmp_path, app)
+    assert app.update_source == update.Source("https://example.test/mine.git", "mine/main")
+
+
+def test_update_check_env_one_overrides_a_config_false(tmp_path, monkeypatch):
+    """KAROX_UPDATE_CHECK=1 forces the daily check on over `update_check = false` and a
+    source-tree run."""
+    from karox6 import update
+
+    done = threading.Event()
+    monkeypatch.setattr(update, "check_cached", lambda *a, **k: done.set() or None)
+    monkeypatch.setenv("KAROX_UPDATE_CHECK", "1")
+    monkeypatch.delenv("KAROX_UPDATE_REPO", raising=False)
+    monkeypatch.delenv("KAROX_UPDATE_BRANCH", raising=False)
+    args = cli._parser({"update_check": False}).parse_args(["chat", "--model", "m"])
+    app = types.SimpleNamespace(update_source=None)
+
+    async def start():
+        cli._start_update_check(args, tmp_path, app)
+
+    asyncio.run(start())
+    assert done.wait(timeout=10)  # the daemon thread fetched despite update_check=false
+    assert app.update_source == update.Source()  # no repo/branch in config or env

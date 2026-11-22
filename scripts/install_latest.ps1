@@ -57,8 +57,19 @@ try {
     & git clone --quiet --filter=blob:none --single-branch --branch $Branch $Repo $clone
     if ($LASTEXITCODE -ne 0) { Fail "cannot clone $Branch from $Repo" }
     $commit = (& git -C $clone rev-parse HEAD).Trim()
-    $build = "`"`"`"Written by install_latest.ps1: where this build came from.`"`"`"`n`nREPO = r'$Repo'`nBRANCH = r'$Branch'`nCOMMIT = r'$commit'`n"
-    [System.IO.File]::WriteAllText((Join-Path $clone "src\karox6\_build.py"), $build)
+    # Python repr() of the values (what `karox6 update` does): a repo or branch with a
+    # ' or a trailing \ must not produce an invalid _build.py and a build that fails.
+    # A file, not -c: PowerShell re-quotes embedded " in native arguments unreliably.
+    $gen = Join-Path $temp "gen.py"
+    [System.IO.File]::WriteAllText($gen, @'
+import sys
+with open(sys.argv[1], "w", encoding="utf-8", newline="\n") as f:
+    f.write('"""Written by install_latest.ps1: where this build came from."""\n\n')
+    for name, value in zip(("REPO", "BRANCH", "COMMIT"), sys.argv[2:]):
+        f.write("{} = {!r}\n".format(name, value))
+'@)
+    & $py $gen (Join-Path $clone "src\karox6\_build.py") $Repo $Branch $commit
+    if ($LASTEXITCODE -ne 0) { Fail "cannot write _build.py" }
 
     Write-Host "building ..."
     $dist = Join-Path $temp "dist"

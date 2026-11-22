@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -323,6 +324,144 @@ def test_install_script_is_idempotent(project: tuple[Path, str], tmp_path: Path)
     )
     assert second.returncode == 0, second.stdout + second.stderr
     assert f"({head[:7]}) is up to date." in second.stdout
+
+
+def test_remote_head_reads_the_version_of_a_non_github_repo(tmp_path: Path) -> None:
+    """Only github.com has a raw-URL; any other host used to get version="" and the
+    daily check reported nothing forever. A blobless one-commit clone reads the file."""
+    repo = tmp_path / "origin"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "karox6/main")
+    pkg = repo / "src" / "karox6"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text('__version__ = "9.9.dev1"\n', encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    version, commit = update.remote_head(update.Source(str(repo), "karox6/main"))
+    assert (version, commit) == ("9.9.dev1", head)
+
+
+def test_check_cached_survives_a_corrupt_checked_timestamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "checked": "x" raised ValueError outside the suppress: the check thread died
+    before fetch/write and never ran again. Now it refetches and heals the file."""
+    monkeypatch.setattr(update, "installed", lambda *a, **k: update.Installed("6.0.0.dev40"))
+    source = update.Source("https://example.test/r.git", "karox6/main")
+    path = tmp_path / update.STATE_FILE
+    path.write_text(
+        json.dumps({"repo": source.repo, "branch": source.branch, "checked": "x"}),
+        encoding="utf-8",
+    )
+    asked = []
+    fetch = lambda s: (asked.append(s.branch), ("6.0.0.dev41", "a" * 40))[1]  # noqa: E731
+    assert update.check_cached(tmp_path, source, now=5000.0, fetch=fetch) == "6.0.0.dev41"
+    assert asked == ["karox6/main"]
+    assert json.loads(path.read_text(encoding="utf-8"))["checked"] == 5000.0
+
+
+def test_restore_launchers_replaces_a_partial_exe(tmp_path: Path) -> None:
+    """pip can die after writing a new karox6.exe: the good .old launcher must come back
+    even though an exe exists — the old code skipped the restore then and kept broken."""
+    exe = tmp_path / "karox6.exe"
+    old = tmp_path / "karox6.exe.123.old"
+    exe.write_bytes(b"partial")
+    old.write_bytes(b"good")
+    update._restore_launchers({exe: old})
+    assert exe.read_bytes() == b"good"
+    assert not old.exists()
+
+
+def test_abort_kills_the_update_subprocess_and_unblocks_the_caller() -> None:
+    """update.abort() is what quitting the TUI calls: a _run stuck in communicate()
+    (a 600s clone, a 900s pip) must return at once, and later _runs must refuse."""
+    done = threading.Event()
+
+    def stuck() -> None:
+        try:
+            update._run([sys.executable, "-c", "import time; time.sleep(60)"], timeout=120)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=stuck, daemon=True)
+    try:
+        update._ABORT.clear()
+        thread.start()
+        deadline = time.monotonic() + 10
+        while not update._CHILDREN and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert update._CHILDREN  # the child is registered and running
+        update.abort()
+        assert done.wait(timeout=10)  # communicate() did not wait out the 120s timeout
+        with pytest.raises(update.UpdateError, match="stopped"):
+            update._run([sys.executable, "-c", "pass"])
+    finally:
+        update._ABORT.clear()  # never poison the other tests
+        thread.join(timeout=10)
+
+
+def test_describe_and_tail_strip_terminal_controls() -> None:
+    """Commit subjects and git/pip stderr are bytes the remote repo wrote: describe()
+    and _tail() must not let CSI/OSC reach the terminal."""
+    result = update.Result(
+        "updated",
+        update.Installed("1.0", "a" * 40, "karox6/main"),
+        "1.1",
+        "b" * 40,
+        ["abc1234 feat: \x1b[31mred\x1b[0m", "def5678 \x1b]8;;https://evil\x1b\\link"],
+    )
+    text = "\n".join(update.describe(result))
+    assert "\x1b" not in text
+    assert "feat: red" in text
+    proc = subprocess.CompletedProcess([], 1, "", "\x1b[2Jfatal: nope\x07")
+    tail = update._tail(proc)
+    assert "\x1b" not in tail
+    assert "\x07" not in tail
+    assert "fatal: nope" in tail
+
+
+def test_install_script_quotes_repo_and_branch(project: tuple[Path, str], tmp_path: Path) -> None:
+    """A repo path or branch with a ' used to write invalid Python into _build.py
+    (r'...' raw strings) — the installed karox6 could not even start."""
+    repo, _python = project
+    quoted = tmp_path / "we 're" / "repo"
+    quoted.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", str(repo), str(quoted)], check=True)
+    _git(quoted, "branch", "it's/main")
+    root = Path(__file__).resolve().parents[1] / "scripts"
+    venv = tmp_path / "venv"
+    if sys.platform == "win32":
+        shell = shutil.which("powershell") or shutil.which("pwsh")
+        if shell is None:
+            pytest.skip("no PowerShell")
+        argv = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
+        argv += [str(root / "install_latest.ps1"), "-Venv", str(venv), "-Repo", str(quoted)]
+        argv += ["-Branch", "it's/main", "-Python", sys.executable]
+    else:
+        argv = ["sh", str(root / "install_latest.sh"), "--venv", str(venv), "--repo", str(quoted)]
+        argv += ["--branch", "it's/main", "--python", sys.executable]
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    run = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        timeout=600,
+        check=False,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    # _build.py inside the installed wheel must be valid Python quoting the values.
+    scripts = venv / ("Scripts" if sys.platform == "win32" else "bin")
+    python = scripts / ("python.exe" if sys.platform == "win32" else "python")
+    probe = subprocess.run(
+        [str(python), "-c", "import karox6._build as b; print(repr(b.REPO), repr(b.BRANCH))"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert probe.stdout.strip() == repr(str(quoted)) + " " + repr("it's/main")
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not installed")

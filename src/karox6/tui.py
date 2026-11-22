@@ -605,6 +605,10 @@ class ChatApp:
 
     async def close(self) -> None:
         """Stop what the chat started beside it (the bridge and its Tailscale route)."""
+        if self._updating:
+            from karox6 import update
+
+            update.abort()  # kill the update's clone/pip instead of hanging on its timeouts
         if self._session_task is not None:
             with contextlib.suppress(Exception):
                 await self._session_task
@@ -1376,24 +1380,46 @@ class ChatApp:
 
     async def _update(self, arg: str) -> None:
         """/update: what `karox6 update` does, with its lines in the conversation."""
+        from concurrent.futures import ThreadPoolExecutor
+
         from karox6 import update
 
         if self._updating:
             self.write("an update is already running\n")
             return
+        if arg not in ("", "check", "force"):
+            self.write(
+                self.paint("red", f"unknown /update argument {arg!r}")
+                + self.paint("dim", " — /update, /update check or /update force")
+                + "\n"
+            )
+            return
         loop = asyncio.get_running_loop()
 
         def out(line: str) -> None:
-            loop.call_soon_threadsafe(self.write, self.paint("dim", f"  {line}") + "\n")
+            # Updater lines carry remote bytes (commit subjects, git/pip stderr): strip
+            # terminal controls so a hostile repo cannot write CSI/OSC into the chat.
+            text = self.paint("dim", f"  {_plain_text(line)}") + "\n"
+            loop.call_soon_threadsafe(self.write, text)
 
         source = self.update_source or update.Source.from_settings()
         self._updating = True
         try:
-            result = await asyncio.to_thread(
-                update.run_update, source, out, force=arg == "force", check_only=arg == "check"
-            )
+            # Its own one-thread pool: run_update is minutes of subprocess work and
+            # asyncio.to_thread's threads are non-daemon, so a quit would hang on them.
+            # close() calls update.abort() to kill the clone/pip it is sitting inside.
+            with ThreadPoolExecutor(1, thread_name_prefix="karox6-update") as pool:
+                result = await loop.run_in_executor(
+                    pool,
+                    lambda: update.run_update(
+                        source, out, force=arg == "force", check_only=arg == "check"
+                    ),
+                )
         except update.UpdateError as exc:
-            self.write(self.paint("red", f"{self.glyph['fail']} update failed: {exc}") + "\n")
+            self.write(
+                self.paint("red", f"{self.glyph['fail']} update failed: {_plain_text(str(exc))}")
+                + "\n"
+            )
             return
         finally:
             self._updating = False
@@ -1405,7 +1431,7 @@ class ChatApp:
         if result.status == "updated":
             self.update_note = ""
             self.write(
-                self.paint("bold", f"restart KaroX to use {result.new_version}")
+                self.paint("bold", f"restart KaroX to use {_plain_text(result.new_version)}")
                 + self.paint("dim", " (/quit, then karox6; --continue resumes this session)")
                 + "\n"
             )
@@ -1414,6 +1440,7 @@ class ChatApp:
 
     def notice_update(self, version: str) -> None:
         """The background check found a newer version: one line, never during a turn."""
+        version = _plain_text(version)  # parsed out of the remote repo's __init__.py
         self.update_note = version
         if not self._turn_running:
             self.write(self.paint("cyan", f"version {version} is available: /update") + "\n")
