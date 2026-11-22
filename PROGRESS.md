@@ -1840,3 +1840,22 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   bench adapter's flags against a scripted model ran one shell call and ended
   "completed". The wheel is in the bench (01872b1) and has not run in the bench images;
   tonight's runs name dev35 or dev36. A dispatch that names no wheel takes dev37 from now.
+- devab1 result (run 44971868428, 01:31-01:50 UTC; data in
+  `karox6-bench-data/runs/devab1`): no result, by the rule (0 valid tasks). At 01:45 UTC,
+  14 minutes in, ReformBoss began to refuse every request with "Исчерпан дневной лимит
+  1500 запросов твоего ранга (общий на все ключи аккаунта). Сброс в 00:00 МСК" and both
+  arms ended on it (KaroX reports it as `quota`, without retrying, as dev35 intended):
+  koota-pair at step 70 in both arms, contexts at 169k (karox6) and 162k (karox6b), below
+  either threshold, so neither arm had compacted; fastapi-implicit-head-options never got
+  a reply. (karox6b's unfinished koota-pair work happens to pass the task's tests; with
+  the other arm void it counts for nothing.) The hypothesis is neither supported nor
+  refuted; the default stays, as registered.
+  The limit: the message names 1,500 requests a day, where the audits of ab1/ab2 showed
+  5,000 and this night's plan was sized to that. 3,348 requests had been answered since
+  the 21:00 UTC reset before the first refusal, so the limit that applied until 01:45 was
+  not 1,500: the account's rank or allowance changed during the night. Requests since the
+  reset: 3,372 audit rows, the last 24 of them these refusals. The lane is closed until
+  21:00 UTC; before the next run the real allowance has to be read from the provider's
+  bot, and the estimates in this file redone if it is 1,500.
+- 01:55 UTC, the night's runs are over. `DEVIN_REPORT.md` is final (tables of every run,
+  bugs 13-20, where KaroX is worse, what to do next, check outputs).

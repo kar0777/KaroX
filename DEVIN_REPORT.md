@@ -75,15 +75,21 @@ Bugs found and fixed tonight (each with tests; none is in the dev36 wheel that w
 | devc1 44955966673 | freeinference, codex | 2 | 30 requests, all 503 (lane paused) | 0 | - | - | 43 | - |
 | devc2 44962415993 | reformboss, codex | 2 | 1 request, 400 (bug 20) | 0 | - | - | 0.1 | - |
 | devc3 44971059267 | reformboss, codex | 2 | PASS (plumbing; score not read) | 19 | 0.7 | 28 (16) | 4.8 | .028 |
-| devab1 44971868428 | reformboss, dev36, K vs Kb `--compact-at 170000` | 18, 19 | running since 01:31 UTC when this was written | | | | | |
+| devab1 44971868428 | reformboss, dev36, K vs Kb `--compact-at 170000` | 18, 19 | void: both arms ended on the provider's daily limit | 70/70 (K/Kb) | 6.6/7.3 | 95/86 (63/60) | 11.7/11.5 | .100/.095 |
 
 Pooled: disc 1-12 (dev35, 12 valid): solved 6/8/8, cost $0.503/0.419/0.356, 76/64/51 min.
 Disc 13-17, 20 (dev36, 5 valid): solved 4/2/4, cost $0.405/0.581/0.342, 63/94/60 min.
 sentry-python-8185 is void (KaroX's trial ended on the provider's 500, bug 17). Requests
-since the 21:00 UTC reset: 3,208 before devab1 of 5,000.
+since the 21:00 UTC reset: 3,372 audit rows; the last 24 were refused by a daily limit (below).
 
-Compaction A/B (devab1, rule in PROGRESS.md before the run): not finished when this was
-written; its result is added to PROGRESS.md and to this section when it ends.
+Compaction A/B (devab1; rule in PROGRESS.md before the run): no result. ReformBoss ended
+both trials at 01:45 UTC, 14 minutes in, with "Исчерпан дневной лимит 1500 запросов твоего
+ранга": koota-pair stopped at step 70 in both arms with the context at 169k and 162k, below
+either threshold, so neither arm compacted; fastapi-implicit-head-options never started.
+0 valid tasks, nothing to read, the default stays. The limit it names is 1,500 a day, not
+the 5,000 this plan assumed, although about 3,350 requests had gone through since the
+reset: the account's rank or limit changed during the night. The lane is closed until
+21:00 UTC (00:00 MSK).
 
 ## Where KaroX is worse, and why
 
@@ -109,9 +115,11 @@ written; its result is added to PROGRESS.md and to this section when it ends.
    fix the cause where all forms of that class pass through, and try two or three
    variants beyond the given examples before you finish. Behaviour the task does not
    concern stays as it is." Rule as for S1: candidate if solved >= control + 2, trials
-   that break existing tests <= control + 1, calls <= 115%. About 2,200 requests.
+   that break existing tests <= control + 1, calls <= 115%. About 2,200 requests: two
+   days of the lane if its daily limit is 1,500 now (ask the provider which it is).
 2. The comparison again with 3 attempts per task: one attempt cannot separate 10 from 12.
-3. A lighter start on short tasks (less reading before the first edit), as its own A/B.
+3. A lighter start on short tasks (less reading before the first edit), as its own A/B;
+   and the compaction A/B again (devab1 gave nothing), on tasks that pass 200k.
 4. dev37 (wheel in the bench, 01872b1; built at 768b4d1, smoke-tested in a fresh Linux
    venv) has not run in the bench images: one run there before merging. A codex arm can
    join a registered comparison now.
