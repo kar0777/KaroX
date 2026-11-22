@@ -2318,3 +2318,11 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   attempts (5 vs 5 tasks); calls 897 vs 860 (-4%), input 28.5M vs 26.6M (-7%). Pre-registered
   rule (calls >= 15% lower) NOT met: dev48 not adopted on GLM evidence. Neutral-to-slightly
   better. Deciding run on the Haiku lane: hab1 (dev42 vs dev48, same tasks, 2 attempts), same rule.
+- hab1 final (Haiku, dev42 vs dev48, 2 att): 12 vs 14 of 24, calls 326 vs 338 (+4%): dev48 NOT
+  adopted (rule failed on both lanes). hab2 final (dev42 vs dev49 bash->file-tools wording):
+  13 vs 11 of 24, calls 343 vs 316 (-8%), edit calls 0 -> 4: dev49 NOT adopted; Haiku ignores
+  the tool-description steer. Base stays dev42.
+- Post-run interview added on the anthropic lane (bench 'interview', own alias). hint1 (3 tasks,
+  dev42, all solved): Haiku says it used bash because one command chains several steps; asks for
+  a multi-hunk edit, a clean-baseline test run (it did git stash dances), and project test/lint
+  commands + test interpreter in the environment. Hypotheses only: test by A/B.
