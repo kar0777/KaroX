@@ -168,3 +168,20 @@ git diff --check                 no output, exit 0
 python -m build --wheel          Successfully built karox6-6.0.0.dev39-py3-none-any.whl
 python scripts/perf_check.py     start 141.4 ms (<= 300.0), idle RSS 31.4 MiB (<= 80.0): OK
 ```
+
+## 7. Ctrl+C race at chat start (22 Nov, 07:05-07:50 UTC)
+
+- Cause: Python's SIGINT handler raised KeyboardInterrupt wherever the start-up imports were:
+  inside an `exec` of source text (namedtuple/dataclass) CPython re-raises the signal at exit
+  (exit -2 after `_chat` returned 0), inside a finalizer it is dropped (key lost), inside an
+  extension import it surfaces as another error (traceback).
+- Fix (`cli._Interrupts`, set in `_chat` before the first frame): until the loop runs an
+  interrupt is only counted and the loop's first step ends the start; then it cancels the main
+  task like asyncio's handler. No prompt or agent behaviour changed; version not bumped.
+- Test: `term.ctrl_c_hook` interrupts the chat at an exact import (plain / in `exec` / in a
+  finalizer); 12 cases, 9 fail on 2ba559b, all pass now; the race test also runs on Windows.
+- Stress, Ctrl+C 0-80 ms after the frame: before Windows 217/320 bad (warning on screen),
+  Linux 0/720 here (31/1,260 last night); after Windows 0/320, Linux 0/720.
+- Checks: ruff, format, mypy clean; pytest Windows 1188 passed, 6 skipped; Linux 1189 passed,
+  6 skipped; `git diff --check` clean. Not covered: Ctrl+C before `_chat` runs (nothing on
+  screen yet) keeps Python's default.

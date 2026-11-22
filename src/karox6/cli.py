@@ -24,14 +24,69 @@ EXIT_CODES = {"completed": 0, "error": 1, "limit": 3, "loop": 4, "cancelled": 13
 SIGTERM_EXIT = 143  # 128 + SIGTERM
 
 
-def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
+class _Interrupts:
+    """Ctrl+C (SIGINT) for a chat, taken before its first frame is painted.
+
+    Python's own handler raises KeyboardInterrupt wherever the main thread happens to be,
+    and while a chat starts that is inside the imports. Raised in an `exec` of source text
+    (the standard library builds namedtuples and dataclasses that way) it makes the
+    interpreter end by the signal although the chat caught it and returned 0; raised in a
+    callback it is printed and dropped, and the key is lost; raised in an extension
+    module's import it can come out as another error. This handler does not raise there:
+    until the event loop runs it only counts the interrupt, and the loop's first step
+    ends the start. From then on it cancels the main task, as asyncio's handler does
+    (asyncio.run puts that one over Python's default handler only, so not over this
+    one), and like it raises KeyboardInterrupt when asked again.
+    """
+
+    def __init__(self) -> None:
+        import signal
+
+        self.seen = 0
+        self._cancel: Callable[[], None] | None = None
+        self._previous: Any = signal.getsignal(signal.SIGINT)
+        self._installed = False
+        if self._previous is None:  # set by other code than Python's: theirs to handle
+            return
+        if self._previous is signal.SIG_IGN and not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return  # started to ignore it and no keyboard of its own: it stays ignored
+        try:
+            signal.signal(signal.SIGINT, self._on_sigint)
+        except ValueError:  # not the main thread
+            return
+        self._installed = True
+
+    def _on_sigint(self, _signum: int, _frame: Any) -> None:
+        self.seen += 1
+        if self._cancel is None:
+            return
+        if self.seen > 1:
+            raise KeyboardInterrupt
+        self._cancel()
+
+    def attach(self, cancel: Callable[[], None]) -> bool:
+        """The event loop runs: an interrupt calls ``cancel`` from now on. True when one
+        has come already, and the start ends here."""
+        self._cancel = cancel
+        return self.seen > 0
+
+    def restore(self) -> None:
+        if self._installed:
+            import signal
+
+            self._installed = False
+            signal.signal(signal.SIGINT, self._previous)
+
+
+def run_async[T](main_coro: Coroutine[Any, Any, T], interrupts: _Interrupts | None = None) -> T:
     """asyncio.run, where SIGTERM (POSIX) stops the program the way Ctrl+C does: the main
     task is cancelled, so `finally` blocks run, child process trees are killed and the
     session is recorded. MCP clients and process managers stop a server with SIGTERM;
     left to Python's default the process just vanished and its commands kept running.
     On Windows CTRL_BREAK (SIGBREAK) is handled the same way: it is how `karox mcp
     --supervise` stops its server, and Python's default ends the process without cleanup
-    (a Tailscale route would outlive it)."""
+    (a Tailscale route would outlive it). With ``interrupts`` (a chat) Ctrl+C is theirs:
+    it cancels the main task and ends as KeyboardInterrupt, as with asyncio's handler."""
     import asyncio
     import signal
 
@@ -48,6 +103,18 @@ def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
             terminated = True
             if task is not None:
                 task.cancel()
+
+        if interrupts is not None:
+
+            def on_interrupt() -> None:
+                if task is not None:
+                    task.cancel()
+                with contextlib.suppress(RuntimeError):  # the loop has just been closed
+                    loop.call_soon_threadsafe(lambda: None)  # wake a loop that waits for I/O
+
+            if interrupts.attach(on_interrupt):  # Ctrl+C came while the chat was imported
+                main_coro.close()
+                raise asyncio.CancelledError
 
         installed = False
         previous: Any = None
@@ -78,6 +145,8 @@ def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
     except asyncio.CancelledError:
         if terminated:
             raise SystemExit(SIGTERM_EXIT) from None
+        if interrupts is not None and interrupts.seen:
+            raise KeyboardInterrupt from None
         raise
     if terminated:
         raise SystemExit(SIGTERM_EXIT)
@@ -463,19 +532,23 @@ def _chat(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     # No model yet: the chat starts with its setup (provider, model, key) instead.
     if not args.model and not (sys.stdin.isatty() and sys.stdout.isatty()):
         parser.error("--model is required (or set KAROX_MODEL, or run `karox6` in a terminal)")
-    splash = _first_frame(args)  # on screen before asyncio and prompt_toolkit are imported
+    interrupts = _Interrupts()  # before the frame: Ctrl+C must not raise inside the imports
     try:
-        return run_async(_chat_async(args, splash))
-    except KeyboardInterrupt:
-        return 0
-    except (ValueError, FileNotFoundError) as exc:
-        if splash is not None:
-            splash.close()
-        sys.stderr.write(f"karox: {exc}\n")
-        return 2
+        splash = _first_frame(args)  # on screen before asyncio and prompt_toolkit are imported
+        try:
+            return run_async(_chat_async(args, splash), interrupts)
+        except KeyboardInterrupt:
+            return 0
+        except (ValueError, FileNotFoundError) as exc:
+            if splash is not None:
+                splash.close()
+            sys.stderr.write(f"karox: {exc}\n")
+            return 2
+        finally:
+            if splash is not None:
+                splash.close()
     finally:
-        if splash is not None:
-            splash.close()
+        interrupts.restore()
 
 
 def _initial_window(args: argparse.Namespace) -> int:

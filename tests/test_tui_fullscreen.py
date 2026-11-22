@@ -672,8 +672,8 @@ def test_resize_and_sanitization_of_model_control_sequences(tmp_path: Path) -> N
 def _install_cli_timeout(monkeypatch: pytest.MonkeyPatch, timeout: float = 15.0) -> None:
     orig_run_async = cli.run_async
 
-    def timed_run_async[T](coro: Coroutine[object, object, T]) -> T:
-        return orig_run_async(asyncio.wait_for(coro, timeout=timeout))
+    def timed_run_async[T](coro: Coroutine[object, object, T], *args: object) -> T:
+        return orig_run_async(asyncio.wait_for(coro, timeout=timeout), *args)
 
     monkeypatch.setattr(cli, "run_async", timed_run_async)
 

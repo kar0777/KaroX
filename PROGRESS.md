@@ -2148,3 +2148,24 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   left. The test stays as it is and fails about once in thirty Linux runs until then.
 - 06:31 UTC, last correction and close: 31 failures of 1,260 interrupted starts is one in
   forty, not thirty. Report closed; both branches pushed; the working trees are clean.
+- 07:05-07:50 UTC, the Ctrl+C race at chat start, fixed. Found at the start of the shift:
+  uncommitted edits in `cli.py`, `tests/term.py`, `tests/test_terminal.py` made 06:57-07:04
+  UTC (an interrupted attempt at this task); reviewed, kept, and one test helper they broke
+  fixed (`_install_cli_timeout` in `test_tui_fullscreen.py` wrapped `run_async` with one
+  argument). Cause as in the 06:30 entry. Fix: `cli._Interrupts`, a SIGINT handler set in
+  `_chat` before the first frame; until the event loop runs it only counts the interrupt
+  (nothing is raised inside the imports), the loop's first step ends the start, and after
+  that it cancels the main task as asyncio's own handler does (second Ctrl+C:
+  KeyboardInterrupt). Test: `term.ctrl_c_hook` makes the chat interrupt itself as it first
+  imports a given module, plainly, inside an `exec` of source text or inside a finalizer;
+  `test_an_interrupt_at_any_point_of_the_start_ends_it_cleanly` (12 cases) fails 9 of 12
+  on 2ba559b on Linux (plus the old race test with its new "nothing printed" check) and
+  passes on both systems. The hook also turns Ctrl+C back on under pywinpty, so the race
+  test now runs on Windows too. Stress (scratch `ctrlc_stress.py`, Ctrl+C 0-80 ms after
+  the frame, OK = exit 0/130 + screen and input mode back + nothing printed, or the key
+  reaches the app): before, Windows 217 of 320 bad (216 "coroutine '_chat_async' was never
+  awaited" on screen, 1 STATUS_CONTROL_C_EXIT); Linux 0 of 720 bad in this harness (last
+  night's harness: 31 of 1,260). After: Windows 0 of 320, Linux 0 of 720 (320 at 0-80 ms,
+  25 reached the app; 400 at 0 ms). Left as it is: Ctrl+C before `_chat` (interpreter start,
+  argument parsing, nothing on screen yet) still gets Python's default, and a second Ctrl+C
+  once the loop runs raises KeyboardInterrupt as with asyncio's handler.

@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pyte
@@ -310,3 +311,68 @@ class Terminal:
 
     def wait_gone(self, what: str, timeout: float = 15.0) -> str:
         return self.wait(lambda s: what not in s, timeout)
+
+
+# What a program started through ctrl_c_hook loads first (as its `sitecustomize`).
+_SITECUSTOMIZE = '''"""Test hook: see ctrl_c_hook in tests/term.py."""
+import builtins
+import os
+import signal
+import sys
+
+if sys.platform == "win32":
+    import ctypes
+
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(None, 0)
+
+_at, _, _how = os.environ.get("TEST_SIGINT_AT", "").partition(":")
+if _at:
+    _import = builtins.__import__
+    _fired = False
+
+    def _interrupt():
+        signal.raise_signal(signal.SIGINT)
+        for _ in range(100):  # Python runs the signal's handler within these steps
+            pass
+
+    class _Dropped:
+        def __del__(self):
+            _interrupt()
+
+    def _hooked(name, globals=None, locals=None, fromlist=(), level=0):
+        global _fired
+        if not _fired and _at in (name, *(fromlist or ())):
+            _fired = True
+            if _how == "exec":
+                exec("interrupt()", {"interrupt": _interrupt})
+            elif _how == "callback":
+                _Dropped()
+            else:
+                _interrupt()
+        return _import(name, globals, locals, fromlist, level)
+
+    builtins.__import__ = _hooked
+'''
+
+
+def ctrl_c_hook(directory: Path) -> str:
+    """Let a program in a Terminal be interrupted the way a user's is, and at exact points.
+
+    Returns the directory to put first on the program's PYTHONPATH; its interpreter then
+    loads the module written there before anything else. That module does two things.
+
+    On Windows it switches Ctrl+C back on. A process started in a new process group (a CI
+    job, an IDE's agent) ignores Ctrl+C and hands that on to its children, pytest and the
+    program under test among them; a Ctrl+C typed before the program reads keys itself
+    then reaches it neither as an interrupt nor as a key. A user's console has it on.
+
+    With TEST_SIGINT_AT=<name>:<how> in its environment the program interrupts itself
+    when it first imports <name> (a module, or a name in a `from ... import` list), which
+    is an exact point of its start instead of a moment in time. <how> is where the
+    interrupt lands: "plain" (the importing code), "exec" (inside an `exec` of source
+    text, as namedtuples and dataclasses are built) or "callback" (inside a finalizer,
+    where an exception is printed and dropped).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "sitecustomize.py").write_text(_SITECUSTOMIZE, encoding="utf-8")
+    return str(directory)

@@ -24,12 +24,15 @@ if sys.platform == "win32":
     pytest.importorskip("winpty")
 
 from fake_model import FakeModel, Reply
-from term import Terminal
+from term import Terminal, ctrl_c_hook
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 ENTER_ALT, LEAVE_ALT = "\x1b[?1049h", "\x1b[?1049l"
 PUSH = ("bash", {"command": "git push --force origin main"})  # needs approval (git.push-force)
 LINE_MODE = {"echo": True, "line": True, "cr_as_lf": True}  # a POSIX terminal as a shell has it
+# What an interrupt left on the user's screen when Python's own handler raised it somewhere
+# in the start-up imports.
+NOISE = ("Traceback", "Exception ignored", "KeyboardInterrupt", "never awaited")
 _ACTIVITY = re.compile(r"\d+\.\ds  \S")
 
 
@@ -96,6 +99,12 @@ class Launcher:
         )
         env.update(extra)
         return env
+
+    def interruptible(self, at: str = "") -> dict[str, str]:
+        """The environment of a chat that takes Ctrl+C as a user's does (term.ctrl_c_hook);
+        with ``at`` ("<name>:<how>") it interrupts itself at that point of its start."""
+        path = os.pathsep.join([ctrl_c_hook(self.tmp / "hook"), str(SRC)])
+        return self.env(PYTHONPATH=path, **({"TEST_SIGINT_AT": at} if at else {}))
 
     def start(
         self,
@@ -187,15 +196,11 @@ def test_keys_typed_under_the_first_frame_reach_the_app_as_typed(launch: Launche
     assert t.input_mode() in (None, LINE_MODE)
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="under pywinpty a Ctrl+C sent before the app reads keys reaches the program "
-    "neither as an interrupt nor as a key (observed), so the path only runs on POSIX",
-)
 def test_ctrl_c_under_the_first_frame_leaves_a_clean_terminal(launch: Launcher) -> None:
     """Ctrl+C while only the start-up frame is up (the app is still being imported) ends
     the start: the user's screen and the terminal's own input mode come back."""
-    chat = launch.start([], ready=None, watch=("Type a task to start.",))
+    env = launch.interruptible()  # on Windows too: see term.ctrl_c_hook
+    chat = launch.start([], ready=None, watch=("Type a task to start.",), env=env)
     t = chat.term
     t.seen_at("Type a task to start.")
     t.key("ctrl-c")
@@ -209,6 +214,34 @@ def test_ctrl_c_under_the_first_frame_leaves_a_clean_terminal(launch: Launcher) 
     assert not t.screen.alternate
     assert t.raw.count(ENTER_ALT) == t.raw.count(LEAVE_ALT) == 1
     assert t.input_mode() in (None, LINE_MODE)
+    assert not [mark for mark in NOISE if mark in t.raw], t.raw
+
+
+@pytest.mark.parametrize("how", ["plain", "exec", "callback"])
+@pytest.mark.parametrize(
+    "at",
+    ["splash", "asyncio", "ssl", "karox6.tui_app"],
+    ids=["before-the-frame", "under-the-frame", "inside-an-import", "loop-running"],
+)
+def test_an_interrupt_at_any_point_of_the_start_ends_it_cleanly(
+    launch: Launcher, at: str, how: str
+) -> None:
+    """The race of the test above, without the race: the chat interrupts itself at an exact
+    point of its start (as it first imports ``at``), in each of the ways that went wrong
+    while Python's own handler raised KeyboardInterrupt there. Raised plainly before the
+    event loop ran, it left the chat's coroutine unawaited and a warning on the user's
+    screen, or a traceback when the frame was not painted yet; raised inside an `exec` of
+    source text, the process returned 0 and was ended by the signal all the same; raised
+    inside a callback, it was printed and dropped, so the key was lost and the chat stayed
+    up. Now the start ends each time: exit 0, the user's screen and the terminal's input
+    mode back, nothing printed."""
+    chat = launch.start([], ready=None, env=launch.interruptible(f"{at}:{how}"))
+    t = chat.term
+    assert t.wait_exit(20) == 0
+    assert not t.screen.alternate
+    assert t.raw.count(ENTER_ALT) == t.raw.count(LEAVE_ALT) == 1
+    assert t.input_mode() in (None, LINE_MODE)
+    assert not [mark for mark in NOISE if mark in t.raw], t.raw
 
 
 def test_ctrl_c_twice_leaves_and_names_the_session(launch: Launcher) -> None:
