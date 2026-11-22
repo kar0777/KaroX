@@ -2292,3 +2292,11 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   (proportionate verification prompt, checker inventory, sticky eased effort) per the
   2026-11-22 brainstorm (Fusion Opus, Gemini Neon, GPT-6.2 Sol all ranked the Verify ritual
   in core/prompt.py first and advised against a bundled local model).
+- dev47 (steps/dev47 969dc7c, Gemini Neon via agy, reviewed): Verify section made
+  proportionate (no mandatory build/type check + broader tests; no re-running unchanged
+  passing checks; finish once relevant checks pass), checker inventory line in the
+  environment block, eased effort held 8 steps after an empty length cut.
+  Pre-registered mab7 (Dahl GLM, night 58-69, 2 attempts, dev42 vs dev47): adopt dev47 if
+  calls on tasks valid in both are >= 15% lower AND solves >= dev42 - 1; then confirm on
+  the Haiku 5.5 lane (no solve loss beyond 1, calls lower).
+
