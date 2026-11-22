@@ -2148,7 +2148,7 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   left. The test stays as it is and fails about once in thirty Linux runs until then.
 - 06:31 UTC, last correction and close: 31 failures of 1,260 interrupted starts is one in
   forty, not thirty. Report closed; both branches pushed; the working trees are clean.
-- 07:05-07:50 UTC, the Ctrl+C race at chat start, fixed. Found at the start of the shift:
+- 07:05-07:30 UTC, the Ctrl+C race at chat start, fixed (01126de). Found at the start of the shift:
   uncommitted edits in `cli.py`, `tests/term.py`, `tests/test_terminal.py` made 06:57-07:04
   UTC (an interrupted attempt at this task); reviewed, kept, and one test helper they broke
   fixed (`_install_cli_timeout` in `test_tui_fullscreen.py` wrapped `run_async` with one

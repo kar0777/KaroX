@@ -169,7 +169,7 @@ python -m build --wheel          Successfully built karox6-6.0.0.dev39-py3-none-
 python scripts/perf_check.py     start 141.4 ms (<= 300.0), idle RSS 31.4 MiB (<= 80.0): OK
 ```
 
-## 7. Ctrl+C race at chat start (22 Nov, 07:05-07:50 UTC)
+## 7. Ctrl+C race at chat start (22 Nov, 07:05-07:30 UTC, commit 01126de)
 
 - Cause: Python's SIGINT handler raised KeyboardInterrupt wherever the start-up imports were:
   inside an `exec` of source text (namedtuple/dataclass) CPython re-raises the signal at exit
