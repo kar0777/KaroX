@@ -1,0 +1,32 @@
+╭─ KaroX 6.0.0.dev40 ────────────────────────────────────────────────╮
+│ model      demo-model · openai-chat                                │
+│ project    ~\AppData\Local\Temp\tmpr91w47xw\ws · main              │
+│ approvals  ask  (/approve to change)                               │
+│                                                                    │
+│            / commands · @ attach a file · Alt+Enter new line       │
+│            Esc stops the agent · Ctrl+O tool output · Ctrl+D quits │
+╰────────────────────────────────────────────────────────────────────╯
+Type a task to start.
+
+
+
+
+
+
+
+
+
+
+
+
+   /new                          start a fresh session                                            ^
+   /clear                        clear the screen (keeps current session)
+   /sessions                     list recent sessions for this workspace
+   /resume [ID|last]             continue a saved session
+   /fork                         branch off: a copy of this conversation to try another way
+   /undo                         take back the last turn: its file changes and messages
+   /redo                         put back the turn that /undo took away
+╭─ /quit                         leave the chat (/exit, /q, Ctrl+D)                               v
+│ › /                                                                                             │
+╰─────────────────── enter send · alt+enter new line · / commands · @ files · ctrl+o tool output ─╯
+ demo-model · ws (main)                                               ctx ▱▱▱▱▱ 0% · approvals ask

@@ -185,3 +185,23 @@ python scripts/perf_check.py     start 141.4 ms (<= 300.0), idle RSS 31.4 MiB (<
 - Checks: ruff, format, mypy clean; pytest Windows 1188 passed, 6 skipped; Linux 1189 passed,
   6 skipped; `git diff --check` clean. Not covered: Ctrl+C before `_chat` runs (nothing on
   screen yet) keeps Python's default.
+
+## 8. Always the newest KaroX, and the chat's new look (22 Nov, from 07:45 UTC, 6.0.0.dev40)
+
+Status: written as the work goes; the last update is at the end of this section.
+
+- `karox6 update` / `/update`: temporary clone of `karox6/main` (never a working copy),
+  "was -> now" and the commit titles in between, wheel built with the venv's pip and
+  started from a scratch folder before anything is installed, dependencies first, then
+  `--force-reinstall --no-deps`. On Windows the running `karox6.exe`/`karox.exe` are renamed
+  to `*.exe.<pid>-<t>.old` (put back on failure, deleted on a later run). Errors are one
+  sentence plus pip's last lines; the installed KaroX stays as it was.
+- Daily background check in the chat (daemon thread after the first frame; no wait on
+  exit), cached in `<home>/update-check.json`; one line "version X is available: /update"
+  and a mark in the status bar; off with `update_check = false` / `KAROX_UPDATE_CHECK=0`,
+  and off in a source tree. Never installs by itself.
+- `scripts/install_latest.ps1` / `.sh`: create the venv if missing, compare the installed
+  build's commit with the branch tip, else build, check and install; second run: "up to
+  date".
+- Chat look: see `docs/tui.md` (fifteen points, before/after screens in `docs/tui/`).
+- Not changed: BASE_PROMPT, the agent loop, tools; ReformBoss not used.

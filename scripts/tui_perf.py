@@ -51,7 +51,7 @@ def startup(tmp: Path, runs: int, env: dict[str, str]) -> tuple[float, float]:
     frames, ready = [], []
     with FakeModel([]) as model:
         for _ in range(runs):
-            marks = ("Type a task to start.", "approve:ask", "› x")
+            marks = ("Type a task to start.", "approvals ask", "› x")
             t = launch(model, tmp, rows=30, cols=100, watch=marks, env=env)
             try:
                 t.send("x")  # typed at once: echoed when the app starts reading keys
@@ -75,14 +75,14 @@ def long_session(tmp: Path, lines: int) -> None:
             start, written = time.perf_counter(), len(t.raw)
             t.line("big")
             t.wait(f"line {lines}:", 300)
-            t.wait("[completed]", 60)
+            t.wait("✓ completed", 60)
             took = time.perf_counter() - start
             sent = len(t.raw) - written
             print(f"{lines} lines streamed and shown: {took:.2f} s, {sent:,} bytes to the terminal")
             for name, key, marker in (
-                ("PageUp", "pageup", "scrolled +"),
+                ("PageUp", "pageup", "lines below"),
                 ("Ctrl+Home (top)", "ctrl-home", "KaroX 6"),
-                ("Ctrl+End (bottom)", "ctrl-end", "[completed]"),
+                ("Ctrl+End (bottom)", "ctrl-end", "✓ completed"),
             ):
                 before = time.perf_counter()
                 t.send(
@@ -99,7 +99,7 @@ def long_session(tmp: Path, lines: int) -> None:
                 typed += ch
                 sent_at = time.perf_counter()
                 t.send(ch)
-                t.wait(lambda _s, want=typed: t.lines()[-1].endswith("› " + want), 5)
+                t.wait(lambda _s, want=typed: t.lines()[-3].rstrip(" │").endswith("› " + want), 5)
                 echo.append(time.perf_counter() - sent_at)
                 time.sleep(0.05)
             rate = (len(t.raw) - written) / (time.perf_counter() - began)
@@ -110,7 +110,7 @@ def long_session(tmp: Path, lines: int) -> None:
             )
             print(f"terminal output while streaming: {rate / 1024:.1f} KB/s")
             t.key("ctrl-c")
-            t.wait("[stopped]", 15)
+            t.wait("! stopped", 15)
         finally:
             t.close()
 

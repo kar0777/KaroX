@@ -35,6 +35,7 @@ from karox6.chat_features import (
 )
 from karox6.core import events as ev
 from karox6.core.digest import brief, clip, explain_error, is_tool_failure, outcome
+from karox6.tui_markdown import Markdown
 from karox6.tui_text import (
     Palette,
     StatusSnapshot,
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     from karox6.core.messages import Message
     from karox6.core.session import Session
     from karox6.tools.base import ApprovalRequest, Tool
+    from karox6.tui_theme import Theme
 
 
 class TurnView(Protocol):
@@ -107,6 +109,7 @@ _SESSION_COMMANDS = frozenset(
     )
 )
 DIFF_CAP = 40_000
+_EXIT_LINE = re.compile(r"^\[exit code:\s*-?\d+")
 _CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MENTION_MAX_BYTES = 64 * 1024
 MENTION_TOTAL_BYTES = 128 * 1024
@@ -463,6 +466,10 @@ class ChatApp:
         columns: Callable[[], int] | None = None,
         snapshots: bool = False,
         prefill: Callable[[str], None] | None = None,
+        theme: Theme | None = None,
+        legacy_glyphs: bool = False,
+        write_block: Callable[[str, str], None] | None = None,
+        live: Callable[[str], None] | None = None,
     ) -> None:
         if approval_mode not in APPROVAL_MODES:
             raise ValueError(f"approval mode must be one of {APPROVAL_MODES}")
@@ -472,8 +479,12 @@ class ChatApp:
         self._read_answer = read_answer or read_line
         self.write = write
         self.approval_mode = approval_mode
-        self.paint = Palette(color)
-        self.glyph = _glyphs(encoding)
+        self.paint = Palette(color, theme)
+        self.glyph = _glyphs(encoding, legacy_glyphs)
+        self._write_block = write_block  # (collapsed, expanded): Ctrl+O switches them
+        self._live = live  # shows the line of the answer still being streamed
+        self._md = Markdown(self.paint, self.glyph, columns)
+        self._last_turn_s: float | None = None  # how long the last turn took
         self.extra_tools = list(extra_tools or [])
         self.show_reasoning = False
         self._stream: str | None = None  # "text" | "reasoning" while a delta stream is open
@@ -637,7 +648,9 @@ class ChatApp:
             window = cfg.effective_window(s._learned_window)
             pct = min(round(used / window * 100), 100) if window else 0
             session_id: str | None = s.session_id
+            cost = s.cost_usd if cfg.price else None
         else:
+            cost = None
             total_tokens = 0
             used = 0
             window = cfg.effective_window(None)
@@ -656,6 +669,11 @@ class ChatApp:
             context_window=window,
             context_pct=pct,
             session_id=session_id,
+            cost_usd=cost,
+            turn_s=(time.monotonic() - self._turn_started)
+            if self._turn_running
+            else self._last_turn_s,
+            update=self.update_note,
         )
 
     def exit_summary(self) -> str:
@@ -738,7 +756,7 @@ class ChatApp:
                     with contextlib.suppress(asyncio.CancelledError):
                         await worker
                     self._end_stream()
-                    self.write(self.paint("yellow", "[stopped]") + "\n")
+                    self.write(self.paint("warning", f"{self.glyph['warn']} stopped") + "\n")
                     return "cancelled"
         finally:
             self._turn_running = False
@@ -752,16 +770,23 @@ class ChatApp:
             finally:
                 restore()
 
-    def _progress(self) -> str:
+    def activity(self) -> tuple[str, float]:
+        """What the running turn is doing now, and for how long it has run."""
         elapsed = time.monotonic() - self._turn_started
-        spinner = "|/-\\"[int(elapsed * 8) % 4]
         phase = self._phase
         if self._active_tools:
-            names = (
-                " ".join(_plain_text(call.name).split())[:80]
-                for call in self._active_tools.values()
-            )
+            calls = list(self._active_tools.values())
+            names = (" ".join(_plain_text(call.name).split())[:80] for call in calls)
             phase = "Running " + ", ".join(dict.fromkeys(names))
+            if len(calls) == 1:
+                target = _plain_text(brief(calls[0].arguments, 60))
+                phase += f" {target}" if target else ""
+        return phase, elapsed
+
+    def _progress(self) -> str:
+        phase, elapsed = self.activity()
+        spin = self.glyph.get("spin", "|/-\\")
+        spinner = spin[int(elapsed * 10) % len(spin)]
         return f"{spinner} {elapsed:.1f}s  {phase}"
 
     async def _consume(self, text: str, label: str | None = None) -> str:
@@ -1015,24 +1040,28 @@ class ChatApp:
             self._phase = "Model responding"
             self._streamed_text = True
             text = _plain_text(event.text)
-            self.write(text)
-            if text:
-                self._stream_newline = text.endswith("\n")
+            done = self._md.feed(text)
+            if done:
+                self.write(done)
+                self._stream_newline = done.endswith("\n")
+            if self._live is not None:
+                self._live(self._md.partial())
             return
         if isinstance(event, ev.ReasoningDelta):
             self._phase = "Model thinking"
             if self.show_reasoning:
                 self._open("reasoning")
                 text = _plain_text(event.text)
-                self.write(p("dim", text))
+                self.write(p("muted+italic", text))
                 if text:
                     self._stream_newline = text.endswith("\n")
             return
         if isinstance(event, ev.AssistantMessage):
             if event.text and not self._streamed_text:
                 self._open("text")
-                self.write(_plain_text(event.text).rstrip() + "\n")
-                self._stream_newline = True
+                text = self._md.feed(_plain_text(event.text).rstrip() + "\n") + self._md.flush()
+                self.write(text)
+                self._stream_newline = text.endswith("\n")
             self._streamed_text = False
             self._end_stream()
             return
@@ -1050,18 +1079,16 @@ class ChatApp:
             self._phase = f"Retrying model (attempt {event.attempt})"
             error = clip(_plain_text(explain_error(event.error)[0]), 140)
             self.write(
-                p(
-                    "dim",
-                    f"  retry {event.attempt} in {event.delay_s:.0f}s: {error}",
-                )
+                p("warning", f"  {g['warn']} retry {event.attempt}")
+                + p("muted", f" in {event.delay_s:.0f}s: {error}")
                 + "\n"
             )
         elif isinstance(event, ev.Notice):
-            self.write(p("yellow", f"  [{event.kind}] {_plain_text(event.text)[:200]}") + "\n")
+            self.write(p("warning", f"  [{event.kind}] {_plain_text(event.text)[:200]}") + "\n")
         elif isinstance(event, ev.Compacted):
             self.write(
                 p(
-                    "dim",
+                    "muted",
                     f"  context compacted ({event.mode}): "
                     f"{event.tokens_before} -> {event.tokens_after} tokens",
                 )
@@ -1069,12 +1096,13 @@ class ChatApp:
             )
         elif isinstance(event, ev.ErrorEvent):
             line, hint = explain_error(event.message)
-            self.write(p("red", f"{g['fail']} error: {_plain_text(line)}") + "\n")
+            self.write(p("error", f"{g['fail']} error: {_plain_text(line)}") + "\n")
             if hint:
-                self.write(p("dim", f"  {hint}") + "\n")
+                self.write(p("accent", f"  {g['arrow']} ") + p("muted", hint) + "\n")
             self._error_shown = True
         elif isinstance(event, ev.RunFinished):
             self._phase = "Finishing"
+            self._last_turn_s = event.elapsed_s
             self.write(self._footer(event) + "\n")
             self._error_shown = False
 
@@ -1086,9 +1114,10 @@ class ChatApp:
         name = " ".join(_plain_text(event.name).split())[:80]
         target = _plain_text(brief(start.arguments)) if start is not None else ""
         pad = "    " if "/" in name else ""  # a subagent's call
-        head = f"{pad}{p('cyan', g['tool'])} {p('bold', name)}" + (f" {target}" if target else "")
         failed = is_tool_failure(event)
-        mark = p("red", g["fail"]) if failed else p("green", g["ok"])
+        bullet = p("error" if failed else "success", g["tool"])
+        head = f"{pad}{bullet} {p('bold', name)}" + (f" {target}" if target else "")
+        mark = p("error", g["fail"]) if failed else p("success", g["ok"])
         stats = (
             _edit_diff_stats(event.name, start.arguments)
             if start is not None and not failed
@@ -1096,22 +1125,58 @@ class ChatApp:
         )
         if stats is None:
             summary = _plain_text(outcome(event)).replace(" · ", g["dot"])
-            detail = p("red" if failed else "dim", summary)
+            detail = p("error" if failed else "muted", summary)
         else:
             detail = self._paint_diff_stats(*stats)
-        took = p("dim", f"({event.duration_ms / 1000:.1f}s)")
-        self.write(f"{head}  {mark}" + (f" {detail}" if detail else "") + f" {took}\n")
+        took = p("muted", f"{g['dot']}{event.duration_ms / 1000:.1f}s")
+        line = f"{head}  {mark}" + (f" {detail}" if detail else "") + f"{took}\n"
+        short = [line]
+        full = [line]
         if start is not None and not failed:
             # What the edit changed, right under its line (the whole change: /diff).
-            colors = {"-": "red", "+": "green", "…": "dim"}
+            colors = {"-": "error+del_bg", "+": "success+add_bg", "…": "muted"}
             for kind, text in diff_preview(event.name, start.arguments, event.meta):
-                self.write(f"{pad}  {p(colors[kind], text)}\n")
+                short.append(f"{pad}  {p(colors[kind], text)}\n")
+            for kind, text in diff_preview(event.name, start.arguments, event.meta, 400):
+                full.append(f"{pad}  {p(colors[kind], text)}\n")
+        output = self._tool_output_lines(event)
+        if output and len(full) == 1:
+            shown = output[-200:]
+            lead = f"{pad}  {p('subtle', g['result'])}"
+            rest = f"{pad}    "
+            if len(output) > len(shown):
+                full.append(lead + p("muted", f"… {len(output) - len(shown)} earlier lines") + "\n")
+                lead = rest
+            for n, text in enumerate(shown):
+                full.append((lead if n == 0 else rest) + p("muted", text) + "\n")
+            if self._write_block is not None:
+                count = f"{len(output)} line{'s' if len(output) != 1 else ''}"
+                short.append(f"{pad}  " + p("subtle", f"… {count} (ctrl+o to expand)") + "\n")
+        if self._write_block is not None and full != short:
+            self._write_block("".join(short), "".join(full))
+        else:
+            self.write("".join(short))
+
+    def _tool_output_lines(self, event: ev.ToolFinished) -> list[str]:
+        """The output worth expanding under a tool's line: a command's output, or the
+        rest of an error. Reads, searches and listings stay one line."""
+        base = event.name.rsplit("/", 1)[-1]
+        shell = base in ("bash", "shell", "powershell", "pwsh", "job_output")
+        if not shell and not is_tool_failure(event):
+            return []
+        lines = [
+            clip(_plain_text(line.expandtabs(4)).rstrip(), 400)
+            for line in event.output.strip("\n").splitlines()
+        ]
+        lines = [line for line in lines if line.strip() and not _EXIT_LINE.match(line)]
+        return lines if len(lines) > 1 else []  # one line: the summary shows it
 
     def _paint_diff_stats(self, added: int, removed: int) -> str:
         return f"{self.paint('green', f'+{added}')} {self.paint('red', f'-{removed}')}"
 
     def _footer(self, event: ev.RunFinished) -> str:
         usage = event.usage
+        g = self.glyph
         parts = [
             f"{event.steps} steps",
             f"{event.elapsed_s:.0f}s",
@@ -1120,14 +1185,17 @@ class ChatApp:
         if event.cost_usd is not None:
             parts.append(f"${event.cost_usd:.4f}")
         if event.files_changed:
-            parts.append(f"{len(event.files_changed)} files changed (/diff)")
-        color = "green" if event.status == "completed" else "yellow"
-        head = self.paint(color, f"[{event.status}]")
+            count = len(event.files_changed)
+            parts.append(f"{count} file{'s' if count != 1 else ''} changed (/diff)")
+        done = event.status == "completed"
+        head = self.paint(
+            "success" if done else "warning", f"{g['ok'] if done else g['warn']} {event.status}"
+        )
         reason = ""
-        if event.reason and event.status != "completed" and not self._error_shown:
+        if event.reason and not done and not self._error_shown:
             # (an error was just printed in full above the footer: not twice)
             reason = f" {clip(_plain_text(explain_error(event.reason)[0]), 160)}"
-        return f"{head}{reason} " + self.paint("dim", self.glyph["dot"].join(parts))
+        return f"{head}{reason}" + self.paint("muted", g["dot"] + g["dot"].join(parts).strip())
 
     def _open(self, kind: str) -> None:
         if self._stream != kind:
@@ -1137,10 +1205,17 @@ class ChatApp:
                 self._had_tools = False
             self._stream = kind
             if kind == "reasoning":
-                self.write(self.paint("dim", "thinking: "))
+                self.write(self.paint("muted+italic", "thinking: "))
 
     def _end_stream(self) -> None:
         if self._stream is not None:
+            if self._stream == "text":
+                rest = self._md.flush()
+                if self._live is not None:
+                    self._live("")
+                if rest:
+                    self.write(rest)
+                    self._stream_newline = rest.endswith("\n")
             if not self._stream_newline:
                 self.write("\n")
             self._stream = None
@@ -1582,9 +1657,9 @@ class ChatApp:
         if not in_hunk and line.startswith(("+++ ", "--- ", "diff --git ", "index ")):
             return self.paint("bold", line)
         if line.startswith("+"):
-            return self.paint("green", line)
+            return self.paint("success+add_bg", line)
         if line.startswith("-"):
-            return self.paint("red", line)
+            return self.paint("error+del_bg", line)
         if line.startswith("@@"):
             return self.paint("cyan", line)
         return line
@@ -1667,6 +1742,31 @@ class _WorkspaceFiles:
         return self._files
 
 
+def _rank_commands(prefix: str) -> list[CommandSpec]:
+    """Commands for what is typed after "/": names that start with it, then names that
+    hold it, then those whose description has a word starting with it."""
+    needle = prefix.removeprefix("/")
+    if not needle:
+        return list(COMMANDS)
+    starts = [c for c in COMMANDS if c.name.startswith(prefix)]
+    inside = [c for c in COMMANDS if c not in starts and needle in c.name]
+    described = [
+        c
+        for c in COMMANDS
+        if c not in starts
+        and c not in inside
+        and len(needle) >= 3
+        and any(word.startswith(needle) for word in re.findall(r"\w+", c.summary.lower()))
+    ]
+    return starts + inside + described
+
+
+def _subsequence(needle: str, text: str) -> bool:
+    """Every character of ``needle`` occurs in ``text`` in order ("tuiap" in "tui_app")."""
+    it = iter(text)
+    return all(ch in it for ch in needle)
+
+
 def _match_workspace_files(files: list[str], fragment: str, limit: int = 25) -> list[str]:
     needle = fragment.replace("\\", "/").lower()
     if not needle:
@@ -1674,6 +1774,7 @@ def _match_workspace_files(files: list[str], fragment: str, limit: int = 25) -> 
     prefix: list[str] = []
     base_prefix: list[str] = []
     substr: list[str] = []
+    fuzzy: list[str] = []
     for rel in files:
         low = rel.lower()
         base = low.rsplit("/", 1)[-1]
@@ -1683,7 +1784,9 @@ def _match_workspace_files(files: list[str], fragment: str, limit: int = 25) -> 
             base_prefix.append(rel)
         elif needle in low:
             substr.append(rel)
-    return (prefix + base_prefix + substr)[:limit]
+        elif len(needle) >= 3 and len(fuzzy) < limit and _subsequence(needle, low):
+            fuzzy.append(rel)
+    return (prefix + base_prefix + substr + fuzzy)[:limit]
 
 
 def build_completer(*, workspace: Path | None = None, home: Path | None = None) -> Completer:
@@ -1707,14 +1810,13 @@ def build_completer(*, workspace: Path | None = None, home: Path | None = None) 
         def _complete_command(self, before: str) -> Iterator[Completion]:
             if " " not in before:
                 prefix = before.lower()
-                for spec in COMMANDS:
-                    if spec.name.startswith(prefix):
-                        yield Completion(
-                            spec.name,
-                            start_position=-len(before),
-                            display=spec.name,
-                            display_meta=spec.summary,
-                        )
+                for spec in _rank_commands(prefix):
+                    yield Completion(
+                        spec.name,
+                        start_position=-len(before),
+                        display=spec.usage,
+                        display_meta=spec.summary,
+                    )
                 for alias, desc in _COMMAND_ALIASES.items():
                     if alias.startswith(prefix) and prefix != "/":
                         yield Completion(

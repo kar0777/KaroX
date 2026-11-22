@@ -9,11 +9,14 @@ Imports here stay cheap on purpose (no asyncio, no prompt_toolkit at module leve
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-_CODES = {"dim": "2", "bold": "1", "red": "31", "green": "32", "yellow": "33", "cyan": "36"}
+from karox6.tui_theme import Theme
+
 _BOX_FANCY = ("╭", "╮", "╰", "╯", "─", "│")
 _BOX_ASCII = ("+", "+", "+", "+", "-", "|")
 _ANSI = re.compile("\x1b\\[[0-9;]*m")
@@ -41,24 +44,80 @@ class StatusSnapshot:
     context_window: int
     context_pct: int
     session_id: str | None
+    cost_usd: float | None = None
+    turn_s: float | None = None  # the running or the last turn (None: none yet)
+    update: str = ""
 
 
 class Palette:
-    def __init__(self, enabled: bool) -> None:
+    """Paints text in a colour role (karox6.tui_theme): ``paint("accent", "x")``. Roles
+    combine with "+" (``"success+add_bg"``). Without a theme it uses the terminal's 16
+    colours, as the chat always did."""
+
+    def __init__(self, enabled: bool, theme: Theme | None = None) -> None:
         self.enabled = enabled
+        self.theme = theme if theme is not None else Theme("ansi", 4 if enabled else 0)
 
     def __call__(self, style: str, text: str) -> str:
         if not self.enabled or not text:
             return text
-        return f"\x1b[{_CODES[style]}m{text}\x1b[0m"
+        code = ";".join(c for c in (self.theme.sgr(s) for s in style.split("+")) if c)
+        return f"\x1b[{code}m{text}\x1b[0m" if code else text
 
 
-def _glyphs(encoding: str | None) -> dict[str, str]:
-    fancy = {"tool": "●", "ok": "✓", "fail": "✗", "prompt": "› ", "more": "… ", "dot": " · "}
+_RICH = {
+    "tool": "●",
+    "ok": "✓",
+    "fail": "✗",
+    "prompt": "› ",
+    "more": "… ",
+    "dot": " · ",
+    "result": "└ ",
+    "pipe": "│ ",
+    "bullet": "•",
+    "spin": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
+    "bar": "▰▱",
+    "arrow": "→",
+    "up": "↑",
+    "warn": "!",
+}
+# The Windows console without Windows Terminal draws with Consolas or Lucida Console and
+# no font fallback: only the WGL4 character set is safe there.
+_BASIC = {**_RICH, "ok": "√", "fail": "×", "spin": "·•●•", "bar": "█░"}
+_PLAIN = {
+    "tool": "*",
+    "ok": "ok",
+    "fail": "x",
+    "prompt": "> ",
+    "more": ". ",
+    "dot": " | ",
+    "result": "`-",
+    "pipe": "| ",
+    "bullet": "-",
+    "spin": "|/-\\",
+    "bar": "#-",
+    "arrow": "->",
+    "up": "^",
+    "warn": "!",
+}
+
+
+def legacy_console(env: dict[str, str] | None = None, platform: str | None = None) -> bool:
+    """A classic Windows console window (conhost), not Windows Terminal, VS Code, ConEmu
+    or a terminal emulator that sets TERM: its fonts lack most symbols."""
+    env = dict(os.environ) if env is None else env
+    if (platform or sys.platform) != "win32":
+        return False
+    hints = ("WT_SESSION", "TERM_PROGRAM", "TERM", "ConEmuANSI", "ALACRITTY_LOG", "WEZTERM_PANE")
+    return not any(env.get(name) for name in hints)
+
+
+def _glyphs(encoding: str | None, legacy: bool = False) -> dict[str, str]:
+    fancy = dict(_BASIC if legacy else _RICH)
     try:
         "".join(fancy.values()).encode(encoding or "ascii")
     except (LookupError, UnicodeEncodeError):
-        return {"tool": "*", "ok": "ok", "fail": "x", "prompt": "> ", "more": ". ", "dot": " | "}
+        return {**_PLAIN, "box": "ascii"}
     try:
         "".join(_BOX_FANCY).encode(encoding or "ascii")
         fancy["box"] = "fancy"
@@ -106,9 +165,11 @@ def narrow(text: str) -> bool:
         code = ord(ch)
         if code < 0x20 or 0x7F <= code < 0xA0:
             return False
-        if code < 0x300 or 0x370 <= code <= 0x52F or 0x2500 <= code <= 0x257F:
-            continue
-        if ch in "●✓✗›…—–":
+        if code < 0x300 or 0x370 <= code <= 0x52F or 0x2500 <= code <= 0x25FF:
+            continue  # Latin, Greek, Cyrillic; box drawing, blocks, geometric shapes
+        if 0x2190 <= code <= 0x21FF or 0x2800 <= code <= 0x28FF:
+            continue  # arrows; braille (the spinner)
+        if ch in "✓✗›…—–•√":
             continue
         return False
     return True
@@ -175,13 +236,22 @@ def _clip_painted(text: str, limit: int) -> tuple[str, int]:
     return cut + reset + ELLIPSIS, cell_width(_ANSI.sub("", cut)) + 1
 
 
-def _box(title: str, rows: list[tuple[str, str]], fancy: bool, max_width: int | None = None) -> str:
+def _box(
+    title: str,
+    rows: list[tuple[str, str]],
+    fancy: bool,
+    max_width: int | None = None,
+    paint: Palette | None = None,
+) -> str:
     """A framed panel: label column, then values (ANSI colors do not count as width).
     With ``max_width`` (terminal cells) longer rows are cut with an ellipsis, so the frame
-    never wraps on a narrow terminal."""
+    never wraps on a narrow terminal. ``paint`` colours the frame (role ``subtle``) and the
+    labels (``muted``)."""
     tl, tr, bl, br, h, v = _BOX_FANCY if fancy else _BOX_ASCII
+    frame = (lambda text: paint("subtle", text)) if paint is not None else (lambda text: text)
+    label = (lambda text: paint("muted", text)) if paint is not None else (lambda text: text)
     wide = max((len(k) for k, _ in rows), default=0)
-    lines = [(f"{k:<{wide}}  {val}" if wide else val) for k, val in rows]
+    lines = [(label(f"{k:<{wide}}") + f"  {val}" if wide else val) for k, val in rows]
     seen = [cell_width(_ANSI.sub("", ln)) for ln in lines]
     shown = cell_width(_ANSI.sub("", title))
     width = max([*seen, shown + 2]) + 2
@@ -192,10 +262,23 @@ def _box(title: str, rows: list[tuple[str, str]], fancy: bool, max_width: int | 
         seen = [cells for _, cells in clipped]
         if shown + 3 > width:
             title, shown = _clip_painted(title, width - 3)
-    out = [tl + h + f" {title} " + h * (width - shown - 3) + tr]
-    out += [f"{v} {ln}{' ' * (width - n - 1)}{v}" for ln, n in zip(lines, seen, strict=True)]
-    out.append(bl + h * width + br)
+    out = [frame(tl + h) + f" {title} " + frame(h * (width - shown - 3) + tr)]
+    out += [
+        f"{frame(v)} {ln}{' ' * (width - n - 1)}{frame(v)}"
+        for ln, n in zip(lines, seen, strict=True)
+    ]
+    out.append(frame(bl + h * width + br))
     return "\n".join(out)
+
+
+def short_path(path: str, home: str | None = None) -> str:
+    """``path`` with the user's home folder written as ``~``."""
+    home = home if home is not None else os.path.expanduser("~")
+    if home and len(path) > len(home) and path.lower().startswith(home.lower()):
+        rest = path[len(home) :]
+        if rest[:1] in ("/", "\\"):
+            return "~" + rest
+    return path
 
 
 def banner_text(
@@ -212,100 +295,140 @@ def banner_text(
 ) -> str:
     """The welcome card: what runs where, and the keys a new user needs first."""
     dot = glyph["dot"]
-    project = _plain_text(workspace)
+    project = short_path(_plain_text(workspace))
     if branch:
-        project += paint("dim", f"{dot}{_plain_text(branch)}")
+        project += paint("muted", f"{dot}{_plain_text(branch)}")
+
+    def keys(*pairs: tuple[str, str]) -> str:
+        return paint("muted", dot).join(
+            paint("accent", key) + paint("muted", f" {what}") for key, what in pairs
+        )
+
+    mode = paint({"allow": "warning", "deny": "error"}.get(approval_mode, ""), approval_mode)
     rows = [
-        ("model", _plain_text(model) + paint("dim", f"{dot}{provider}")),
+        ("model", paint("bold", _plain_text(model)) + paint("muted", f"{dot}{provider}")),
         ("project", project),
-        ("approvals", f"{approval_mode}" + paint("dim", "  (/approve to change)")),
+        ("approvals", mode + paint("muted", "  (/approve to change)")),
         ("", ""),
-        ("", paint("dim", f"/ commands{dot}@ attach a file{dot}Alt+Enter new line")),
-        ("", paint("dim", f"Esc stops the agent{dot}/help{dot}Ctrl+D quits")),
+        ("", keys(("/", "commands"), ("@", "attach a file"), ("Alt+Enter", "new line"))),
+        ("", keys(("Esc", "stops the agent"), ("Ctrl+O", "tool output"), ("Ctrl+D", "quits"))),
     ]
     fancy = glyph.get("box", "ascii") == "fancy"
-    card = _box(paint("bold", f"KaroX {version}"), rows, fancy, max_width)
-    return card + "\n" + paint("dim", "Type a task to start.") + "\n"
+    title = paint("brand", "KaroX") + " " + paint("muted", version)
+    card = _box(title, rows, fancy, max_width, paint if paint.enabled else None)
+    return card + "\n" + paint("muted", "Type a task to start.") + "\n"
 
 
-Fragments = list[tuple[str, str]]  # (style name, text); "" is the bar's own style
+Fragments = list[tuple[str, str]]  # (colour role(s), text); "" is the default colour
 
 
 def status_bar_fragments(
     snap: StatusSnapshot,
     glyph: dict[str, str],
     width: int,
-    *,
-    scrolled: int = 0,
-    queued: int = 0,
 ) -> Fragments:
-    """The status bar as (style, text) pieces that fill exactly ``width`` cells: model,
-    project and live activity on the left; tokens, context fill and the approval mode on
-    the right. On a narrow terminal the least telling parts go first (session tokens, the
-    branch, the project, the context fill), and the activity text is cut last: the model
-    and the approval mode always stay."""
+    """The status bar as (role, text) pieces that fill exactly ``width`` cells: model,
+    project (branch) and a newer version on the left; context fill, cost, the turn's time
+    and the approval mode on the right. On a narrow terminal the least telling parts go
+    first (cost, time, the branch, the project, the fill gauge, the context), then the
+    model name is cut: the model and the approval mode always stay."""
     dot = glyph["dot"]
     model = _plain_text(snap.model) or "setup"
     project = _plain_text(snap.workspace_name)
     branch = _plain_text(snap.branch)
-    note: tuple[str, str] | None = None
-    if snap.running and snap.activity:
-        note = ("activity", _plain_text(snap.activity))
-    elif scrolled > 0:
-        note = ("scroll", f"scrolled +{scrolled}L (End)")
-    waiting = f"{queued} queued (Esc clears)" if queued else ""
-    ctx = (
-        f"ctx {_k(snap.context_used)}/{_k(snap.context_window)} ({snap.context_pct}%)"
-        if snap.context_window
-        else ""
-    )
-    tokens = f"{_k(snap.total_tokens)} tok" if snap.total_tokens and ctx else ""
-    mode_style = {"allow": "allow", "deny": "deny"}.get(snap.approval_mode, "dim")
-    mode = f"approve:{snap.approval_mode}"
+    bar = glyph.get("bar", "") if len(glyph.get("bar", "")) == 2 else "#-"
+    full, empty = bar[0], bar[1]
+    pct = max(0, min(snap.context_pct, 100))
+    filled = round(pct / 20) if pct < 100 else 5
+    gauge_role = "success" if pct < 60 else "warning" if pct < 85 else "error"
+    mode_role = {"allow": "warning", "deny": "error"}.get(snap.approval_mode, "")
+    cost = f"${snap.cost_usd:.2f}" if snap.cost_usd is not None else ""
+    turn = f"{snap.turn_s:.1f}s" if snap.turn_s is not None else ""
 
-    def build(
-        *, with_tokens: bool, with_branch: bool, with_project: bool, with_ctx: bool, clip: int
-    ) -> tuple[Fragments, Fragments]:
-        left: Fragments = [("", " "), ("model", model)]
-        if with_project and project:
-            shown = f"{project} ({branch})" if with_branch and branch else project
-            left.append(("dim", f"{dot}{shown}"))
-        if note is not None:
-            text = clip_cells(note[1], clip) if clip else note[1]
-            left += [("dim", dot), (note[0], text)]
-        if waiting:
-            left += [("dim", dot), ("scroll", waiting)]
+    def build(level: int, clip: int = 0) -> tuple[Fragments, Fragments]:
+        left: Fragments = [("", " "), ("accent+bold", clip_cells(model, clip) if clip else model)]
+        if level < 4 and project:
+            shown = f"{project} ({branch})" if level < 3 and branch else project
+            left.append(("muted", f"{dot}{shown}"))
+        if snap.update and level < 5:
+            left += [("muted", dot), ("warning", f"{glyph.get('up', '^')} {snap.update} /update")]
         right: Fragments = []
-        parts = [p for p, keep in ((tokens, with_tokens), (ctx, with_ctx)) if p and keep]
-        if parts:
-            right.append(("dim", dot.join(parts) + dot))
-        right += [(mode_style, mode), ("", " ")]
+        if snap.context_window and level < 6:
+            right.append(("muted", "ctx "))
+            if level < 5:
+                right += [(gauge_role, full * filled), ("subtle", empty * (5 - filled)), ("", " ")]
+            right += [("", f"{pct}%"), ("muted", dot)]
+        if cost and level < 1:
+            right += [("", cost), ("muted", dot)]
+        if turn and level < 2:
+            right += [("muted", turn), ("muted", dot)]
+        if level < 3:
+            right.append(("muted", "approvals "))
+        right += [(mode_role, snap.approval_mode), ("", " ")]
         return left, right
 
     def cells(fragments: Fragments) -> int:
         return sum(cell_width(text) for _, text in fragments)
 
-    variants = (
-        {"with_tokens": True, "with_branch": True, "with_project": True, "with_ctx": True},
-        {"with_tokens": False, "with_branch": True, "with_project": True, "with_ctx": True},
-        {"with_tokens": False, "with_branch": False, "with_project": True, "with_ctx": True},
-        {"with_tokens": False, "with_branch": False, "with_project": False, "with_ctx": True},
-        {"with_tokens": False, "with_branch": False, "with_project": False, "with_ctx": False},
-    )
     left: Fragments = []
     right: Fragments = []
-    for options in variants:
-        left, right = build(clip=0, **options)
+    for level in range(7):
+        left, right = build(level)
         if cells(left) + cells(right) + 1 <= width:
             break
     else:
-        # Still too wide: cut the activity text, then the model name, to what is left.
-        fixed = cells(build(clip=1, **variants[-1])[0]) + cells(right) + 1
-        spare = max(width - fixed + 1, 1)
-        left, right = build(clip=spare, **variants[-1])
-        over = cells(left) + cells(right) + 1 - width
-        if over > 0:
-            short = clip_cells(model, max(cell_width(model) - over, 1))
-            left = [(style, short if text == model else text) for style, text in left]
+        spare = width - cells(right) - 2
+        left, right = build(6, clip=max(spare, 1))
     gap = max(width - cells(left) - cells(right), 1)
     return [*left, ("", " " * gap), *right]
+
+
+def key_hints(mode: str) -> list[tuple[str, str]]:
+    """The keys worth knowing right now, for the frame of the input box."""
+    if mode == "running":
+        return [("esc", "stop"), ("enter", "queue a message"), ("ctrl+o", "tool output")]
+    if mode == "question":
+        return [("enter", "answer"), ("esc", "cancel")]
+    if mode == "secret":
+        return [("enter", "submit"), ("esc", "cancel")]
+    return [
+        ("enter", "send"),
+        ("alt+enter", "new line"),
+        ("/", "commands"),
+        ("@", "files"),
+        ("ctrl+o", "tool output"),
+    ]
+
+
+def box_top(width: int, glyph: dict[str, str]) -> Fragments:
+    tl, tr, _bl, _br, h, _v = _BOX_FANCY if glyph.get("box") == "fancy" else _BOX_ASCII
+    return [("subtle", tl + h * max(width - 2, 0) + tr)]
+
+
+def box_bottom(width: int, glyph: dict[str, str], hints: list[tuple[str, str]]) -> Fragments:
+    """The lower edge of the input box with ``hints`` (key, what) set into it on the
+    right; hints that do not fit are left out from the end."""
+    _tl, _tr, bl, br, h, _v = _BOX_FANCY if glyph.get("box") == "fancy" else _BOX_ASCII
+    dot = glyph["dot"]
+    shown = list(hints)
+    while shown:
+        text = dot.join(f"{k} {w}" for k, w in shown)
+        if cell_width(text) + 6 <= width:
+            break
+        shown.pop()
+    if not shown:
+        return [("subtle", bl + h * max(width - 2, 0) + br)]
+    middle: Fragments = [("", " ")]
+    for i, (key, what) in enumerate(shown):
+        if i:
+            middle.append(("subtle", dot))
+        middle += [("muted+bold", key), ("muted", f" {what}")]
+    middle.append(("", " "))
+    used = sum(cell_width(t) for _, t in middle)
+    fill = max(width - used - 3, 0)
+    return [("subtle", bl + h * fill), *middle, ("subtle", h + br)]
+
+
+def box_sides(glyph: dict[str, str]) -> tuple[str, str]:
+    v = (_BOX_FANCY if glyph.get("box") == "fancy" else _BOX_ASCII)[5]
+    return v + " ", " " + v

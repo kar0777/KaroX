@@ -16,6 +16,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -33,7 +34,7 @@ LINE_MODE = {"echo": True, "line": True, "cr_as_lf": True}  # a POSIX terminal a
 # What an interrupt left on the user's screen when Python's own handler raised it somewhere
 # in the start-up imports.
 NOISE = ("Traceback", "Exception ignored", "KeyboardInterrupt", "never awaited")
-_ACTIVITY = re.compile(r"\d+\.\ds  \S")
+_ACTIVITY = re.compile(r"\d+\.\ds · esc stop")
 
 
 @dataclass
@@ -48,8 +49,8 @@ class Chat:
         return self.term.wait(expect, timeout)
 
     def idle(self) -> bool:
-        """No turn is running: the status bar shows no "12.3s  <phase>" activity."""
-        return not any(_ACTIVITY.search(line) for line in self.term.lines()[-3:])
+        """No turn is running: the activity line shows no "12.3s · esc stop"."""
+        return not any(_ACTIVITY.search(line) for line in self.term.lines()[-6:])
 
     def turn(self, text: str, timeout: float = 30.0) -> str:
         """Send a message and wait until its turn has ended (the model was asked and the
@@ -61,6 +62,23 @@ class Chat:
 
     def last_user_message(self) -> object:
         return self.model.requests[-1]["messages"][-1]["content"]
+
+
+def typed(term: Terminal) -> list[str]:
+    """The lines inside the input box (between its top edge and its lower edge), without
+    the frame: what the user has typed, after the prompt."""
+    lines = term.lines()
+    top = max(i for i, line in enumerate(lines) if line.startswith("╭"))
+    bottom = max(i for i, line in enumerate(lines) if line.startswith("╰"))
+    return [line[2:].rstrip().removesuffix("│").rstrip() for line in lines[top + 1 : bottom]]
+
+
+def status(term: Terminal) -> str:
+    return term.lines()[-1]
+
+
+def activity(term: Terminal) -> str:
+    return term.lines()[-5]
 
 
 class Launcher:
@@ -152,17 +170,21 @@ def launch(tmp_path: Path) -> Iterator[Launcher]:
 
 def test_first_frame_alternate_screen_and_clean_exit(launch: Launcher) -> None:
     launch.git_init()
-    chat = launch.start([], watch=("Type a task to start.", "approve:ask"))
+    chat = launch.start([], watch=("Type a task to start.", "approvals ask"))
     t = chat.term
-    first = max(t.seen_at("Type a task to start."), t.seen_at("approve:ask"))
+    first = max(t.seen_at("Type a task to start."), t.seen_at("approvals ask"))
     assert first < 5.0  # the real figure is in docs/perf.md; this only guards a hang
     assert t.screen.alternate
     screen = t.lines()
     assert screen[0].startswith("╭─ KaroX ")
     assert "fake · openai-chat" in screen[1]
-    assert screen[-2].strip().startswith("fake · ws (main)")
-    assert screen[-2].rstrip().endswith("ctx 0/400.0k (0%) · approve:ask")
-    assert screen[-1].strip() == "›"
+    assert screen[-1].strip().startswith("fake · ws (main)")
+    assert screen[-1].rstrip().endswith("ctx ▱▱▱▱▱ 0% · approvals ask")
+    assert typed(t) == ["›"]
+    assert screen[-4].startswith("╭─")
+    assert screen[-2].startswith("╰─")
+    assert "enter send · alt+enter new line · / commands · @ files" in screen[-2]
+    assert not screen[-5].strip()  # the activity line, blank between turns
     # The frame painted at start and the app's own first frame are the same picture.
     time.sleep(1.0)
     assert t.lines() == screen
@@ -283,12 +305,12 @@ def test_inline_mode_stays_in_the_scrollback(launch: Launcher) -> None:
     )
     t = chat.term
     chat.say("hello", "inline answer")
-    t.wait("[completed]")
+    t.wait("✓ completed")
     t.line("push")
     t.wait("Run it? [y/N/a = always]")
     t.line("n")
     t.wait("not run (rule git.push-force)")
-    t.wait(lambda s: s.count("[completed]") == 2)
+    t.wait(lambda s: s.count("✓ completed") == 2)
     t.key("ctrl-d")
     assert t.wait_exit() == 0
     assert t.screen.alt_entered == 0  # never left the normal screen
@@ -331,9 +353,9 @@ def test_every_command_answers(launch: Launcher) -> None:
     chat.say("/new", "new session ")
     chat.say("/resume", "resumed ")
     chat.say("/model other-model", "model: other-model")
-    t.wait(lambda _s: t.lines()[-2].strip().startswith("other-model"))
+    t.wait(lambda _s: status(t).strip().startswith("other-model"))
     chat.say("/approve allow", "dangerous commands: allow")
-    t.wait(lambda _s: t.lines()[-2].rstrip().endswith("approve:allow"))
+    t.wait(lambda _s: status(t).rstrip().endswith("approvals allow"))
     chat.turn("again")
     assert chat.model.requests[-1]["model"] == "other-model"
     t.line("/quit")
@@ -400,13 +422,13 @@ def test_edit_shows_its_change_and_undo_takes_it_back(launch: Launcher) -> None:
     assert "      1 - print('hi')" in screen  # the change itself, numbered, under the call
     assert "      1 + print('hello')" in screen
     assert "      2 + print('bye')" in screen
-    assert "1 files changed (/diff)" in screen
+    assert "1 file changed (/diff)" in screen
     chat.say("/diff", "+print('bye')")
     assert "1 file changed  +2 -1" in t.text()
     chat.say("/undo", "undid: change the greeting")
     t.wait("restored 1 file: hello.py")
     assert (chat.ws / "hello.py").read_text(encoding="utf-8") == "print('hi')\n"
-    t.wait(lambda _s: t.lines()[-1] == "› change the greeting")  # back in the input line
+    t.wait(lambda _s: typed(t)[-1:] == ["› change the greeting"])  # back in the input line
     t.key("ctrl-c")  # clear it
     chat.say("/redo", "re-applied 1 file: hello.py")
     assert (chat.ws / "hello.py").read_text(encoding="utf-8") == "print('hello')\nprint('bye')\n"
@@ -432,7 +454,7 @@ def test_approvals_yes_no_always_and_escape(launch: Launcher) -> None:
     t = chat.term
     t.line("push it")
     t.wait("Run it? [y/N/a = always]")
-    assert "Approval required — y: run · n: deny · a: always · Esc: stop turn" in t.text()
+    assert "! Approval required: y run · n deny · a always · esc stop turn" in t.text()
     assert "rule: git.push-force" in t.text()
     t.line("y")
     t.wait("tried")
@@ -445,14 +467,14 @@ def test_approvals_yes_no_always_and_escape(launch: Launcher) -> None:
     t.line("push third")
     t.wait("Approval required")
     t.key("esc")
-    t.wait("[stopped]")
+    t.wait("! stopped")
     t.wait_gone("Approval required")
     t.line("push fourth")
     t.wait("Approval required")
     t.line("a")
     t.wait("done with always")  # the second push of that turn asked nothing
     assert "Approval required" not in t.text()
-    assert t.lines()[-2].rstrip().endswith("approve:allow")
+    assert status(t).rstrip().endswith("approvals allow")
 
 
 def test_escape_and_ctrl_c_stop_only_the_turn(launch: Launcher) -> None:
@@ -467,7 +489,7 @@ def test_escape_and_ctrl_c_stop_only_the_turn(launch: Launcher) -> None:
         t.line("go slowly")
         t.wait(f"{word} {word} {word}")  # the reply is streaming
         t.key(key)
-        t.wait(lambda s, n=stops: s.count("[stopped]") == n, 15)
+        t.wait(lambda s, n=stops: s.count("! stopped") == n, 15)
         assert t.alive()
     chat.turn("are you there?")
     assert "still here" in t.text()
@@ -486,12 +508,12 @@ def test_a_message_typed_while_the_agent_works_waits_its_turn(launch: Launcher) 
     t.line("first")
     t.wait("slow slow")
     t.send("queued while running")
-    t.wait(lambda _s: t.lines()[-1] == "› queued while running")  # typing is not blocked
+    t.wait(lambda _s: typed(t)[-1:] == ["› queued while running"])  # typing is not blocked
     t.key("enter")
-    t.wait("1 queued (Esc clears)")  # and the message is not silently swallowed
+    t.wait("1 queued (esc clears)")  # and the message is not silently swallowed
     t.wait("answer to the queued one", 40)
     assert chat.last_user_message() == "queued while running"
-    assert "queued (Esc" not in t.lines()[-2]
+    assert "queued" not in activity(t)
 
 
 # -- input ----------------------------------------------------------------------------
@@ -504,7 +526,7 @@ def test_completion_multiline_history_and_search(launch: Launcher) -> None:
     t.send("look at @he")
     t.wait(f"@hello.py  {size} B")
     t.key("tab")
-    t.wait(lambda _s: t.lines()[-1] == "› look at @hello.py")
+    t.wait(lambda _s: typed(t)[-1:] == ["› look at @hello.py"])
     t.key("enter")  # takes the completion, does not send
     assert len(chat.model.requests) == 0
     t.key("enter")
@@ -521,7 +543,7 @@ def test_completion_multiline_history_and_search(launch: Launcher) -> None:
     t.send("un")
     t.wait("take back the last turn")
     t.key("esc", "backspace", "backspace", "backspace")
-    t.wait(lambda _s: t.lines()[-1] == "›")
+    t.wait(lambda _s: typed(t)[-1:] == ["›"])
     # three ways to break a line, one message
     t.send("line one")
     t.key("alt-enter")
@@ -530,18 +552,18 @@ def test_completion_multiline_history_and_search(launch: Launcher) -> None:
     t.send("line three\\")
     t.key("enter")
     t.send("line four")
-    t.wait(lambda _s: t.lines()[-4:] == ["› line one", "… line two", "… line three", "… line four"])
+    t.wait(lambda _s: typed(t) == ["› line one", "… line two", "… line three", "… line four"])
     t.key("enter")
     t.wait("answer 3")
     assert chat.last_user_message() == "line one\nline two\nline three\nline four"
     t.key("up")
-    t.wait(lambda _s: t.lines()[-1] == "… line four")  # history brings the whole message back
+    t.wait(lambda _s: typed(t)[-1:] == ["… line four"])  # history brings the whole message back
     t.key("ctrl-c")
     t.key("ctrl-r")
     t.send("look")
     t.wait("I-search backward: look")
     t.key("enter")
-    t.wait(lambda _s: t.lines()[-1] == "› look at @hello.py")
+    t.wait(lambda _s: typed(t)[-1:] == ["› look at @hello.py"])
     t.key("ctrl-c")
 
 
@@ -549,14 +571,14 @@ def test_pasted_lines_are_one_message(launch: Launcher) -> None:
     chat = launch.start([Reply(text="got the paste"), Reply(text="got the second")])
     t = chat.term
     t.paste("bracketed one\nbracketed two\nbracketed three")
-    t.wait(lambda _s: t.lines()[-1] == "… bracketed three")
+    t.wait(lambda _s: typed(t)[-1:] == ["… bracketed three"])
     assert len(chat.model.requests) == 0  # a paste never sends by itself
     t.key("enter")
     t.wait("got the paste")
     assert chat.last_user_message() == "bracketed one\nbracketed two\nbracketed three"
     # A terminal without bracketed paste sends the same text as plain keys.
     t.send("plain one\rplain two\rplain three")
-    t.wait(lambda _s: t.lines()[-1] == "… plain three")
+    t.wait(lambda _s: typed(t)[-1:] == ["… plain three"])
     assert len(chat.model.requests) == 1  # was: every line sent as a message of its own
     t.key("enter")
     t.wait("got the second")
@@ -586,32 +608,28 @@ def test_long_output_scrolls_and_survives_resizing(launch: Launcher) -> None:
     chat = launch.start([Reply(text=text, chunk_size=200), Reply(text=wide)], rows=24, cols=80)
     t = chat.term
     chat.turn("long output please")
-    assert t.lines()[-4].startswith("строка 120: слово")
+    assert t.lines()[-7].startswith("строка 120: слово")
     t.key("pageup")
-    t.wait("scrolled +20L (End)")
+    t.wait("↑ 17 lines below (end)")  # a page: 19 rows less 2
     assert "строка 100:" in t.text()
     t.key("ctrl-home")
     t.wait("╭─ KaroX")
     assert t.lines()[0].startswith("╭─ KaroX")
     assert "› long output please" in t.text()
     t.key("end")
-    t.wait_gone("scrolled +")
-    assert t.lines()[-4].startswith("строка 120: слово")
+    t.wait_gone("lines below")
+    assert t.lines()[-7].startswith("строка 120: слово")
     for _ in range(5):  # the mouse wheel, as terminals report it
         t.send("\x1b[<64;10;10M")
-    t.wait("scrolled +15L (End)")
+    t.wait("↑ 15 lines below (end)")
     t.key("ctrl-end")
-    t.wait_gone("scrolled +")
+    t.wait_gone("lines below")
     for rows, cols in ((30, 120), (14, 46), (24, 80)):
         t.resize(rows, cols)
-        t.wait(
-            lambda _s, c=cols: (
-                t.lines()[-2].rstrip().endswith("approve:ask") and len(t.lines()[-2]) <= c
-            )
-        )
-        assert t.lines()[-1].strip() == "›"
+        t.wait(lambda _s, c=cols: status(t).rstrip().endswith("ask") and len(status(t)) <= c)
+        assert typed(t) == ["›"]
         assert any(line.startswith("строка 120:") for line in t.lines())
-        assert t.lines()[-2].strip().startswith("fake")  # narrow: model and approvals stay
+        assert status(t).strip().startswith("fake")  # narrow: model and approvals stay
     chat.turn("wide characters")
     screen = t.text()
     # 45 cells before the tab (wide characters count twice): the next stop is cell 48
@@ -637,7 +655,7 @@ def test_provider_errors_are_sentences_with_a_next_step(launch: Launcher) -> Non
     t.line("bad key")
     t.wait("✗ error: the API key was refused (HTTP 401): Incorrect API key provided: sk-***")
     t.wait("/key sets a new key; /setup changes the provider")
-    t.wait("[error]")
+    t.wait("! error")
     assert '{"error"' not in t.text()  # no raw JSON
     assert t.text().count("Incorrect API key") == 1  # and not printed twice
     t.line("too fast")
@@ -651,3 +669,137 @@ def test_provider_errors_are_sentences_with_a_next_step(launch: Launcher) -> Non
     t.wait("the model name was not accepted (HTTP 404)")
     t.wait("/model NAME sets another model")
     assert t.alive()
+
+
+# -- the look: input box, activity line, markdown, folded tool output, colours ---------
+
+
+def _cell(term: Terminal, text: str) -> Any:
+    """The screen cell where ``text`` first starts (pyte's character with its colours)."""
+    for y, line in enumerate(term.lines()):
+        x = line.find(text)
+        if x >= 0:
+            return term.screen.buffer[y][x]
+    raise AssertionError(f"{text!r} is not on the screen\n{term.dump()}")
+
+
+def test_activity_line_and_keys_follow_the_turn(launch: Launcher) -> None:
+    replies = [Reply(text="slow " * 80, chunk_size=8, chunk_delay=0.05), Reply(text="done")]
+    chat = launch.start(replies, env=launch.env(COLORTERM="truecolor"))
+    t = chat.term
+    t.line("work")
+    t.wait(lambda _s: "esc stop" in activity(t))
+    line = activity(t)
+    assert re.search(r"^ \S \S.* +\d+\.\ds · esc stop$", line.rstrip())  # spinner, phase
+    assert (
+        t.lines()[-2].rstrip().endswith("esc stop · enter queue a message · ctrl+o tool output ─╯")
+    )
+    t.wait(lambda _s: chat.idle(), 40)
+    assert not activity(t).strip()
+    assert "enter send" in t.lines()[-2]
+    assert re.search(r" \d+\.\ds · approvals ask$", status(t).rstrip())  # the turn's time
+
+
+def test_markdown_answers_are_formatted_on_screen(launch: Launcher) -> None:
+    answer = (
+        "## Result\n\nThe fix is **small**:\n\n- one `call`\n- two\n\n"
+        "```python\ndef f():\n    return 1\n```\n\n| a | b |\n|---|---|\n| x | yy |\n"
+    )
+    chat = launch.start([Reply(text=answer, chunk_size=5)], env=launch.env(COLORTERM="truecolor"))
+    t = chat.term
+    screen = chat.turn("explain")
+    for line in ("## Result", "The fix is small:", "• one call", "• two", "```python"):
+        assert line in screen
+    assert "a │ b" in screen
+    assert "──┼───" in screen
+    assert "x │ yy" in screen
+    assert _cell(t, "Result").bold
+    assert _cell(t, "small").bold
+    assert _cell(t, "call").fg not in ("default", _cell(t, "one").fg)  # inline code colour
+    assert _cell(t, "def").fg != "default"  # code is coloured
+
+
+def test_tool_output_is_folded_and_ctrl_o_unfolds_it(launch: Launcher) -> None:
+    python = sys.executable.replace("\\", "/")  # the same in bash and PowerShell
+    command = f"{python} -c \"for i in range(6): print('row %d' % i)\""
+    replies = [Reply(calls=[("bash", {"command": command})]), Reply(text="ran it")]
+    chat = launch.start(replies)
+    t = chat.term
+    chat.turn("run")
+    t.wait("… 6 lines (ctrl+o to expand)")
+    assert "row 2" not in t.text()
+    joined = "".join(t.lines())  # the long command wraps
+    assert re.search(r"● bash .*python.*  ✓ exit 0 · row 5 · [0-9.]+s", joined)
+    t.send("\x0f")  # Ctrl+O
+    t.wait("└ row 0")
+    assert all(f"    row {i}" in t.text() for i in range(1, 6))
+    assert "ctrl+o to expand" not in t.text()
+    t.send("\x0f")
+    t.wait("… 6 lines (ctrl+o to expand)")
+    assert "row 2" not in t.text()
+
+
+def test_update_notice_in_the_conversation_and_the_status_bar(launch: Launcher) -> None:
+    import json
+
+    launch.home.mkdir(exist_ok=True)
+    state = {
+        "repo": "https://github.com/kar0777/KaroX.git",
+        "branch": "karox6/main",
+        "checked": time.time(),  # checked a moment ago: no network now
+        "version": "99.0",
+        "commit": "f" * 40,
+    }
+    (launch.home / "update-check.json").write_text(json.dumps(state), encoding="utf-8")
+    chat = launch.start([], env=launch.env(KAROX_UPDATE_CHECK="1"))
+    t = chat.term
+    t.wait("version 99.0 is available: /update")
+    t.wait(lambda _s: "↑ 99.0 /update" in status(t))
+
+
+def test_without_the_check_nothing_is_said(launch: Launcher) -> None:
+    import json
+
+    launch.home.mkdir(exist_ok=True)
+    state = {"repo": "https://github.com/kar0777/KaroX.git", "branch": "karox6/main"}
+    state |= {"checked": time.time(), "version": "99.0", "commit": "f" * 40}
+    (launch.home / "update-check.json").write_text(json.dumps(state), encoding="utf-8")
+    chat = launch.start([])  # a source tree: the check stays off
+    time.sleep(1.0)
+    assert "99.0" not in chat.term.text()
+
+
+@pytest.mark.parametrize(
+    ("extra", "wanted", "unwanted"),
+    [
+        ({"COLORTERM": "truecolor"}, "\x1b[38;2;", ""),
+        ({"KAROX_COLOR_DEPTH": "8"}, "38;5;", "38;2;"),
+        ({"KAROX_COLOR_DEPTH": "4"}, "\x1b[", "38;[25];"),
+        ({"NO_COLOR": "1"}, "╭─ KaroX", r"\x1b\[(?:[0-9;]*;)?(?:3[0-7]|38;[25])[;m]"),
+        ({"COLORTERM": "truecolor", "KAROX_THEME": "light"}, "38;2;37;99;201", ""),
+    ],
+    ids=["truecolor", "256", "16", "no-color", "light"],
+)
+def test_colour_depths_and_themes(
+    launch: Launcher, extra: dict[str, str], wanted: str, unwanted: str
+) -> None:
+    chat = launch.start([Reply(text="**bold** and `code`")], env=launch.env(**extra))
+    t = chat.term
+    chat.turn("hi")
+    assert wanted in t.raw
+    if unwanted:
+        assert re.search(unwanted, t.raw) is None
+    # without colours the answer's markdown stays as the model wrote it
+    shown = "**bold** and `code`" if "NO_COLOR" in extra else "bold and code"
+    assert shown in t.text()
+    assert typed(t) == ["›"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the classic Windows console")
+def test_classic_console_gets_symbols_its_fonts_have(launch: Launcher) -> None:
+    env = {k: v for k, v in launch.env().items() if k not in ("TERM", "WT_SESSION")}
+    replies = [Reply(calls=[("read", {"file_path": "hello.py"})]), Reply(text="read")]
+    chat = launch.start(replies, env=env)
+    screen = chat.turn("read it")
+    assert "● read hello.py  √ 1 lines" in screen
+    assert "✓" not in screen

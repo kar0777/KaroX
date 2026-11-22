@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="856" height="592" font-family="Cascadia Mono, Consolas, monospace" font-size="14"><rect width="100%" height="100%" fill="#0c0c0c"/>
+<text x="8.0" y="22" fill="#6c6c6c" xml:space="preserve">╭─</text>
+<text x="33.2" y="22" fill="#af87ff" font-weight="bold" xml:space="preserve">KaroX</text>
+<text x="83.6" y="22" fill="#8a8a8a" xml:space="preserve">6.0.0.dev40</text>
+<text x="184.4" y="22" fill="#6c6c6c" xml:space="preserve">────────────────────────────────────────────────╮</text>
+<text x="8.0" y="40" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="24.8" y="40" fill="#8a8a8a" xml:space="preserve">model    </text>
+<text x="117.2" y="40" fill="#cccccc" font-weight="bold" xml:space="preserve">demo-model</text>
+<text x="201.2" y="40" fill="#8a8a8a" xml:space="preserve"> · openai-chat</text>
+<text x="587.6" y="40" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="58" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="24.8" y="58" fill="#8a8a8a" xml:space="preserve">project  </text>
+<text x="100.4" y="58" fill="#cccccc" xml:space="preserve">  ~\AppData\Local\Temp\tmpr91w47xw\ws</text>
+<text x="411.2" y="58" fill="#8a8a8a" xml:space="preserve"> · main</text>
+<text x="587.6" y="58" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="76" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="24.8" y="76" fill="#8a8a8a" xml:space="preserve">approvals</text>
+<text x="100.4" y="76" fill="#cccccc" xml:space="preserve">  ask</text>
+<text x="142.4" y="76" fill="#8a8a8a" xml:space="preserve">  (/approve to change)</text>
+<text x="587.6" y="76" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="94" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="587.6" y="94" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="112" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="117.2" y="112" fill="#5fafd7" xml:space="preserve">/</text>
+<text x="125.6" y="112" fill="#8a8a8a" xml:space="preserve"> commands · </text>
+<text x="226.4" y="112" fill="#5fafd7" xml:space="preserve">@</text>
+<text x="234.8" y="112" fill="#8a8a8a" xml:space="preserve"> attach a file · </text>
+<text x="377.6" y="112" fill="#5fafd7" xml:space="preserve">Alt+Enter</text>
+<text x="453.2" y="112" fill="#8a8a8a" xml:space="preserve"> new line</text>
+<text x="587.6" y="112" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="130" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="117.2" y="130" fill="#5fafd7" xml:space="preserve">Esc</text>
+<text x="142.4" y="130" fill="#8a8a8a" xml:space="preserve"> stops the agent · </text>
+<text x="302.0" y="130" fill="#5fafd7" xml:space="preserve">Ctrl+O</text>
+<text x="352.4" y="130" fill="#8a8a8a" xml:space="preserve"> tool output · </text>
+<text x="478.4" y="130" fill="#5fafd7" xml:space="preserve">Ctrl+D</text>
+<text x="528.8" y="130" fill="#8a8a8a" xml:space="preserve"> quits</text>
+<text x="587.6" y="130" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="148" fill="#6c6c6c" xml:space="preserve">╰────────────────────────────────────────────────────────────────────╯</text>
+<text x="8.0" y="166" fill="#8a8a8a" xml:space="preserve">Type a task to start.</text>
+<rect x="24.8" y="386" width="252.0" height="18" fill="#303030"/>
+<text x="24.8" y="400" fill="#d0d0d0" xml:space="preserve"> /new                         </text>
+<rect x="276.8" y="386" width="554.4" height="18" fill="#303030"/>
+<text x="276.8" y="400" fill="#949494" xml:space="preserve"> start a fresh session                                            </text>
+<text x="831.2" y="400" fill="#cccccc" font-weight="bold" xml:space="preserve">^</text>
+<rect x="24.8" y="404" width="252.0" height="18" fill="#303030"/>
+<text x="24.8" y="418" fill="#d0d0d0" xml:space="preserve"> /clear                       </text>
+<rect x="276.8" y="404" width="554.4" height="18" fill="#303030"/>
+<text x="276.8" y="418" fill="#949494" xml:space="preserve"> clear the screen (keeps current session)                         </text>
+<rect x="831.2" y="404" width="8.4" height="18" fill="#6c6c6c"/>
+<rect x="24.8" y="422" width="252.0" height="18" fill="#303030"/>
+<text x="24.8" y="436" fill="#d0d0d0" xml:space="preserve"> /sessions                    </text>
+<rect x="276.8" y="422" width="554.4" height="18" fill="#303030"/>
+<text x="276.8" y="436" fill="#949494" xml:space="preserve"> list recent sessions for this workspace                          </text>
+<rect x="831.2" y="422" width="8.4" height="18" fill="#6c6c6c"/>
+<rect x="24.8" y="440" width="252.0" height="18" fill="#303030"/>
+<text x="24.8" y="454" fill="#d0d0d0" xml:space="preserve"> /resume [ID|last]            </text>
+<rect x="276.8" y="440" width="554.4" height="18" fill="#303030"/>
+<text x="276.8" y="454" fill="#949494" xml:space="preserve"> continue a saved session                                         </text>
+<rect x="831.2" y="440" width="8.4" height="18" fill="#6c6c6c"/>
+<rect x="24.8" y="458" width="252.0" height="18" fill="#303030"/>
+<text x="24.8" y="472" fill="#d0d0d0" xml:space="preserve"> /fork                        </text>
+<rect x="276.8" y="458" width="554.4" height="18" fill="#303030"/>
+<text x="276.8" y="472" fill="#949494" xml:space="preserve"> branch off: a copy of this conversation to try another way       </text>
+<rect x="831.2" y="458" width="8.4" height="18" fill="#aaaaaa"/>
+<rect x="24.8" y="476" width="252.0" height="18" fill="#303030"/>
+<text x="24.8" y="490" fill="#d0d0d0" xml:space="preserve"> /undo                        </text>
+<rect x="276.8" y="476" width="554.4" height="18" fill="#303030"/>
+<text x="276.8" y="490" fill="#949494" xml:space="preserve"> take back the last turn: its file changes and messages           </text>
+<rect x="831.2" y="476" width="8.4" height="18" fill="#aaaaaa"/>
+<rect x="24.8" y="494" width="252.0" height="18" fill="#303030"/>
+<text x="24.8" y="508" fill="#d0d0d0" xml:space="preserve"> /redo                        </text>
+<rect x="276.8" y="494" width="554.4" height="18" fill="#303030"/>
+<text x="276.8" y="508" fill="#949494" xml:space="preserve"> put back the turn that /undo took away                           </text>
+<rect x="831.2" y="494" width="8.4" height="18" fill="#aaaaaa"/>
+<text x="8.0" y="526" fill="#6c6c6c" xml:space="preserve">╭─</text>
+<rect x="24.8" y="512" width="252.0" height="18" fill="#303030"/>
+<text x="24.8" y="526" fill="#d0d0d0" xml:space="preserve"> /quit                        </text>
+<rect x="276.8" y="512" width="554.4" height="18" fill="#303030"/>
+<text x="276.8" y="526" fill="#949494" xml:space="preserve"> leave the chat (/exit, /q, Ctrl+D)                               </text>
+<text x="831.2" y="526" fill="#cccccc" font-weight="bold" xml:space="preserve">v</text>
+<text x="8.0" y="544" fill="#6c6c6c" xml:space="preserve">│ </text>
+<text x="24.8" y="544" fill="#5fafd7" font-weight="bold" xml:space="preserve">› </text>
+<text x="41.6" y="544" fill="#cccccc" xml:space="preserve">/                                                                                            </text>
+<text x="822.8" y="544" fill="#6c6c6c" xml:space="preserve"> │</text>
+<text x="8.0" y="562" fill="#6c6c6c" xml:space="preserve">╰───────────────────</text>
+<text x="184.4" y="562" fill="#8a8a8a" font-weight="bold" xml:space="preserve">enter</text>
+<text x="226.4" y="562" fill="#8a8a8a" xml:space="preserve"> send</text>
+<text x="268.4" y="562" fill="#6c6c6c" xml:space="preserve"> · </text>
+<text x="293.6" y="562" fill="#8a8a8a" font-weight="bold" xml:space="preserve">alt+enter</text>
+<text x="369.2" y="562" fill="#8a8a8a" xml:space="preserve"> new line</text>
+<text x="444.8" y="562" fill="#6c6c6c" xml:space="preserve"> · </text>
+<text x="470.0" y="562" fill="#8a8a8a" font-weight="bold" xml:space="preserve">/</text>
+<text x="478.4" y="562" fill="#8a8a8a" xml:space="preserve"> commands</text>
+<text x="554.0" y="562" fill="#6c6c6c" xml:space="preserve"> · </text>
+<text x="579.2" y="562" fill="#8a8a8a" font-weight="bold" xml:space="preserve">@</text>
+<text x="587.6" y="562" fill="#8a8a8a" xml:space="preserve"> files</text>
+<text x="638.0" y="562" fill="#6c6c6c" xml:space="preserve"> · </text>
+<text x="663.2" y="562" fill="#8a8a8a" font-weight="bold" xml:space="preserve">ctrl+o</text>
+<text x="713.6" y="562" fill="#8a8a8a" xml:space="preserve"> tool output</text>
+<text x="822.8" y="562" fill="#6c6c6c" xml:space="preserve">─╯</text>
+<text x="16.4" y="580" fill="#5fafd7" font-weight="bold" xml:space="preserve">demo-model</text>
+<text x="100.4" y="580" fill="#8a8a8a" xml:space="preserve"> · ws (main)</text>
+<text x="596.0" y="580" fill="#8a8a8a" xml:space="preserve">ctx </text>
+<text x="629.6" y="580" fill="#6c6c6c" xml:space="preserve">▱▱▱▱▱</text>
+<text x="671.6" y="580" fill="#cccccc" xml:space="preserve"> 0%</text>
+<text x="696.8" y="580" fill="#8a8a8a" xml:space="preserve"> · approvals </text>
+<text x="806.0" y="580" fill="#cccccc" xml:space="preserve">ask  </text>
+</svg>

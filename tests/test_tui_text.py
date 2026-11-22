@@ -47,58 +47,71 @@ def snapshot(**changes):
 
 
 def bar(width, **changes):
-    extra = {k: changes.pop(k) for k in ("scrolled", "queued") if k in changes}
-    return "".join(t for _, t in status_bar_fragments(snapshot(**changes), GLYPH, width, **extra))
+    return "".join(t for _, t in status_bar_fragments(snapshot(**changes), GLYPH, width))
 
 
 def test_status_bar_fills_the_width_exactly():
     for width in (200, 120, 80, 60, 45, 30, 22):
         for changes in (
             {},
-            {"running": True, "activity": "| 12.3s  Running bash, read"},
+            {"running": True, "turn_s": 12.3, "cost_usd": 0.0412},
             {"approval_mode": "allow", "branch": ""},
-            {"scrolled": 40},
+            {"update": "6.0.0.dev41"},
             {"model": "anthropic/claude-something-very-long-name-preview-2026"},
             {"workspace_name": "проект", "branch": "ветка/фича"},
+            {"context_pct": 100},
         ):
             assert cell_width(bar(width, **changes)) == width, (width, changes)
 
 
 def test_narrow_status_bar_keeps_the_model_and_the_approval_mode():
-    wide = bar(120)
-    assert "12.3k tok" in wide
+    full = {"cost_usd": 0.0412, "turn_s": 12.3}
+    wide = bar(120, **full)
     assert "project (main)" in wide
-    assert "ctx 4.2k/400.0k (1%)" in wide
-    # the least telling parts go first: tokens, branch, project, context fill
-    assert "tok" not in bar(80)
-    assert "project (main)" in bar(80)
-    assert "(main)" not in bar(70)
-    assert "project" in bar(70)
-    assert "project" not in bar(60)
-    assert "ctx 4.2k/400.0k (1%)" in bar(60)
-    assert "ctx" not in bar(48)
-    for width in (80, 70, 60, 48, 36):
-        text = bar(width)
+    assert "ctx ▱▱▱▱▱ 1%" in wide
+    assert "$0.04" in wide
+    assert "12.3s" in wide
+    assert wide.rstrip().endswith("approvals ask")
+    # the least telling parts go first: cost, time, branch, project, gauge, context
+    assert "$0.04" not in bar(80, **full)
+    assert "12.3s" in bar(80, **full)
+    assert "12.3s" not in bar(72, **full)
+    assert "project (main)" in bar(72, **full)
+    assert "(main)" not in bar(60, **full)
+    assert "project" in bar(60, **full)
+    assert "project" not in bar(45, **full)
+    assert "ctx ▱▱▱▱▱ 1%" in bar(45, **full)
+    assert "ctx 1%" in bar(36, **full)
+    for width in (80, 60, 45, 36, 30):
+        text = bar(width, **full)
         assert "deepseek-v4.1-flash" in text
-        assert text.rstrip().endswith("approve:ask")  # was cut off below ~60 columns
+        assert text.rstrip().endswith("ask")
     # even a tiny window still says who answers and whether commands need approval
     tiny = bar(24)
-    assert tiny.rstrip().endswith("approve:ask")
+    assert tiny.rstrip().endswith("ask")
     assert tiny.strip().startswith("deep")
 
 
-def test_status_bar_activity_scroll_and_queue_notes():
-    running = bar(100, running=True, activity="/ 3.2s  Model thinking", queued=2)
-    assert "/ 3.2s  Model thinking" in running
-    assert "2 queued (Esc clears)" in running
-    assert "scrolled +15L (End)" in bar(100, scrolled=15)
-    assert "scrolled" not in bar(100, running=True, activity="x", scrolled=15)
+def test_status_bar_gauge_update_and_roles():
     fragments = status_bar_fragments(snapshot(approval_mode="deny"), GLYPH, 100)
-    assert ("deny", "approve:deny") in fragments
+    assert ("error", "deny") in fragments
+    assert ("accent+bold", "deepseek-v4.1-flash") in fragments
+    assert ("warning", "↑ 6.0.0.dev41 /update") in status_bar_fragments(
+        snapshot(update="6.0.0.dev41"), GLYPH, 100
+    )
+    half = status_bar_fragments(snapshot(context_pct=70), GLYPH, 100)
+    assert ("warning", "▰▰▰▰") in half  # 70 %: four of five, in the warning colour
+    full = status_bar_fragments(snapshot(context_pct=97), GLYPH, 100)
+    assert ("error", "▰▰▰▰▰") in full
+    plain = _glyphs("ascii")
+    assert "ctx ##--- 40%" in "".join(
+        t for _, t in status_bar_fragments(snapshot(context_pct=40), plain, 100)
+    )
 
 
 def test_cells_and_clipping():
     assert narrow("plain ascii · кириллица ─│●✓✗›…")
+    assert narrow("⠋⠙⠹ ▰▱ █░ • √ → ↑ ╭╮╰╯")  # the spinner, gauges and frames
     assert not narrow("日本語")
     assert not narrow("emoji 🙂")
     assert cell_width("abc") == 3
@@ -156,9 +169,15 @@ def test_first_frame_puts_card_bar_and_prompt_where_the_app_draws_them():
     assert frame.count(splash.ENTER_ALTERNATE) == 1
     assert splash.LEAVE_ALTERNATE not in frame
     assert "Type a task to start." in frame
-    bar_row, prompt_row = frame.index("\x1b[29;1H"), frame.index("\x1b[30;1H")
-    assert bar_row < frame.index("approve:ask") < prompt_row  # bar: the last row but one
-    assert frame.endswith(GLYPH["prompt"] + "\x1b[0m")  # prompt: the last row
+    rows = {n: frame.index(f"\x1b[{n};1H") for n in (27, 28, 29, 30)}
+    # the input box (rows 27-29: its top, the prompt line, its lower edge with the keys)
+    # and the status bar below it (row 30), where the app draws them
+    assert (
+        rows[27] < frame.index("╭", rows[27]) < rows[28] < frame.rindex(GLYPH["prompt"]) < rows[29]
+    )
+    assert rows[29] < frame.index("enter", rows[29]) < frame.index("send", rows[29]) < rows[30]
+    assert rows[30] < frame.rindex("approvals") < frame.rindex("ask")
+    assert frame.endswith(f"\x1b[28;{len(GLYPH['prompt']) + 3}H")  # the cursor: after "│ › "
 
 
 @pytest.mark.parametrize(

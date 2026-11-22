@@ -2172,7 +2172,7 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
 - Shift of 2026-11-22 from 07:45 UTC (`date -u`), version 6.0.0.dev40: (1) `karox6 update`
   and `/update`, a once-a-day background check, `scripts/install_latest.ps1|.sh`; (2) the
   chat UI redesign. No model call so far, ReformBoss not used, BASE_PROMPT untouched.
-- 08:55 UTC, part 1 in: `karox6/update.py` (temporary clone of `karox6/main`, compare by
+- 08:00 UTC, part 1 in: `karox6/update.py` (temporary clone of `karox6/main`, compare by
   commit and PEP 440 version, changes = commit titles since the installed build, wheel built
   with the venv's pip, checked by `--version` from a scratch `--target` before install, deps
   first then `--force-reinstall --no-deps`; Windows: running `karox6.exe` renamed to
@@ -2184,3 +2184,19 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   both install scripts run twice (second: "up to date"). Bug found by the Linux run: a venv's
   python is a symlink to the base interpreter, `resolve()` made them equal; paths now
   compared as given.
+- 08:45 UTC, part 2 in (the chat's look). Read first: Codex `codex-rs/tui/styles.md`
+  (roles, ANSI colours, newline-gated markdown), OpenCode's theme system (dark/light,
+  "system" from the terminal palette, OSC 11), Claude Code's screens (input box, status
+  line, tool blocks with "+N lines (ctrl+o)"). Fifteen points taken, listed in
+  `docs/tui.md`. New: `tui_theme.py` (roles x themes dark/light/mid/ansi x depth 24/8/4/0),
+  `tui_markdown.py` (line-at-a-time rendering, live open line, tables), `tui_highlight.py`
+  (regex per language family, lazy), glyph sets rich / classic console (WGL4) / ASCII,
+  layout: activity line, framed input box with mode hints, status bar (model, project
+  (branch), context gauge, cost, turn time, approvals), Ctrl+O folds tool output in place,
+  `/` menu ranks prefix > name > description, `@` adds letters-in-order. Start-up frame
+  repainted to match. Frame tests in the ConPTY/pty harness: activity line and hints,
+  markdown cells (bold, colours), fold/unfold, update notice, five colour depths/themes,
+  classic-console glyphs (Windows). First frame 175 ms (median of 7; 170 before).
+  Windows 1231 passed, 6 skipped (before the last two test fixes); Linux 1232 passed,
+  8 skipped. A test failed only on Linux: a scripted turn takes 0.0 s, and the turn time
+  was hidden when it was zero; now it is hidden only before the first turn.

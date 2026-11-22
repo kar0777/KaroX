@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import sys
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -208,24 +209,35 @@ def test_layout_bottom_input_status_bar_and_streaming(tmp_path: Path) -> None:
                     )
                 )
                 rows = rendered_rows(ui)
-                # Welcome card at the top, status bar at row -2, input box at row -1.
+                # Welcome card at the top; at the bottom the activity line (blank between
+                # turns), the input box (its top, the prompt, its lower edge with the keys)
+                # and the status bar.
                 assert "KaroX " in rows[0]
-                assert "test-model" in rows[-2]
-                assert "ws (feat-ui)" in rows[-2]
-                assert "approve:ask" in rows[-2]
-                assert rows[-1].startswith("› ")
+                assert not rows[-5].strip()
+                assert rows[-4].startswith("╭─")
+                assert rows[-4].rstrip().endswith("╮")
+                assert rows[-3].startswith("│ › ")
+                assert rows[-3].rstrip().endswith("│")
+                assert rows[-2].startswith("╰")
+                assert "enter send" in rows[-2]
+                assert "test-model" in rows[-1]
+                assert "ws (feat-ui)" in rows[-1]
+                assert rows[-1].rstrip().endswith("approvals ask")
 
                 # Send a Cyrillic message and verify streaming + status bar tokens update.
                 keys.send_text("Покажи ответ\r")
                 await eventually(
                     lambda: (
                         "Привет, мир! Streamed reply." in ui.transcript.plain_text
-                        and "[completed]" in ui.transcript.plain_text
+                        and "✓ completed" in ui.transcript.plain_text
                     )
                 )
                 assert "› Покажи ответ" in ui.transcript.plain_text
-                await eventually(
-                    lambda: ui.mode == "prompt" and "1.0k tok" in rendered_rows(ui)[-2]
+                await eventually(  # the status bar shows how long the turn took
+                    lambda: (
+                        ui.mode == "prompt"
+                        and re.search(r" \d+\.\ds · approvals", rendered_rows(ui)[-1]) is not None
+                    )
                 )
 
                 # Quit via Ctrl+D on empty prompt.
@@ -264,7 +276,7 @@ def test_scroll_autoscroll_pageup_wheel_and_end_jump(tmp_path: Path) -> None:
                 await eventually(lambda: not ui.transcript.follow)
                 scrolled_pos = ui.transcript.scroll_top
                 assert scrolled_pos < bottom_scroll
-                await eventually(lambda: "scrolled +" in rendered_rows(ui)[-2])
+                await eventually(lambda: "lines below (end)" in rendered_rows(ui)[-5])
 
                 # New streamed output arrives while scrolled up: viewport stays put!
                 ui.write("line-60\nline-61\nline-62\n")
@@ -353,11 +365,11 @@ def test_esc_and_ctrl_c_interrupt_running_turn(tmp_path: Path, key: bytes) -> No
                 keys.send_text("start slow\r")
                 await asyncio.wait_for(started.wait(), 3)
                 await eventually(
-                    lambda: ui.mode == "running" and "Running wait" in rendered_rows(ui)[-2]
+                    lambda: ui.mode == "running" and "Running wait" in rendered_rows(ui)[-5]
                 )
                 # Interrupt the turn.
                 keys.send_bytes(key)
-                await eventually(lambda: "[stopped]" in ui.transcript.plain_text)
+                await eventually(lambda: "! stopped" in ui.transcript.plain_text)
                 assert cleaned.is_set()
                 await eventually(lambda: ui.mode == "prompt")
 
@@ -533,25 +545,25 @@ def test_approval_dialog_inside_fullscreen_app(tmp_path: Path) -> None:
                 assert out.in_alt_screen is True
                 assert out.alt_entered == 1  # never left alternate screen
                 keys.send_text("n\r")
-                await eventually(lambda: ui.transcript.plain_text.count("[completed]") == 1)
+                await eventually(lambda: ui.transcript.plain_text.count("✓ completed") == 1)
 
                 # Turn 2: answer 'y' -> ran.
                 keys.send_text("two\r")
                 await eventually(lambda: ui.mode == "question")
                 keys.send_text("y\r")
-                await eventually(lambda: ui.transcript.plain_text.count("[completed]") == 2)
+                await eventually(lambda: ui.transcript.plain_text.count("✓ completed") == 2)
 
                 # Turn 3: answer 'a' -> always allow, status bar updates to approve:allow.
                 keys.send_text("three\r")
                 await eventually(lambda: ui.mode == "question")
                 keys.send_text("a\r")
-                await eventually(lambda: ui.transcript.plain_text.count("[completed]") == 3)
+                await eventually(lambda: ui.transcript.plain_text.count("✓ completed") == 3)
                 assert app.approval_mode == "allow"
-                await eventually(lambda: "approve:allow" in rendered_rows(ui)[-2])
+                await eventually(lambda: "approvals allow" in rendered_rows(ui)[-1])
 
                 # Turn 4: runs without asking.
                 keys.send_text("four\r")
-                await eventually(lambda: ui.transcript.plain_text.count("[completed]") == 4)
+                await eventually(lambda: ui.transcript.plain_text.count("✓ completed") == 4)
 
                 results = [m.content for m in app.session.messages if m.role == "tool"]
                 assert results == ["denied by user", "ran", "ran", "ran"]

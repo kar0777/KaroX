@@ -12,6 +12,7 @@ from karox6.core.session import CANCELLED_RESULT, SessionConfig
 from karox6.providers.scripted import ScriptedProvider, Turn
 from karox6.tools.base import ApprovalRequest, ToolResult
 from karox6.tui import ChatApp, Palette, _glyphs, brief
+from karox6.tui_text import short_path
 
 
 class FakeTerm:
@@ -93,7 +94,7 @@ def test_turns_share_history(tmp_path):
     assert asyncio.run(app.run()) == 0
     assert "first answer" in term.text
     assert "second" in term.text
-    assert term.text.count("[completed]") == 2
+    assert term.text.count("✓ completed") == 2
     seen = [m.content for m in provider.requests[1].messages]
     assert seen == ["hello", "first answer", "and again"]
 
@@ -106,7 +107,7 @@ def test_welcome_card_shows_model_project_branch_and_keys(tmp_path):
     (git / "HEAD").write_text("ref: refs/heads/feature-x\n", encoding="utf-8")
     asyncio.run(app.run())
     card = term.text.split("Type a task to start.")[0]
-    for part in ("KaroX ", "test", "openai-chat", str(tmp_path / "ws"), "feature-x", "ask"):
+    for part in ("KaroX ", "test", "openai-chat", short_path(str(tmp_path / "ws")), "feature-x"):
         assert part in card
     for key in ("/ commands", "@ attach a file", "Alt+Enter", "Esc"):
         assert key in card
@@ -174,7 +175,7 @@ def test_cancel_stops_only_the_turn(tmp_path):
         assert await app.turn("next") == "completed"
 
     asyncio.run(go())
-    assert "[stopped]" in term.text
+    assert "! stopped" in term.text
     assert tool_results(app.session) == [CANCELLED_RESULT]
     roles = [m.role for m in provider.requests[1].messages]
     assert roles == ["user", "assistant", "tool", "user"]
@@ -204,7 +205,7 @@ def test_sigint_under_asyncio_run_stops_only_the_turn(tmp_path):
 
     before = signal.getsignal(signal.SIGINT)
     assert asyncio.run(main()) == ["cancelled", "cancelled", "completed"]
-    assert term.text.count("[stopped]") == 2
+    assert term.text.count("! stopped") == 2
     assert signal.getsignal(signal.SIGINT) is before
 
 
@@ -282,8 +283,8 @@ def test_render_stream_and_events(tmp_path):
     app.render(ev.ErrorEvent(code="x", message="bad"))
     text = term.text
     assert "thinking: hmm\n" in text
-    assert "● bash ls -la  ✗ boom (1.5s)\n" in text
-    assert "    ● agent-1/read x  ✓ 2 lines (0.0s)\n" in text
+    assert "● bash ls -la  ✗ boom · 1.5s\n" in text
+    assert "    ● agent-1/read x  ✓ 2 lines · 0.0s\n" in text
     assert "retry 2 in 4s: 429" in text
     assert "✗ error: bad" in text
 

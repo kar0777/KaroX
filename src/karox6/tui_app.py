@@ -16,7 +16,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -28,7 +28,15 @@ from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples
 from prompt_toolkit.history import History
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
-from prompt_toolkit.layout import Dimension, Float, FloatContainer, HSplit, Layout, Window
+from prompt_toolkit.layout import (
+    Dimension,
+    Float,
+    FloatContainer,
+    HSplit,
+    Layout,
+    VSplit,
+    Window,
+)
 from prompt_toolkit.layout.containers import ConditionalContainer
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
@@ -53,10 +61,16 @@ from karox6.tui_text import (
     _git_branch,
     _glyphs,
     _plain_text,
+    box_bottom,
+    box_sides,
+    box_top,
     cell_width,
+    clip_cells,
+    key_hints,
     narrow,
     status_bar_fragments,
 )
+from karox6.tui_theme import Theme, xterm_hex
 
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding.key_bindings import NotImplementedOrNone
@@ -102,32 +116,61 @@ def _runs(text: str) -> list[Run]:
         return [("", text)] if text else []
     out: list[Run] = []
     color = ""
+    background = ""
     flags: list[str] = []
     pos = 0
     for match in _SGR.finditer(text):
         if match.start() > pos:
-            out.append((" ".join([color, *flags]).strip(), text[pos : match.start()]))
+            style = " ".join(x for x in (color, background, *flags) if x)
+            out.append((style, text[pos : match.start()]))
         pos = match.end()
-        for raw in (match.group(1) or "0").split(";"):
-            code = int(raw or 0)
+        codes = [int(raw or 0) for raw in (match.group(1) or "0").split(";")]
+        i = 0
+        while i < len(codes):
+            code = codes[i]
+            if code in (38, 48) and i + 1 < len(codes):
+                # 256 colours (5;n) and true colour (2;r;g;b), as the theme writes them
+                if codes[i + 1] == 5 and i + 2 < len(codes):
+                    value = _xterm_hex(codes[i + 2])
+                    i += 3
+                elif codes[i + 1] == 2 and i + 4 < len(codes):
+                    value = "#{:02x}{:02x}{:02x}".format(*codes[i + 2 : i + 5])
+                    i += 5
+                else:
+                    return _merge(list(ANSI(text).__pt_formatted_text__()))
+                if code == 38:
+                    color = value
+                else:
+                    background = f"bg:{value}"
+                continue
             if code == 0:
-                color, flags = "", []
+                color, background, flags = "", "", []
             elif code in _FG:
                 color = _FG[code]
             elif code == 39:
                 color = ""
+            elif code == 49:
+                background = ""
             elif code in _FLAGS:
                 if _FLAGS[code] not in flags:
                     flags.append(_FLAGS[code])
             elif code in _FLAG_OFF:
                 flags = [f for f in flags if f not in _FLAG_OFF[code]]
-            else:  # 256 colours, true colour, backgrounds: the full parser knows them
+            else:  # other backgrounds and rarer codes: the full parser knows them
                 return _merge(list(ANSI(text).__pt_formatted_text__()))
+            i += 1
     if "\x1b" in text[pos:]:  # some other escape sequence
         return _merge(list(ANSI(text).__pt_formatted_text__()))
     if pos < len(text):
-        out.append((" ".join([color, *flags]).strip(), text[pos:]))
+        out.append((" ".join(x for x in (color, background, *flags) if x), text[pos:]))
     return out
+
+
+def _xterm_hex(index: int) -> str:
+    """An xterm-256 palette entry as a prompt_toolkit colour."""
+    if index < 16:
+        return _FG[30 + index] if index < 8 else _FG[82 + index]
+    return f"#{xterm_hex(index)}"
 
 
 def _merge(fragments: StyleAndTextTuples) -> list[Run]:
@@ -196,6 +239,24 @@ def _wrap_fragments(fragments: StyleAndTextTuples, width: int) -> list[StyleAndT
     return lines
 
 
+def _parse_lines(text: str) -> list[list[Run]]:
+    """``text`` (ending in a newline) as logical lines of styled runs."""
+    lines: list[list[Run]] = [[]]
+    chars = 0
+    for style, chunk in _runs(text.replace("\r\n", "\n").replace("\r", "")):
+        for n, raw in enumerate(chunk.split("\n")):
+            if n:
+                lines.append([])
+                chars = 0
+            if raw:
+                part = _expand_tabs(raw, chars) if "\t" in raw else raw
+                lines[-1].append((style, part))
+                chars += cell_width(part)
+    if not lines[-1]:
+        lines.pop()
+    return lines
+
+
 def _expand_tabs(text: str, start: int) -> str:
     """Tabs as spaces up to the next multiple of four cells; ``start`` is how many
     cells the line already holds."""
@@ -231,6 +292,12 @@ class _TranscriptControl(UIControl):
         # The open line as far as it is wrapped: (its index, runs wrapped, column reached).
         self._tail: tuple[int, int, int] | None = None
 
+        # Tool output that Ctrl+O shows or folds: [first line, line count, folded, full].
+        self._blocks: list[list[Any]] = []
+        self.expanded: bool = False
+        self._live: list[Run] = []  # the answer's line still being streamed
+        self._live_lines: list[StyleAndTextTuples] = []
+
         self.follow: bool = True
         self.scroll_top: int = 0
         self.last_width: int = 80
@@ -258,9 +325,43 @@ class _TranscriptControl(UIControl):
         self._visual_lines = [[]]
         self._dirty_from = 0
         self._tail = None
+        self._blocks = []
+        self._live = []
         self.follow = True
         self.scroll_top = 0
         self.total_visual_lines = 1
+
+    def set_live(self, text: str) -> None:
+        """Show ``text`` (one line, may hold colours) after the last line until replaced."""
+        self._live = _runs(text.replace("\n", " ")) if text else []
+
+    def append_block(self, folded: str, full: str) -> None:
+        """Lines that Ctrl+O switches between ``folded`` and ``full`` (each ends in a
+        newline)."""
+        if self._lines[-1]:
+            self.append("\n")
+        start = len(self._lines) - 1
+        self.append(full if self.expanded else folded)
+        if self._lines[-1]:
+            self.append("\n")
+        self._blocks.append([start, len(self._lines) - 1 - start, folded, full])
+
+    def toggle_blocks(self) -> bool:
+        """Show every block's other form; True when anything on screen changed."""
+        self.expanded = not self.expanded
+        if not self._blocks:
+            return False
+        shift = 0
+        for block in self._blocks:
+            block[0] += shift
+            start, count, folded, full = block
+            lines = _parse_lines(full if self.expanded else folded)
+            self._lines[start : start + count] = lines
+            shift += len(lines) - count
+            block[1] = len(lines)
+        self._dirty_from = min(self._dirty_from, self._blocks[0][0])
+        self._tail = None
+        return True
 
     def append(self, text: str) -> None:
         if not text:
@@ -290,6 +391,9 @@ class _TranscriptControl(UIControl):
             self._visual_lines = []
             self._dirty_from = 0
             self._tail = None
+            for block in self._blocks:
+                block[0] -= drop
+            self._blocks = [block for block in self._blocks if block[0] >= 0]
             if not self.follow:
                 self.scroll_top = max(0, self.scroll_top - drop)
 
@@ -346,7 +450,8 @@ class _TranscriptControl(UIControl):
         if not self._visual_lines:
             self._visual_lines = [[]]
         self._dirty_from = count
-        self.total_visual_lines = len(self._visual_lines)
+        self._live_lines = _wrap_fragments(list(self._live), width) if self._live else []
+        self.total_visual_lines = len(self._visual_lines) + len(self._live_lines)
 
     def scroll_by(self, delta: int) -> bool:
         max_top = self.max_scroll
@@ -396,10 +501,12 @@ class _TranscriptControl(UIControl):
         else:
             self.scroll_top = max(0, min(self.scroll_top, max_top))
         visual = self._visual_lines
-        total = len(visual)
+        live = self._live_lines
+        known = len(visual)
+        total = known + len(live)
         cursor_y = min(self.scroll_top, total - 1)
         return UIContent(
-            get_line=lambda i: visual[i],
+            get_line=lambda i: visual[i] if i < known else live[i - known],
             line_count=total,
             cursor_position=Point(x=0, y=cursor_y),
             show_cursor=False,
@@ -477,38 +584,49 @@ class _FullScreenTurnView:
         yield
 
 
-def _build_style(color: bool) -> Style:
+_MENUS = {
+    # theme: (menu, current item, description, current description)
+    "dark": ("bg:#1f2335 fg:#c0caf5", "bold bg:#3d59a1 fg:#ffffff", "fg:#7c829c", "fg:#e0e6ff"),
+    "light": ("bg:#eef1f5 fg:#24292f", "bold bg:#2563c9 fg:#ffffff", "fg:#6e7781", "fg:#ffffff"),
+    "mid": ("bg:#303030 fg:#d0d0d0", "bold bg:#005f87 fg:#ffffff", "fg:#949494", "fg:#e4e4e4"),
+    "ansi": (
+        "bg:ansibrightblack fg:ansiwhite",
+        "bold bg:ansicyan fg:ansiblack",
+        "fg:ansigray",
+        "fg:ansiblack",
+    ),
+}
+
+
+def _build_style(color: bool, theme: Theme | None = None) -> Style:
     if not color:
         return Style.from_dict(
             {
-                "status-bar": "reverse",
-                "question-bar": "reverse",
-                "secret-bar": "reverse",
                 "completion-menu.completion.current": "reverse",
+                "question-bar": "bold",
+                "secret-bar": "bold",
             }
         )
+    theme = theme or Theme("ansi", 4)
+    t = theme.pt
+    menu, current, meta, meta_current = _MENUS.get(theme.name, _MENUS["mid"])
+    subtle = t("subtle").replace("fg:", "bg:") if "#" in t("subtle") else "bg:ansibrightblack"
     return Style.from_dict(
         {
-            "status-bar": "bg:#262626 fg:#e4e4e4",
-            "status-bar.model": "bold fg:#87d7ff",
-            "status-bar.dim": "fg:#9e9e9e",
-            "status-bar.activity": "bold fg:#ffd75f",
-            "status-bar.scroll": "bold fg:#ffaf5f",
-            "status-bar.allow": "bold fg:#ffd75f",
-            "status-bar.deny": "bold fg:#ff5f5f",
-            "prompt": "bold ansicyan",
-            "prompt.more": "fg:#8a8a8a",
-            "running-hint": "italic fg:#8a8a8a",
-            "question-bar": "bold bg:#5f4b00 fg:#ffffff",
-            "question-prompt": "bold fg:#ffd75f",
-            "secret-bar": "bold bg:#1c3d5a fg:#ffffff",
-            "secret-prompt": "bold fg:#87d7ff",
-            "completion-menu": "bg:#262626 fg:#d0d0d0",
-            "completion-menu.completion.current": "bold bg:#005f87 fg:#ffffff",
-            "completion-menu.meta.completion": "bg:#262626 fg:#9e9e9e",
-            "completion-menu.meta.completion.current": "bg:#005f87 fg:#e4e4e4",
-            "scrollbar.background": "bg:#1c1c1c",
-            "scrollbar.button": "bg:#585858",
+            "prompt": f"bold {t('accent')}",
+            "prompt.more": t("muted"),
+            "frame": t("subtle"),
+            "question-bar": f"bold {t('warning')}",
+            "question-prompt": f"bold {t('warning')}",
+            "secret-bar": f"bold {t('accent')}",
+            "secret-prompt": f"bold {t('accent')}",
+            "completion-menu": menu,
+            "completion-menu.completion": menu,
+            "completion-menu.completion.current": current,
+            "completion-menu.meta.completion": f"{menu} {meta}",
+            "completion-menu.meta.completion.current": f"{current} {meta_current}",
+            "scrollbar.background": "",
+            "scrollbar.button": subtle,
         }
     )
 
@@ -518,9 +636,12 @@ class FullScreenTui:
 
     Layout (top to bottom):
     1. Scrollable conversation pane (fills available height).
-    2. One-line status bar (model, project/branch, live activity, context/tokens, approval mode).
-    3. Input area pinned to the bottom (multiline prompt, inline question/approval, hidden secret,
-       or running hint), with floating ``CompletionsMenu`` and ``Ctrl+R`` ``SearchToolbar``.
+    2. The activity line: what the running turn does and for how long (blank between
+       turns), queued messages and how far the view is scrolled up.
+    3. The input box (multiline prompt, inline question/approval or hidden secret) with
+       the keys worth knowing set into its lower edge; a floating ``CompletionsMenu`` and
+       the ``Ctrl+R`` ``SearchToolbar``.
+    4. The status bar (model, project/branch, context fill, cost, turn time, approvals).
     """
 
     def __init__(
@@ -539,11 +660,14 @@ class FullScreenTui:
         provider: str = "",
         approval_mode: str = "ask",
         splash: Splash | None = None,
+        theme: Theme | None = None,
+        legacy_glyphs: bool = False,
     ) -> None:
         self._workspace = (workspace or Path.cwd()).resolve()
         self._home = home
         self._color = color
-        self._glyph = _glyphs(encoding or getattr(sys.stdout, "encoding", None))
+        self._theme = theme if theme is not None else Theme("ansi", 4 if color else 0)
+        self._glyph = _glyphs(encoding or getattr(sys.stdout, "encoding", None), legacy_glyphs)
         self._fallback_model = model
         self._fallback_provider = provider
         self._fallback_approval = approval_mode
@@ -589,13 +713,20 @@ class FullScreenTui:
             right_margins=[_QuietScrollbar(display_arrows=False)],
             always_hide_cursor=True,
         )
-        self._status_window = Window(
-            content=FormattedTextControl(self._status_bar_text, show_cursor=False),
-            height=1,
-            style="class:status-bar",
-            wrap_lines=False,
-            always_hide_cursor=True,
-        )
+
+        def line(text: Callable[[], StyleAndTextTuples]) -> Window:
+            return Window(
+                content=FormattedTextControl(text, show_cursor=False),
+                height=1,
+                wrap_lines=False,
+                always_hide_cursor=True,
+            )
+
+        self._activity_window = line(self._activity_text)
+        self._status_window = line(self._status_bar_text)
+        self._box_top = line(lambda: self._roles(box_top(self._width(), self._glyph)))
+        self._box_bottom = line(self._box_bottom_text)
+        left, right = box_sides(self._glyph)
         self._input_window = Window(
             content=BufferControl(
                 buffer=self._input_buffer,
@@ -622,18 +753,8 @@ class FullScreenTui:
             wrap_lines=False,
             get_line_prefix=lambda _ln, _wc: [("class:secret-prompt", self._secret_prompt)],
         )
-        self._question_banner = Window(
-            content=FormattedTextControl(self._question_banner_text, show_cursor=False),
-            height=1,
-            style="class:question-bar",
-            always_hide_cursor=True,
-        )
-        self._secret_banner = Window(
-            content=FormattedTextControl(self._secret_banner_text, show_cursor=False),
-            height=1,
-            style="class:secret-bar",
-            always_hide_cursor=True,
-        )
+        self._question_banner = line(self._question_banner_text)
+        self._secret_banner = line(self._secret_banner_text)
 
         in_prompt = Condition(lambda: self._mode == "prompt")
         in_running = Condition(lambda: self._mode == "running")
@@ -641,16 +762,43 @@ class FullScreenTui:
         in_question = Condition(lambda: self._mode == "question")
         in_secret = Condition(lambda: self._mode == "secret")
 
-        body = HSplit(
+        inside = HSplit(
             [
-                self._transcript_window,
-                self._status_window,
-                ConditionalContainer(self._search_toolbar, filter=is_searching),
-                ConditionalContainer(self._question_banner, filter=in_question),
-                ConditionalContainer(self._secret_banner, filter=in_secret),
                 ConditionalContainer(self._input_window, filter=in_input),
                 ConditionalContainer(self._answer_window, filter=in_question),
                 ConditionalContainer(self._secret_window, filter=in_secret),
+            ]
+        )
+        box = HSplit(
+            [
+                self._box_top,
+                VSplit(
+                    [
+                        Window(
+                            FormattedTextControl([("class:frame", left)]),
+                            width=cell_width(left),
+                            dont_extend_width=True,
+                        ),
+                        inside,
+                        Window(
+                            FormattedTextControl([("class:frame", right)]),
+                            width=cell_width(right),
+                            dont_extend_width=True,
+                        ),
+                    ]
+                ),
+                self._box_bottom,
+            ]
+        )
+        body = HSplit(
+            [
+                self._transcript_window,
+                self._activity_window,
+                ConditionalContainer(self._search_toolbar, filter=is_searching),
+                ConditionalContainer(self._question_banner, filter=in_question),
+                ConditionalContainer(self._secret_banner, filter=in_secret),
+                box,
+                self._status_window,
             ]
         )
         root = FloatContainer(
@@ -670,10 +818,13 @@ class FullScreenTui:
             ],
         )
 
+        depth = {0: ColorDepth.DEPTH_1_BIT, 4: ColorDepth.DEPTH_4_BIT, 8: ColorDepth.DEPTH_8_BIT}
         self._app: Application[None] = Application(
             layout=Layout(root, focused_element=self._input_window),
-            style=_build_style(color),
-            color_depth=None if color else ColorDepth.DEPTH_1_BIT,
+            style=_build_style(color, self._theme),
+            color_depth=depth.get(self._theme.depth, ColorDepth.DEPTH_24_BIT)
+            if color
+            else ColorDepth.DEPTH_1_BIT,
             key_bindings=self._build_key_bindings(),
             full_screen=True,
             mouse_support=True,
@@ -937,14 +1088,40 @@ class FullScreenTui:
         lines = text.split("\n")
         prefix = self._prompt_text
         more = self._more_text
-        if self._color:
-            rendered = [f"\x1b[1;36m{prefix}\x1b[0m{_plain_text(lines[0])}"]
-            rendered.extend(f"\x1b[2m{more}\x1b[0m{_plain_text(line)}" for line in lines[1:])
+        paint = self._chat_app.paint if self._chat_app is not None else None
+        if self._color and paint is not None:
+            rendered = [paint("accent+bold", prefix) + paint("user", _plain_text(lines[0]))]
+            rendered.extend(
+                paint("muted", more) + paint("user", _plain_text(line)) for line in lines[1:]
+            )
         else:
             rendered = [f"{prefix}{_plain_text(lines[0])}"]
             rendered.extend(f"{more}{_plain_text(line)}" for line in lines[1:])
         self._transcript.scroll_to_bottom()
-        self.write("\n".join(rendered) + "\n")
+        self.write("\n" + "\n".join(rendered) + "\n")
+
+    def write_block(self, folded: str, full: str) -> None:
+        """Lines that Ctrl+O switches between their short and their full form."""
+        self._transcript.append_block(folded, full)
+        self.invalidate()
+
+    def set_live(self, text: str) -> None:
+        """The line of the answer still being streamed (replaced as it grows)."""
+        self._transcript.set_live(text)
+        self.invalidate()
+
+    def _width(self) -> int:
+        return max(self._app.output.get_size().columns, 1)
+
+    def _roles(self, fragments: list[tuple[str, str]]) -> StyleAndTextTuples:
+        """(colour roles, text) pieces as prompt_toolkit fragments of this theme."""
+        if not self._color:
+            return [("", text) for _, text in fragments]
+        pt = self._theme.pt
+        return [
+            (" ".join(pt(role) for role in roles.split("+") if role), text)
+            for roles, text in fragments
+        ]
 
     def _snapshot(self) -> StatusSnapshot:
         if self._chat_app is not None:
@@ -965,49 +1142,58 @@ class FullScreenTui:
         )
 
     def _status_bar_text(self) -> StyleAndTextTuples:
-        snap = self._snapshot()
-        if snap.running and not snap.activity and self._turn_status_fn is not None:
-            from dataclasses import replace
+        return self._roles(status_bar_fragments(self._snapshot(), self._glyph, self._width()))
 
-            snap = replace(snap, activity=self._turn_status_fn())
-        scrolled = 0 if self._transcript.follow else self._transcript.lines_below
+    def _activity_text(self) -> StyleAndTextTuples:
+        """What the turn does (spinner, phase, time, how to stop it) on the left; queued
+        messages and how far the view is scrolled up on the right."""
+        g = self._glyph
+        dot = g["dot"]
+        left: list[tuple[str, str]] = []
+        if self._turn_active:
+            if self._chat_app is not None:
+                phase, elapsed = self._chat_app.activity()
+            else:
+                phase, elapsed = (self._turn_status_fn() if self._turn_status_fn else ""), 0.0
+            spin = g.get("spin", "|/-\\")
+            spinner = spin[int(elapsed * 10) % len(spin)]
+            left = [("", " "), ("accent", spinner), ("", " ")]
+            tail = [("muted", f"  {elapsed:.1f}s{dot}"), ("muted+bold", "esc"), ("muted", " stop")]
+            room = self._width() - 6 - sum(cell_width(t) for _, t in tail) - 24
+            left += [("", clip_cells(_plain_text(phase), max(room, 10))), *tail]
+        right: list[tuple[str, str]] = []
         queued = sum(1 for item in self._queued_inputs if isinstance(item, str))
-        fragments = status_bar_fragments(
-            snap,
-            self._glyph,
-            self._app.output.get_size().columns,
-            scrolled=scrolled,
-            queued=queued if self._turn_active else 0,
-        )
-        return [
-            (f"class:status-bar.{style}" if style else "class:status-bar", text)
-            for style, text in fragments
-        ]
+        if queued and self._turn_active:
+            right += [("warning", f"{queued} queued"), ("muted", " (esc clears)")]
+        below = 0 if self._transcript.follow else self._transcript.lines_below
+        if below > 0:
+            if right:
+                right.append(("muted", dot))
+            right += [("warning", f"{g.get('up', '^')} {below} lines below"), ("muted", " (end)")]
+        if right:
+            used = sum(cell_width(t) for _, t in left) + sum(cell_width(t) for _, t in right)
+            left.append(("", " " * max(self._width() - used - 1, 1)))
+            left += right
+        return self._roles(left)
+
+    def _box_bottom_text(self) -> StyleAndTextTuples:
+        return self._roles(box_bottom(self._width(), self._glyph, key_hints(self._mode)))
 
     def _question_banner_text(self) -> StyleAndTextTuples:
         dot = self._glyph["dot"]
+        warn = self._glyph.get("warn", "!")
         if "run it?" in self._question_prompt.lower():
             return [
                 (
                     "class:question-bar",
-                    f" Approval required — y: run{dot}n: deny{dot}a: always{dot}Esc: stop turn",
+                    f" {warn} Approval required: y run{dot}n deny{dot}a always{dot}esc stop turn",
                 )
             ]
-        return [
-            (
-                "class:question-bar",
-                f" Input required — Enter: confirm{dot}Esc / Ctrl+C: cancel",
-            )
-        ]
+        return [("class:question-bar", f" {warn} Input required: enter confirm{dot}esc cancel")]
 
     def _secret_banner_text(self) -> StyleAndTextTuples:
         dot = self._glyph["dot"]
-        return [
-            (
-                "class:secret-bar",
-                f" Hidden input (not echoed) — Enter: submit{dot}Esc / Ctrl+C: cancel",
-            )
-        ]
+        return [("class:secret-bar", f" Hidden input (not echoed): enter submit{dot}esc cancel")]
 
     # -- key bindings ------------------------------------------------------------------
 
@@ -1050,6 +1236,11 @@ class FullScreenTui:
         def _ctrl_home(event: KeyPressEvent) -> None:
             if self._transcript.scroll_to_top():
                 event.app.invalidate()
+
+        @keys.add("c-o", eager=True)
+        def _toggle_output(event: KeyPressEvent) -> None:
+            self._transcript.toggle_blocks()
+            event.app.invalidate()
 
         @keys.add("end", filter=Condition(_end_should_scroll) & ~is_searching)
         def _end_jump_bottom(event: KeyPressEvent) -> None:

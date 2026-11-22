@@ -205,6 +205,12 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     )
     chat.add_argument("--no-color", action="store_true", help="plain output without ANSI colors")
     chat.add_argument(
+        "--theme",
+        choices=["auto", "mid", "dark", "light", "ansi"],
+        default=None,
+        help="colours: auto (default), dark, light, mid (any background), ansi (16 colours)",
+    )
+    chat.add_argument(
         "--inline",
         action="store_true",
         help="run in inline scrollback mode instead of the full-screen TUI",
@@ -604,6 +610,7 @@ def _first_frame(args: argparse.Namespace) -> Any:
         return None
     from karox6 import __version__, splash
 
+    theme, legacy = _look(args, True)
     return splash.show(
         version=__version__,
         model=args.model,
@@ -611,7 +618,19 @@ def _first_frame(args: argparse.Namespace) -> Any:
         workspace=workspace,
         approval_mode=args.approve_dangerous,
         context_window=_initial_window(args),
+        theme=theme,
+        legacy_glyphs=legacy,
     )
+
+
+def _look(args: argparse.Namespace, color: bool) -> tuple[Any, bool]:
+    """The chat's theme (karox6.tui_theme) for this terminal, and whether its glyphs must
+    stay within what a classic Windows console font draws."""
+    from karox6.tui_text import legacy_console
+    from karox6.tui_theme import Theme, color_depth, theme_name
+
+    depth = color_depth() if color else 0
+    return Theme(theme_name(getattr(args, "theme", None)), depth), legacy_console()
 
 
 async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
@@ -637,6 +656,7 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
     use_fullscreen = is_tty and not getattr(args, "inline", False)
     color = not args.no_color and color_enabled()
     encoding = getattr(sys.stdout, "encoding", None)
+    theme, legacy = _look(args, color)
     ui: Any = None
     if use_fullscreen:
         try:
@@ -658,6 +678,8 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
                 provider=args.provider,
                 approval_mode=args.approve_dangerous,
                 splash=splash,
+                theme=theme,
+                legacy_glyphs=legacy,
             )
 
     if ui is None:
@@ -768,6 +790,10 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
             columns=ui.columns if ui is not None else lambda: shutil.get_terminal_size().columns,
             snapshots=not args.no_undo,
             prefill=ui.prefill if ui is not None else None,
+            theme=theme,
+            legacy_glyphs=legacy,
+            write_block=ui.write_block if ui is not None else None,
+            live=ui.set_live if ui is not None else None,
         )
         if ui is not None:
             ui.attach_app(created)

@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from fake_model import FakeModel, Reply  # noqa: E402
 from term import Terminal  # noqa: E402
 
-ROWS, COLS = 32, 100
+ROWS, COLS = int(os.environ.get("FRAME_ROWS", "32")), int(os.environ.get("FRAME_COLS", "100"))
 
 # xterm's 16 colours as Windows Terminal's "Campbell" scheme draws them.
 _NAMED = {

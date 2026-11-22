@@ -27,30 +27,27 @@ from typing import Any, TextIO
 
 from karox6.tui_text import (
     _ANSI,
+    Fragments,
     Palette,
     StatusSnapshot,
     _git_branch,
     _glyphs,
     banner_text,
+    box_bottom,
+    box_sides,
+    box_top,
+    key_hints,
     narrow,
     status_bar_fragments,
 )
+from karox6.tui_theme import Theme
 
 ENTER_ALTERNATE = "\x1b[?1049h"
 LEAVE_ALTERNATE = "\x1b[?1049l"
-MIN_ROWS = 12  # the card (9 lines) above the status bar and the prompt, with room to spare
-# The app's own colours (tui_app._build_style) as 256-colour codes; each of them is a
-# colour of that palette, so both renderings are the same on screen.
-_BAR = "48;5;235"
-_BAR_STYLES = {
-    "": "38;5;254",
-    "model": "1;38;5;117",
-    "dim": "38;5;247",
-    "activity": "1;38;5;221",
-    "scroll": "1;38;5;215",
-    "allow": "1;38;5;221",
-    "deny": "1;38;5;203",
-}
+# The card (9 lines) above the activity line, the input box (3) and the status bar, with
+# room to spare.
+MIN_ROWS = 15
+BOTTOM_ROWS = 5  # activity line, input box (3 rows), status bar
 
 
 class Splash:
@@ -93,12 +90,15 @@ def first_frame(
     encoding: str | None,
     rows: int,
     columns: int,
+    theme: Theme | None = None,
+    legacy_glyphs: bool = False,
 ) -> str | None:
     """The escape sequences and text of the first frame, or None when it cannot be exact."""
     if rows < MIN_ROWS or columns < 20:
         return None
-    paint = Palette(True)
-    glyph = _glyphs(encoding)
+    theme = theme or Theme("ansi", 4)
+    paint = Palette(True, theme)
+    glyph = _glyphs(encoding, legacy_glyphs)
     branch = _git_branch(workspace)
     card = banner_text(
         version=version,
@@ -126,16 +126,28 @@ def first_frame(
         context_pct=0,
         session_id=None,
     )
-    bar = status_bar_fragments(snap, glyph, columns)
-    plain = [_ANSI.sub("", line) for line in lines] + [text for _, text in bar]
-    if len(lines) > rows - 2 or not all(narrow(text) for text in plain):
+    left, right = box_sides(glyph)
+    inner = columns - len(left) - len(right) - len(glyph["prompt"])
+    bottom: list[Fragments] = [
+        box_top(columns, glyph),
+        [("subtle", left), ("accent+bold", glyph["prompt"]), ("", " " * inner), ("subtle", right)],
+        box_bottom(columns, glyph, key_hints("prompt")),
+        status_bar_fragments(snap, glyph, columns),
+    ]
+    plain = [_ANSI.sub("", line) for line in lines]
+    plain += [text for row in bottom for _, text in row]
+    if len(lines) > rows - BOTTOM_ROWS or not all(narrow(text) for text in plain):
         return None
     if any(len(text) > columns - 1 for text in plain[: len(lines)]):
         return None
     out = [ENTER_ALTERNATE, "\x1b[H\x1b[2J", "\r\n".join(lines)]
-    out.append(f"\x1b[{rows - 1};1H")
-    out.extend(f"\x1b[0;{_BAR};{_BAR_STYLES[style]}m{text}" for style, text in bar)
-    out.append(f"\x1b[0m\x1b[{rows};1H\x1b[0;1;36m{glyph['prompt']}\x1b[0m")
+    for n, row in enumerate(bottom):
+        out.append(f"\x1b[0m\x1b[{rows - 3 + n};1H")
+        for roles, text in (piece for piece in row if piece[1]):
+            codes = ";".join(c for c in (theme.sgr(r) for r in roles.split("+") if r) if c)
+            out.append(f"\x1b[0;{codes}m{text}" if codes else f"\x1b[0m{text}")
+    prompt_col = len(left) + len(glyph["prompt"]) + 1
+    out.append(f"\x1b[0m\x1b[{rows - 2};{prompt_col}H")
     return "".join(out)
 
 
@@ -148,6 +160,8 @@ def show(
     approval_mode: str,
     context_window: int,
     stream: TextIO | None = None,
+    theme: Theme | None = None,
+    legacy_glyphs: bool = False,
 ) -> Splash | None:
     """Paint the first frame on the terminal; None when it was not painted."""
     stream = stream or sys.stdout
@@ -172,6 +186,8 @@ def show(
         encoding=getattr(stream, "encoding", None),
         rows=size.lines,
         columns=columns,
+        theme=theme,
+        legacy_glyphs=legacy_glyphs,
     )
     if frame is None:
         return None
