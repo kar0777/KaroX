@@ -1732,3 +1732,19 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   A/B. Pass = successful audit rows of harness `codex` with tool use and a run that ends
   on its own. If the upstream refuses again, the audit now names the refused shape and
   the report says "no: <what is refused>"; no further codex run today either way.
+- 00:00 UTC, what the gateway sends for Codex, found without a model or a key (WSL on this
+  PC: Codex CLI 0.171.0 -> the bench gateway, litellm 1.91.0 + `race_audit.py` with the
+  ReformBoss config -> a mock chat upstream that logs the request; no benchmark task, no
+  upstream call). LiteLLM's Responses bridge forwards Responses-only fields to the chat
+  upstream (`client_metadata`, `parallel_tool_calls`, `prompt_cache_key`), gives every
+  content as a list of text parts, sends two system messages, and splits one reply into
+  an assistant message with the tool calls and a second one with the (empty) text, which
+  then sits between a call and its result. A mock that refuses unknown fields, roles and
+  tool types answers that request with 400, as ReformBoss did in devc2; which of these
+  ReformBoss minds is not known. Bench 81f5a37, for the alias `hard12-codex` only: those
+  fields are dropped, text parts become a string, system messages become one, the pieces
+  of one reply become one assistant message, empty assistant messages go. The same local
+  chain then runs a tool call and its result through the strict mock, and the audit
+  writes its rows (two successes of harness `codex`). The trio's requests leave as they
+  came (offline check: equal to the profile-only result). devc3 runs on 81f5a37, rule
+  unchanged.
