@@ -2266,3 +2266,14 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   Lessons: (1) a 6-task single-attempt mini-run cannot detect a 15% effect; (2) on these
   tasks KaroX's cost is the NUMBER OF STEPS (17-110), not context size; levers that cut
   steps matter more than context trimming. dev44 stays on devin/big, not merged.
+- Step analysis (2026-11-22, Devin gemini-4-carbon-high over gtrio2+tbd3, valid trials):
+  mean steps DSH 35, KaroX 63, OpenCode 63; KaroX's excess is after the first edit (44 vs
+  22): one edit per step and python/sed rewrites (~6.6/task), small one-file read slices
+  (~6.2), repeated tests and chasing uninstalled linters (~2.8), unrequested test-file
+  edits (~2.5), length cuts and background-job waits (~3.3). todo_write is not a factor
+  (2 calls in 24 runs). Report: scratchpad steps/steps_report.md.
+- Mini A/B mab5 (pre-registered, run 45047651675): dev42 vs dev45 (branch steps/tools
+  0c9f069: edit `edits[]` multi-hunk, edit-miss context, 120 KB multi-file read, foreground
+  shell wording; prompt unchanged). Dahl GLM, night_tasks 46-57 (12 held out), 1 attempt.
+  Primary metric: successful model calls on tasks valid in both arms. Rule: keep dev45 if
+  calls are >= 15% lower AND it solves >= dev42 - 1; a loss of 2+ solves rejects it.
