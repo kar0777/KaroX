@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from karox6.providers.base import ToolSpec
 from karox6.tools.base import Tool
+from karox6.tools.baseline import BaselineTool
 from karox6.tools.fs import EditTool, ReadTool, WriteTool
 from karox6.tools.jobs import JobKillTool, JobListTool, JobOutputTool
 from karox6.tools.search import GlobTool, GrepTool
@@ -14,6 +15,7 @@ from karox6.tools.todo import TodoTool
 def build_tools(shell: ShellInfo, *, apply_patch: bool = False) -> list[Tool]:
     tools: list[Tool] = [
         ShellTool(shell),
+        BaselineTool(shell),
         ReadTool(),
         WriteTool(),
         EditTool(),
@@ -27,7 +29,7 @@ def build_tools(shell: ShellInfo, *, apply_patch: bool = False) -> list[Tool]:
     if apply_patch:
         from karox6.tools.apply_patch import ApplyPatchTool
 
-        tools.insert(4, ApplyPatchTool())
+        tools.insert(5, ApplyPatchTool())
     return tools
 
 

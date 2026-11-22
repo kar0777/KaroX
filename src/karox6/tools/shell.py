@@ -9,6 +9,7 @@ Tool contract follows DSH's bash/pwsh tools (MIT, see THIRD_PARTY_NOTICES.md).
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sys
@@ -24,6 +25,30 @@ from karox6.tools.proc import ProcessRun
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
 INLINE_CHARS = 30_000
+PIPESTATUS_ENV = "KAROX_PIPESTATUS_FILE"
+
+_BASH_PIPESTATUS_EPILOGUE = (
+    '__karox_rc=$? __karox_ps=("${PIPESTATUS[@]+"${PIPESTATUS[@]}"}")\n'
+    "set +e +u\n"
+    'if [ -n "${KAROX_PIPESTATUS_FILE:-}" ]; then '
+    'printf \'%s\\n\' "${__karox_ps[@]}" >"$KAROX_PIPESTATUS_FILE" 2>/dev/null || true; '
+    "fi\n"
+    'exit "$__karox_rc"\n'
+)
+
+_SH_PIPESTATUS_PROLOGUE = (
+    'if [ -n "${BASH_VERSION:-}" ]; then\n'
+    '  __karox_ps_e=\'__karox_rc=$? __karox_ps=("${PIPESTATUS[@]+"${PIPESTATUS[@]}"}"); '
+    "set +e +u; "
+    '[ -n "${KAROX_PIPESTATUS_FILE:-}" ] && '
+    'printf "%s\\n" "${__karox_ps[@]}" >"$KAROX_PIPESTATUS_FILE" 2>/dev/null; '
+    'exit "$__karox_rc"\'\n'
+    "else\n"
+    "  __karox_ps_e='__karox_rc=$?; exit \"$__karox_rc\"'\n"
+    "fi\n"
+)
+
+_SH_PIPESTATUS_EPILOGUE = 'eval "${__karox_ps_e:-exit \\$?}"\n'
 
 ENV_OVERRIDES = {
     "NO_COLOR": "1",
@@ -138,6 +163,60 @@ def shell_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def wrap_command_for_pipestatus(
+    command: str, shell: ShellInfo, status_path: Path | None
+) -> tuple[str, dict[str, str]]:
+    """Wrap a bash/sh command to record the last pipeline's ``PIPESTATUS`` into ``status_path``.
+
+    Leaves PowerShell unchanged and falls back to the unwrapped command on any error.
+    """
+    if shell.kind != "bash" or status_path is None:
+        return command, {}
+    try:
+        target = status_path.resolve().as_posix()
+    except OSError:
+        return command, {}
+    sep = "" if command.endswith("\n") else "\n"
+    if shell.flavor == "sh":
+        wrapped = f"{_SH_PIPESTATUS_PROLOGUE}{command}{sep}{_SH_PIPESTATUS_EPILOGUE}"
+    else:
+        wrapped = f"{command}{sep}{_BASH_PIPESTATUS_EPILOGUE}"
+    return wrapped, {PIPESTATUS_ENV: target}
+
+
+def read_pipestatus(status_path: Path | None) -> list[int] | None:
+    """Read and remove the recorded ``PIPESTATUS`` side-channel file; None on any failure."""
+    if status_path is None:
+        return None
+    try:
+        raw = status_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    finally:
+        with contextlib.suppress(OSError):
+            status_path.unlink(missing_ok=True)
+    if not raw:
+        return None
+    codes: list[int] = []
+    for token in raw.split():
+        try:
+            codes.append(int(token))
+        except ValueError:
+            return None
+    return codes or None
+
+
+def format_exit_marker(
+    returncode: int | None, pipestatus: list[int] | None
+) -> tuple[str, list[int] | None]:
+    """Build ``[exit code: N]`` plus ``[pipeline exit codes: ...]`` when masked/non-zero."""
+    marker = f"[exit code: {returncode}]"
+    if pipestatus and len(pipestatus) > 1 and any(code != 0 for code in pipestatus):
+        joined = " ".join(str(code) for code in pipestatus)
+        return f"{marker} [pipeline exit codes: {joined}]", pipestatus
+    return marker, None
+
+
 class ShellTool:
     read_only = False
 
@@ -213,15 +292,25 @@ class ShellTool:
         log_dir = ctx.session_dir / "shell"
         index = len(list(log_dir.glob("*.log"))) + 1 if log_dir.exists() else 1
         log_path = log_dir / f"cmd-{index:04d}.log"
+        background = bool(args.get("run_in_background"))
+        pipestatus_path = (
+            log_path.with_suffix(".pipestatus")
+            if self.shell.kind == "bash" and not background
+            else None
+        )
+        wrapped_command, extra_env = wrap_command_for_pipestatus(
+            command, self.shell, pipestatus_path
+        )
+        run_env = {**ctx.env, **extra_env} if extra_env else ctx.env
         try:
             # Claim the number before the first await: a concurrent call (MCP direct mode)
             # would otherwise count the same logs and share this log and script file.
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path.touch()
             run = await ProcessRun.start(
-                self.shell.argv(command, script=log_path.with_suffix(".sh")),
+                self.shell.argv(wrapped_command, script=log_path.with_suffix(".sh")),
                 cwd=cwd,
-                env=shell_env(ctx.env),
+                env=shell_env(run_env),
                 log_path=log_path,
                 command=command,
             )
@@ -230,7 +319,7 @@ class ShellTool:
                 f"Error: could not start {self.shell.executable}: {exc}", is_error=True
             )
 
-        if args.get("run_in_background"):
+        if background:
             job = ctx.jobs.register(run)
             return ToolResult(
                 f"Started background job {job.id} (pid {run.pid}). Output is written to "
@@ -246,18 +335,29 @@ class ShellTool:
             finished = await run.wait(waited_s)
         except BaseException:  # the run was cancelled: the command must not outlive it
             await run.kill_on_cancel()
+            with contextlib.suppress(OSError):
+                if pipestatus_path is not None:
+                    pipestatus_path.unlink(missing_ok=True)
             raise
         text, _complete = run.output_text()
         if finished:
-            marker = f"[exit code: {run.returncode}]"
+            pipestatus = read_pipestatus(pipestatus_path)
+            marker, reported_pipe = format_exit_marker(run.returncode, pipestatus)
             meta: dict[str, Any] = {"exit_code": run.returncode}
+            if reported_pipe is not None:
+                meta["pipeline_exit_codes"] = reported_pipe
             if run.active:  # a process it started (`server &`) still writes to the output
                 job = ctx.jobs.register(run)
                 job.read_offset = run.total_bytes
+                pipe_suffix = (
+                    f" [pipeline exit codes: {' '.join(str(c) for c in reported_pipe)}]"
+                    if reported_pipe is not None
+                    else ""
+                )
                 marker = (
                     f"[exit code: {run.returncode}; a process it started is still running and "
                     f"writing to this output: background job {job.id}. Use job_output to "
-                    "read it, job_kill to stop it.]"
+                    f"read it, job_kill to stop it.]{pipe_suffix}"
                 )
                 meta["job_id"] = job.id
         else:
@@ -303,7 +403,11 @@ def _description(shell: ShellInfo) -> str:
             )
         elif shell.flavor == "sh":
             intro = "Execute a POSIX sh command (`sh -c`) and return its output."
-        return intro + common
+        pipe_note = (
+            " When the last pipeline has multiple stages and any stage exits non-zero, "
+            "`[pipeline exit codes: ...]` is appended to the exit marker."
+        )
+        return intro + common + pipe_note
     return (
         "Execute a PowerShell command (`-Command`) and return its output. Paths use native "
         "Windows form (`C:\\...`); read environment variables with `$env:NAME`. On Windows a "

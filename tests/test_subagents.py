@@ -51,6 +51,8 @@ def test_subagent_reports_back(tmp_path):
     assert [m.content for m in child_request.messages] == ["Where is x set?"]
     child_tools = {s.name for s in child_request.tools}
     assert "agent" not in child_tools
+    assert "baseline" not in child_tools
+    assert "baseline" in {t.name for t in parent.tools}
     assert not child_tools & {"edit", "write", "apply_patch"}
     assert parent.usage.requests == 4  # child calls are counted in the parent
     names = [e.name for e in events if e.type == "tool_started"]

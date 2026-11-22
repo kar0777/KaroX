@@ -9,7 +9,13 @@ import pytest
 
 from karox6.tools.jobs import JobKillTool, JobListTool, JobOutputTool
 from karox6.tools.proc import ProcessRun
-from karox6.tools.shell import ShellTool, detect_shell, is_msys_bash
+from karox6.tools.shell import (
+    ShellInfo,
+    ShellTool,
+    detect_shell,
+    is_msys_bash,
+    wrap_command_for_pipestatus,
+)
 
 
 def python(code):
@@ -410,3 +416,60 @@ def test_command_wait_cap_turns_a_long_wait_into_a_job(ctx):
         assert "later" in output.content
 
     asyncio.run(scenario())
+
+
+def test_pipeline_exit_codes_reported_when_stage_fails(ctx):
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash pipeline statuses")
+    result = shell(ctx, command="false | cat")
+    assert result.meta["exit_code"] == 0
+    assert result.meta["pipeline_exit_codes"] == [1, 0]
+    assert result.content.endswith("[exit code: 0] [pipeline exit codes: 1 0]")
+
+
+def test_pipeline_exit_codes_omitted_when_all_stages_succeed(ctx):
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash pipeline statuses")
+    result = shell(ctx, command="true | cat")
+    assert result.meta["exit_code"] == 0
+    assert "pipeline_exit_codes" not in result.meta
+    assert "[pipeline exit codes:" not in result.content
+    assert result.content.endswith("[exit code: 0]")
+
+
+def test_pipeline_exit_codes_multi_stage_and_explicit_exit_unchanged(ctx):
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash pipeline statuses")
+    multi = shell(ctx, command="false | true | (exit 2)")
+    assert multi.meta["exit_code"] == 2
+    assert multi.meta["pipeline_exit_codes"] == [1, 0, 2]
+    assert multi.content.endswith("[exit code: 2] [pipeline exit codes: 1 0 2]")
+
+    exited = shell(ctx, command="false | cat; exit 3")
+    assert exited.meta["exit_code"] == 3
+    assert "pipeline_exit_codes" not in exited.meta
+    assert "[pipeline exit codes:" not in exited.content
+    assert exited.content.endswith("[exit code: 3]")
+
+    with_e_and_ifs = shell(ctx, command="set -e; IFS=,:; false | cat")
+    assert with_e_and_ifs.meta["exit_code"] == 0
+    assert with_e_and_ifs.meta["pipeline_exit_codes"] == [1, 0]
+    assert with_e_and_ifs.content.endswith("[exit code: 0] [pipeline exit codes: 1 0]")
+
+
+def test_pipeline_wrapper_and_description_skip_pwsh(tmp_path):
+    bash_tool = ShellTool(ShellInfo("bash", "/bin/bash", "bash"))
+    sh_tool = ShellTool(ShellInfo("bash", "/bin/sh", "sh"))
+    pwsh_tool = ShellTool(ShellInfo("pwsh", "pwsh", "pwsh"))
+
+    assert "[pipeline exit codes:" in bash_tool.description
+    assert "[pipeline exit codes:" in sh_tool.description
+    assert "[pipeline exit codes:" not in pwsh_tool.description
+
+    cmd, env = wrap_command_for_pipestatus("false | cat", pwsh_tool.shell, tmp_path / "ps")
+    assert cmd == "false | cat"
+    assert env == {}
+
+    sh_cmd, sh_env = wrap_command_for_pipestatus("false | cat", sh_tool.shell, tmp_path / "ps")
+    assert "BASH_VERSION" in sh_cmd
+    assert "KAROX_PIPESTATUS_FILE" in sh_env
