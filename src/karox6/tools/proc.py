@@ -13,13 +13,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from karox6.lifetime import (
-    bind_to_karox,
-    close_run_job,
-    create_run_job,
-    join_karox_job,
-    terminate_run_job,
-)
+from karox6.lifetime import bind_to_karox, join_karox_job
 
 HEAD_CAP = 64 * 1024
 TAIL_CAP = 64 * 1024
@@ -35,14 +29,7 @@ def clean_text(data: bytes) -> str:
 class ProcessRun:
     """One running child process whose merged stdout/stderr streams into ``log_path``."""
 
-    def __init__(
-        self,
-        proc: asyncio.subprocess.Process,
-        log_path: Path,
-        command: str,
-        *,
-        job: int | None = None,
-    ) -> None:
+    def __init__(self, proc: asyncio.subprocess.Process, log_path: Path, command: str) -> None:
         self.proc = proc
         self.log_path = log_path
         self.command = command
@@ -51,31 +38,13 @@ class ProcessRun:
         self.head = bytearray()
         self.tail = bytearray()
         self.killed = False
-        self._job = job
         self._cleanup_paths: list[Path] = []
         self._log = log_path.open("wb")
         self.reader = asyncio.create_task(self._pump())
 
-    def __del__(self) -> None:
-        self.close_job()
-
-    def close_job(self) -> None:
-        """Close the Windows per-run job handle without terminating its processes."""
-        job = getattr(self, "_job", None)
-        self._job = None
-        if job is not None:
-            close_run_job(job)
-
     @classmethod
     async def start(
-        cls,
-        argv: list[str],
-        *,
-        cwd: Path,
-        env: Mapping[str, str],
-        log_path: Path,
-        command: str,
-        isolate_tree: bool = False,
+        cls, argv: list[str], *, cwd: Path, env: Mapping[str, str], log_path: Path, command: str
     ) -> ProcessRun:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         kwargs: dict[str, object] = {}
@@ -94,8 +63,7 @@ class ProcessRun:
             **kwargs,  # type: ignore[arg-type]
         )
         bind_to_karox(proc.pid)
-        job = create_run_job(proc.pid) if isolate_tree else None
-        return cls(proc, log_path, command, job=job)
+        return cls(proc, log_path, command)
 
     async def _pump(self) -> None:
         stream = self.proc.stdout
@@ -204,12 +172,12 @@ class ProcessRun:
         with contextlib.suppress(OSError, ValueError):
             self._log.flush()
 
-    async def kill_on_cancel(self, *, force_tree: bool = False) -> None:
+    async def kill_on_cancel(self) -> None:
         """kill() for a caller that is being cancelled: the kill (bounded by its own
         timeouts) is seen through even if the caller is cancelled again meanwhile, so a
         second Ctrl+C or a shutdown cannot leave the command running. A cancellation that
         arrived during the kill is raised afterwards."""
-        kill = asyncio.ensure_future(self.kill(force_tree=force_tree))
+        kill = asyncio.ensure_future(self.kill())
         interrupted = False
         while not kill.done():
             try:
@@ -219,25 +187,17 @@ class ProcessRun:
         if interrupted:
             raise asyncio.CancelledError
 
-    async def kill(self, *, force_tree: bool = False) -> None:
+    async def kill(self) -> None:
         # A child the command left behind (`server &`) may still hold the output pipe
         # after the shell itself exited. On POSIX its process group outlives the shell and
-        # can still be signalled; on Windows an isolated per-run job tracks all descendants.
+        # can still be signalled; on Windows a dead PID may already be someone else's.
         leader_running = self.proc.returncode is None
-        lingering = not self.reader.done() and (sys.platform != "win32" or self._job is not None)
-        if leader_running or lingering or force_tree:
+        lingering = not self.reader.done() and sys.platform != "win32"
+        if leader_running or lingering:
             self.killed = self.killed or leader_running
-            if leader_running or sys.platform != "win32":
-                await asyncio.to_thread(kill_tree, self.proc.pid)
-            job = self._job
-            self._job = None
-            if job is not None:
-                await asyncio.to_thread(terminate_run_job, job)
-            if leader_running:
-                with contextlib.suppress(TimeoutError, ProcessLookupError):
-                    await asyncio.wait_for(self.exited(), 5.0)
-        else:
-            self.close_job()
+            await asyncio.to_thread(kill_tree, self.proc.pid)
+            with contextlib.suppress(TimeoutError, ProcessLookupError):
+                await asyncio.wait_for(self.exited(), 5.0)
         if not self.reader.done():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(self.reader), 1.0)

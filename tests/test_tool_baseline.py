@@ -12,7 +12,7 @@ import pytest
 
 from karox6.tools import baseline as baseline_mod
 from karox6.tools.base import ToolContext
-from karox6.tools.baseline import BASELINE_HEADER, WORKSPACE_PATH_WARNING, BaselineTool
+from karox6.tools.baseline import BASELINE_HEADER, BaselineTool
 from karox6.tools.files import FileTracker
 from karox6.tools.jobs import JobManager
 from karox6.tools.registry import build_tools
@@ -67,6 +67,7 @@ def _snapshot_repo(ws: Path) -> dict[str, bytes]:
         "head": _git(ws, "rev-parse", "HEAD").stdout,
         "branch": _git(ws, "symbolic-ref", "HEAD").stdout,
         "staged_app": _git(ws, "show", ":app.txt").stdout,
+        "all_refs": _git(ws, "for-each-ref").stdout,
         "refs_heads": _git(ws, "for-each-ref", "refs/heads").stdout,
         "refs_stash": _git(ws, "for-each-ref", "refs/stash").stdout,
         "config": (ws / ".git" / "config").read_bytes(),
@@ -120,6 +121,13 @@ def _create_dir_link(src: Path, dst: Path) -> None:
         os.symlink(src, dst, target_is_directory=True)
 
 
+def _remove_dir_link(link: Path) -> None:
+    if link.is_symlink():
+        link.unlink()
+    elif link.exists():
+        os.rmdir(link)
+
+
 def test_baseline_passing_failing_and_head_content(tmp_path):
     ws = tmp_path / "repo"
     _init_repo(ws)
@@ -140,13 +148,15 @@ def test_baseline_passing_failing_and_head_content(tmp_path):
     assert "CONTENT=head-version" in res_pass.content
     assert "[exit code: 0]" in res_pass.content
     assert res_pass.meta["exit_code"] == 0
+    assert "cleanup_failed" not in res_pass.meta
     _assert_untouched(ws, expected_files, snap)
 
-    # Confirm the temp checkout directory uses the PID-tagged prefix and was removed.
+    # Confirm the temp checkout directory uses the hostname+PID-tagged prefix and was removed.
     cwd_line = next(ln for ln in res_pass.content.splitlines() if ln.startswith("CWD="))
     checkout_path = Path(cwd_line.removeprefix("CWD="))
     assert checkout_path.resolve() != ws.resolve()
-    assert checkout_path.parent.name.startswith(f"karox-baseline-{os.getpid()}-")
+    expected_prefix = f"karox-baseline-{baseline_mod._safe_hostname()}-{os.getpid()}-"
+    assert checkout_path.parent.name.startswith(expected_prefix)
     assert not checkout_path.parent.exists()
 
     # Failing command: non-zero exit reported, workspace and refs still clean.
@@ -175,6 +185,30 @@ def test_baseline_timeout_kills_process_and_cleans_clone(tmp_path):
     assert res.meta.get("timed_out") is True
     assert "timed out" in res.content
     _assert_untouched(ws, expected_files, snap)
+
+
+def test_baseline_reports_cleanup_failure(tmp_path, monkeypatch):
+    ws = tmp_path / "repo"
+    _init_repo(ws)
+    ctx = _make_ctx(tmp_path, ws)
+
+    leaked: list[Path] = []
+
+    def fail_cleanup(temp_parent: Path) -> bool:
+        leaked.append(temp_parent)
+        return False
+
+    monkeypatch.setattr(baseline_mod, "_cleanup_temp_dir", fail_cleanup)
+    try:
+        res = _run_baseline(ctx, command="echo hello")
+        assert not res.is_error, res.content
+        assert res.meta.get("cleanup_failed") is True
+        assert res.meta.get("cleanup_path") == str(leaked[0])
+        assert "failed to remove temporary checkout directory" in res.content.lower()
+        assert str(leaked[0]) in res.content
+    finally:
+        for path in leaked:
+            baseline_mod._rmtree_force(path)
 
 
 def test_baseline_isolates_stash_branches_and_config_from_user_repo(tmp_path):
@@ -222,6 +256,31 @@ def test_baseline_isolates_stash_branches_and_config_from_user_repo(tmp_path):
     assert _git(ws, "config", "--local", "--get", "user.foo").returncode != 0
 
 
+def test_baseline_removes_origin_so_git_push_cannot_change_user_refs(tmp_path):
+    ws = tmp_path / "repo"
+    _init_repo(ws)
+    expected_files, snap = _dirty_tree_with_stash(ws)
+    ctx = _make_ctx(tmp_path, ws)
+
+    push_attempt = _python(
+        "import subprocess; "
+        "remotes = subprocess.run(['git', 'remote'], capture_output=True, text=True, check=True); "
+        "assert remotes.stdout.strip() == '', remotes.stdout; "
+        "p1 = subprocess.run(['git', 'push', 'origin', 'HEAD:refs/heads/injected']); "
+        "subprocess.run(['git', 'tag', 'injected-tag'], check=True); "
+        "p2 = subprocess.run(['git', 'push', '--tags']); "
+        "print(f'PUSH_RCS={p1.returncode},{p2.returncode}')"
+    )
+    res = _run_baseline(ctx, command=push_attempt)
+    assert not res.is_error, res.content
+    assert res.meta["exit_code"] == 0, res.content
+    rc_line = next(ln for ln in res.content.splitlines() if ln.startswith("PUSH_RCS="))
+    rc1, rc2 = (int(x) for x in rc_line.removeprefix("PUSH_RCS=").split(","))
+    assert rc1 != 0
+    assert rc2 != 0
+    _assert_untouched(ws, expected_files, snap)
+
+
 def test_baseline_never_calls_git_worktree_and_preserves_stale_worktree(tmp_path, monkeypatch):
     ws = tmp_path / "repo"
     _init_repo(ws)
@@ -250,19 +309,52 @@ def test_baseline_never_calls_git_worktree_and_preserves_stale_worktree(tmp_path
     [
         "npm ci",
         "npm install",
+        "npm i",
         "npm add left-pad",
+        "npm uninstall left-pad",
+        "npm rm left-pad",
+        "npm prune",
+        "npm update",
+        "npm up",
+        "npm dedupe",
+        "npm rebuild",
+        "npm link",
+        "npm -w pkg install",
+        "npm --workspace pkg prune",
         "pnpm ci",
         "pnpm install --frozen-lockfile",
         "pnpm add zod",
+        "pnpm remove zod",
+        "pnpm prune",
+        "pnpm update",
+        "yarn",
+        "yarn --frozen-lockfile",
         "yarn install",
         "yarn add react",
+        "yarn remove react",
+        "bun install",
+        "bun i",
+        "bun add zod",
+        "bun remove zod",
         "pip install -e .",
         "pip3 install pytest",
+        "pip uninstall pytest",
         "python -m pip install -e .",
         "uv pip install pytest",
         "uv sync",
         "uv add ruff",
+        "uv remove ruff",
         "poetry install",
+        "poetry add requests",
+        "poetry remove requests",
+        "pdm install",
+        "pdm add httpx",
+        "conda install numpy",
+        "conda remove numpy",
+        "pipx install ruff",
+        "python setup.py develop",
+        "python3 setup.py install",
+        "./setup.py develop",
         "echo pre && npm ci",
     ],
 )
@@ -286,11 +378,18 @@ def test_baseline_refuses_package_install_commands(tmp_path, cmd):
     [
         "npm test",
         "npm run lint",
+        "npm -w pkg test",
         "pnpm test",
         "yarn test",
+        "yarn --version",
+        "bun test",
         "uv run pytest",
         "poetry run pytest",
+        "pdm run pytest",
+        "conda list",
+        "pipx list",
         "pip list",
+        "python setup.py --version",
         "pytest -k install",
         "echo 'npm install'",
     ],
@@ -346,19 +445,45 @@ def test_baseline_missing_or_unmappable_subdir_returns_error(tmp_path, monkeypat
     assert "could not be mapped" in res_unmapped.content.lower()
 
 
-def test_baseline_warns_when_command_contains_workspace_path(tmp_path):
+def test_baseline_refuses_command_containing_workspace_path_before_running(tmp_path, monkeypatch):
     ws = tmp_path / "repo"
     _init_repo(ws)
     ctx = _make_ctx(tmp_path, ws)
 
+    started = False
+
+    async def fail_start(*args, **kwargs):
+        nonlocal started
+        started = True
+        raise AssertionError("ProcessRun.start must not be called")
+
+    monkeypatch.setattr(baseline_mod.ProcessRun, "start", fail_start)
+
     res = _run_baseline(ctx, command=f"echo {shlex.quote(ws.as_posix())}")
-    assert not res.is_error, res.content
-    assert res.content.startswith(WORKSPACE_PATH_WARNING + "\n")
-    assert BASELINE_HEADER in res.content
+    assert res.is_error
+    assert "absolute workspace path" in res.content.lower()
+    assert not started
+
+    # Subdir workspace referencing parent repo_root is also refused before ProcessRun.start.
+    sub = ws / "subpkg"
+    sub.mkdir()
+    (sub / "f.txt").write_text("ok\n")
+    assert _git(ws, "add", ".").returncode == 0
+    assert _git(ws, "commit", "-m", "subpkg").returncode == 0
+    res_root = _run_baseline(_make_ctx(tmp_path / "s2", sub), command=f"ls {ws.as_posix()}")
+    assert res_root.is_error
+    assert "absolute workspace path" in res_root.content.lower()
+    assert not started
 
     if sys.platform == "win32":
+        win_path = str(ws.resolve())
         posix = ws.resolve().as_posix()
         msys = f"/{posix[0].lower()}{posix[2:]}"
+        assert baseline_mod._command_references_workspace(f"cat {win_path}\\app.txt", ws)
+        assert baseline_mod._command_references_workspace(
+            f"cat {win_path.replace(chr(92), chr(92) * 2)}", ws
+        )
+        assert baseline_mod._command_references_workspace(f"cd {posix.upper()} && pytest", ws)
         assert baseline_mod._command_references_workspace(f"cd {msys} && pytest", ws)
         assert not baseline_mod._command_references_workspace(f"cd {posix}-other && pytest", ws)
 
@@ -421,110 +546,125 @@ def test_baseline_pythonpath_prepends_checkout_and_src_layout(tmp_path):
     assert Path(lines_src["P1"]).resolve() == (Path(lines_src["CWD"]) / "src").resolve()
 
 
-def test_baseline_node_modules_and_command_created_links_preserve_targets(tmp_path):
+def test_baseline_node_env_uses_path_and_node_path_without_linking(tmp_path):
     ws = tmp_path / "node_repo"
     _init_repo(ws)
-    nm = ws / "node_modules" / "demo-lib"
-    nm.mkdir(parents=True)
-    sentinel = nm / "index.js"
+    nm = ws / "node_modules"
+    (nm / "demo-lib").mkdir(parents=True)
+    sentinel = nm / "demo-lib" / "index.js"
     sentinel.write_bytes(b"module.exports = 42;\n")
+    bin_dir = nm / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "fake-tool").write_bytes(b"#!/bin/sh\necho fake\n")
 
     ext_target = tmp_path / "external_target"
     ext_target.mkdir()
     ext_sentinel = ext_target / "precious.txt"
     ext_sentinel.write_bytes(b"do-not-delete\n")
 
-    link_code = (
-        "import os, sys; from pathlib import Path; "
-        "p = Path('node_modules/demo-lib/index.js'); "
-        "print('EXISTS=' + str(p.exists())); "
-        "print('TEXT=' + (p.read_text().strip() if p.exists() else '')); "
-        f"target = Path({str(ext_target)!r}); "
-        "dst = Path('extra_link'); "
-        "import _winapi; _winapi.CreateJunction(str(target), str(dst))"
-        if sys.platform == "win32"
-        else "import os; from pathlib import Path; "
-        "p = Path('node_modules/demo-lib/index.js'); "
-        "print('EXISTS=' + str(p.exists())); "
-        "print('TEXT=' + (p.read_text().strip() if p.exists() else '')); "
-        f"os.symlink({str(ext_target)!r}, 'extra_link', target_is_directory=True)"
+    check_code = (
+        "import os; from pathlib import Path; "
+        "print('NM_EXISTS=' + str(Path('node_modules').exists())); "
+        "print('NODE_PATH=' + os.environ.get('NODE_PATH', '')); "
+        "print('PATH_ALL=' + os.environ.get('PATH', '')); "
+        "Path('node_modules/clone_only').mkdir(parents=True); "
+        "Path('node_modules/clone_only/x.js').write_text('hi'); "
+        + (
+            f"import _winapi; _winapi.CreateJunction({str(ext_target)!r}, 'extra_link')"
+            if sys.platform == "win32"
+            else f"os.symlink({str(ext_target)!r}, 'extra_link', target_is_directory=True)"
+        )
     )
 
+    merged = baseline_mod._merge_node_env({"PATH": "/usr/bin"}, ws)
+    assert merged["PATH"].split(os.pathsep)[0] == str(bin_dir)
+    assert merged["NODE_PATH"].split(os.pathsep)[0] == str(nm)
+
     ctx = _make_ctx(tmp_path, ws)
-    res = _run_baseline(ctx, command=_python(link_code))
+    res = _run_baseline(ctx, command=_python(check_code))
     assert not res.is_error, res.content
-    assert "EXISTS=True" in res.content
-    assert "TEXT=module.exports = 42;" in res.content
+    lines = dict(ln.split("=", 1) for ln in res.content.splitlines() if "=" in ln)
+    assert lines["NM_EXISTS"] == "False"
+    assert Path(lines["NODE_PATH"].split(os.pathsep)[0]).resolve() == nm.resolve()
+    path_entries = [Path(p).resolve() for p in lines["PATH_ALL"].split(os.pathsep) if p]
+    assert bin_dir.resolve() in path_entries
+    # User's node_modules was untouched; writes in clone stayed in clone.
+    assert not (nm / "clone_only").exists()
     assert sentinel.read_bytes() == b"module.exports = 42;\n"
+    # Command-created link inside clone did not touch its target on rmtree.
     assert ext_sentinel.read_bytes() == b"do-not-delete\n"
 
 
-def test_baseline_link_removal_failure_stops_rmtree(tmp_path, monkeypatch):
-    target = tmp_path / "target_dir"
+def test_baseline_cleanup_refuses_symlink_or_junction_temp_dir(tmp_path):
+    target = tmp_path / "precious_target"
     target.mkdir()
     sentinel = target / "keep.txt"
     sentinel.write_bytes(b"intact\n")
 
-    temp_parent = tmp_path / "karox-baseline-999999-test"
-    wt = temp_parent / "wt"
-    wt.mkdir(parents=True)
-    link = wt / "node_modules"
-    _create_dir_link(target, link)
-
-    rmtree_called = False
-    real_rmtree = shutil.rmtree
-
-    def spy_rmtree(*args, **kwargs):
-        nonlocal rmtree_called
-        rmtree_called = True
-        return real_rmtree(*args, **kwargs)
-
-    monkeypatch.setattr(baseline_mod.shutil, "rmtree", spy_rmtree)
-    monkeypatch.setattr(baseline_mod, "_remove_link_only", lambda _p: False)
-
+    link_dir = tmp_path / f"karox-baseline-{baseline_mod._safe_hostname()}-999999-link"
+    _create_dir_link(target, link_dir)
     try:
-        assert baseline_mod._cleanup_temp_dir(temp_parent, [link]) is False
-        assert not rmtree_called
-        assert temp_parent.exists()
+        assert baseline_mod._cleanup_temp_dir(link_dir) is False
+        assert baseline_mod._is_link(link_dir)
         assert sentinel.read_bytes() == b"intact\n"
     finally:
-        # Clean up the link directly so pytest tmp_path cleanup never traverses it.
-        if link.is_symlink():
-            link.unlink()
-        elif link.exists():
-            os.rmdir(link)
+        _remove_dir_link(link_dir)
 
 
-def test_baseline_crash_recovery_cleans_dead_pid_dirs_safely(tmp_path):
-    # Obtain a guaranteed-dead PID from an exited subprocess.
+def test_baseline_stale_cleanup_checks_host_pid_age_and_links(tmp_path):
     dead_proc = subprocess.Popen([sys.executable, "-c", "pass"])
     dead_proc.wait(timeout=10)
     dead_pid = dead_proc.pid
 
     fake_tmp = tmp_path / "fake_tmp"
     fake_tmp.mkdir()
+    host = baseline_mod._safe_hostname()
+    old_mtime = time.time() - 7200
 
-    target = tmp_path / "target_nm"
-    target.mkdir()
-    sentinel = target / "pkg.txt"
-    sentinel.write_bytes(b"survive\n")
+    # 1. Eligible stale dir: same host, dead PID, older than 1 hour -> removed.
+    stale_dir = fake_tmp / f"karox-baseline-{host}-{dead_pid}-stale1"
+    (stale_dir / "wt").mkdir(parents=True)
+    (stale_dir / "wt" / "file.txt").write_bytes(b"old\n")
+    os.utime(stale_dir, (old_mtime, old_mtime))
 
-    dead_dir = fake_tmp / f"karox-baseline-{dead_pid}-stale"
-    (dead_dir / "wt").mkdir(parents=True)
-    (dead_dir / "wt" / "file.txt").write_bytes(b"old\n")
-    _create_dir_link(target, dead_dir / "wt" / "node_modules")
+    # 2. Fresh dead-PID dir (< 1 hour old) -> kept.
+    fresh_dir = fake_tmp / f"karox-baseline-{host}-{dead_pid}-fresh1"
+    fresh_dir.mkdir()
 
-    live_dir = fake_tmp / f"karox-baseline-{os.getpid()}-live"
+    # 3. Different hostname (old + dead PID) -> kept.
+    other_host_dir = fake_tmp / f"karox-baseline-otherhost-{dead_pid}-stale2"
+    other_host_dir.mkdir()
+    os.utime(other_host_dir, (old_mtime, old_mtime))
+
+    # 4. Live PID (same host + old) -> kept.
+    live_dir = fake_tmp / f"karox-baseline-{host}-{os.getpid()}-live1"
     live_dir.mkdir()
+    os.utime(live_dir, (old_mtime, old_mtime))
+
+    # 5. Stale candidate that is itself a symlink/junction -> kept and target untouched.
+    link_target = tmp_path / "link_target"
+    link_target.mkdir()
+    sentinel = link_target / "survive.txt"
+    sentinel.write_bytes(b"survive\n")
+    link_stale = fake_tmp / f"karox-baseline-{host}-{dead_pid}-link1"
+    _create_dir_link(link_target, link_stale)
+
+    # 6. Unrelated dir -> kept.
     other_dir = fake_tmp / "unrelated-dir"
     other_dir.mkdir()
 
-    baseline_mod._cleanup_stale_temp_dirs(fake_tmp)
+    try:
+        baseline_mod._cleanup_stale_temp_dirs(fake_tmp)
 
-    assert not dead_dir.exists()
-    assert sentinel.read_bytes() == b"survive\n"
-    assert live_dir.exists()
-    assert other_dir.exists()
+        assert not stale_dir.exists()
+        assert fresh_dir.exists()
+        assert other_host_dir.exists()
+        assert live_dir.exists()
+        assert baseline_mod._is_link(link_stale)
+        assert sentinel.read_bytes() == b"survive\n"
+        assert other_dir.exists()
+    finally:
+        _remove_dir_link(link_stale)
 
 
 def test_baseline_strips_git_override_env_vars(tmp_path, monkeypatch):
@@ -596,57 +736,6 @@ def test_baseline_disables_hooks_fsmonitor_and_lfs_smudge(tmp_path, monkeypatch)
         assert any(a.startswith("core.hooksPath=") for a in cmd), cmd
         assert "core.fsmonitor=false" in cmd, cmd
         assert env.get("GIT_LFS_SKIP_SMUDGE") == "1"
-
-
-def test_baseline_kills_lingering_grandchild_before_cleanup(tmp_path):
-    ws = tmp_path / "repo"
-    _init_repo(ws)
-    ctx = _make_ctx(tmp_path, ws)
-    pid_file = tmp_path / "grandchild.pid"
-
-    # Spawn a grandchild with redirected stdio that holds a file open inside the temp checkout.
-    grandchild_script = tmp_path / "grandchild.py"
-    grandchild_script.write_text(
-        "import os, time\n"
-        "from pathlib import Path\n"
-        "f = open('held.lock', 'wb')\n"
-        "f.write(b'locked')\n"
-        "f.flush()\n"
-        f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
-        "time.sleep(30)\n"
-    )
-    launcher_script = tmp_path / "launcher.py"
-    launcher_script.write_text(
-        "import os, subprocess, sys, time\n"
-        "from pathlib import Path\n"
-        f"subprocess.Popen([sys.executable, {str(grandchild_script)!r}], "
-        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
-        f"pf = Path({str(pid_file)!r})\n"
-        "deadline = time.monotonic() + 10\n"
-        "while time.monotonic() < deadline and not pf.exists():\n"
-        "    time.sleep(0.05)\n"
-        "print('CWD=' + os.getcwd())\n"
-    )
-    launcher = (
-        f"{shlex.quote(sys.executable.replace(chr(92), '/'))} "
-        f"{shlex.quote(launcher_script.as_posix())}"
-    )
-    res = _run_baseline(ctx, command=launcher)
-    assert not res.is_error, res.content
-    assert res.meta["exit_code"] == 0, res.content
-    assert pid_file.exists()
-    grandchild_pid = int(pid_file.read_text().strip())
-
-    # Checkout dir must be completely removed (impossible on Windows if grandchild stayed alive).
-    cwd_line = next(ln for ln in res.content.splitlines() if ln.startswith("CWD="))
-    checkout_dir = Path(cwd_line.removeprefix("CWD="))
-    assert not checkout_dir.parent.exists()
-
-    # Wait briefly for OS process table cleanup and verify grandchild is dead.
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and baseline_mod._is_pid_alive(grandchild_pid):
-        time.sleep(0.05)
-    assert not baseline_mod._is_pid_alive(grandchild_pid)
 
 
 def test_baseline_clean_tree_and_mid_merge_are_allowed(tmp_path):
@@ -752,9 +841,9 @@ def test_baseline_cancellation_during_clone_is_shielded(tmp_path, monkeypatch):
         events.append("clone_done")
         return res
 
-    def spy_cleanup(temp_parent: Path, created_links: list[Path]):
+    def spy_cleanup(temp_parent: Path):
         events.append("cleanup_start")
-        return real_cleanup(temp_parent, created_links)
+        return real_cleanup(temp_parent)
 
     monkeypatch.setattr(baseline_mod, "_prepare_checkout", slow_prepare)
     monkeypatch.setattr(baseline_mod, "_cleanup_temp_dir", spy_cleanup)

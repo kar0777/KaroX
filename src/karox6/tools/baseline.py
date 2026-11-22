@@ -1,11 +1,10 @@
 """The baseline tool: run one command against HEAD in a temporary isolated clone.
 
 Never touches the user's working tree, index, refs, stashes, or ``.git/config``.
-Creates an isolated temporary checkout via ``git clone --shared --no-checkout -q``
-followed by ``git checkout -q --detach <HEAD sha>`` with hooks and fsmonitor disabled,
-runs the command there with a hard tree-kill timeout, kills any lingering descendants
-before cleanup, removes links safely (aborting deletion if a link cannot be removed),
-and removes the temporary directory with ``shutil.rmtree``.
+Creates an isolated temporary checkout via ``git clone --shared --no-checkout -q``,
+removes the ``origin`` remote so pushes cannot reach the user's repository, checks out
+``HEAD`` detached with hooks and fsmonitor disabled, runs the command with a hard
+tree-kill timeout, removes the temporary directory, and reports any cleanup failure.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -34,7 +34,6 @@ from karox6.tools.shell import (
     INLINE_CHARS,
     ShellInfo,
     format_exit_marker,
-    normalize_exit_code,
     read_pipestatus,
     shell_env,
     wrap_command_for_pipestatus,
@@ -47,21 +46,17 @@ BASELINE_HEADER = (
     "Untracked and ignored files (build outputs, compiled extensions, virtualenvs) are not "
     "present there."
 )
-WORKSPACE_PATH_WARNING = (
-    "Warning: command contains the absolute workspace path and may run on the real working "
-    "tree instead of the temporary HEAD checkout."
+_WORKSPACE_PATH_ERROR = (
+    "Error: baseline refuses commands containing the absolute workspace path "
+    "(they would access the real working tree instead of the temporary HEAD checkout). "
+    "Use relative paths instead."
 )
 _GIT_TIMEOUT_S = 120
 _TEMP_PREFIX = "karox-baseline-"
-_TEMP_DIR_RE = re.compile(r"^karox-baseline-(\d+)-")
+_STALE_SUFFIX_RE = re.compile(r"^(\d+)-[^-]+$")
+_STALE_MIN_AGE_S = 3600.0
 _STRIP_GIT_ENV = frozenset(
-    {
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_COMMON_DIR",
-    }
+    {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"}
 )
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 _PIP_NAME_RE = re.compile(r"^pip(?:\d+(?:\.\d+)*)?$")
@@ -83,31 +78,65 @@ _WRAPPER_TOOLS = frozenset(
     }
 )
 _WRAPPER_VALUE_FLAGS = frozenset(
+    {"-u", "--user", "-g", "--group", "-C", "-n", "--signal", "-s", "-k", "--kill-after"}
+)
+_JS_MUTATING = frozenset(
     {
-        "-u",
-        "--user",
-        "-g",
-        "--group",
-        "-C",
-        "-n",
-        "--signal",
-        "-s",
-        "-k",
-        "--kill-after",
+        "install",
+        "i",
+        "ci",
+        "add",
+        "remove",
+        "rm",
+        "uninstall",
+        "prune",
+        "update",
+        "up",
+        "dedupe",
+        "rebuild",
+        "link",
+        "unlink",
     }
 )
 _PKG_INSTALL_SUBCOMMANDS: dict[str, frozenset[str]] = {
-    "npm": frozenset({"ci", "install", "i", "add"}),
-    "pnpm": frozenset({"ci", "install", "i", "add"}),
-    "yarn": frozenset({"ci", "install", "i", "add"}),
-    "pip": frozenset({"install"}),
-    "uv": frozenset({"pip", "sync", "add"}),
-    "poetry": frozenset({"install", "add"}),
+    "npm": _JS_MUTATING,
+    "pnpm": _JS_MUTATING,
+    "yarn": _JS_MUTATING,
+    "bun": _JS_MUTATING,
+    "pip": frozenset({"install", "uninstall"}),
+    "uv": frozenset({"pip", "sync", "add", "remove", "lock", "venv"}),
+    "poetry": frozenset({"install", "add", "remove", "update", "sync", "lock"}),
+    "pdm": frozenset({"install", "add", "remove", "update", "sync", "lock"}),
+    "conda": frozenset({"install", "remove", "uninstall", "update", "upgrade", "create", "env"}),
+    "pipx": frozenset(
+        {
+            "install",
+            "uninstall",
+            "upgrade",
+            "upgrade-all",
+            "reinstall",
+            "reinstall-all",
+            "inject",
+            "uninject",
+        }
+    ),
 }
 _PKG_VALUE_FLAGS: dict[str, frozenset[str]] = {
-    "npm": frozenset({"-C", "--prefix", "--userconfig", "--globalconfig"}),
-    "pnpm": frozenset({"-C", "--dir", "--filter", "-F", "--config"}),
+    "npm": frozenset(
+        {
+            "-C",
+            "--prefix",
+            "--userconfig",
+            "--globalconfig",
+            "-w",
+            "--workspace",
+            "--registry",
+            "--cache",
+        }
+    ),
+    "pnpm": frozenset({"-C", "--dir", "--filter", "-F", "--config", "--workspace-concurrency"}),
     "yarn": frozenset({"--cwd", "--modules-folder", "--cache-folder"}),
+    "bun": frozenset({"--cwd", "-c", "--config", "--env-file"}),
     "pip": frozenset(
         {
             "-c",
@@ -122,7 +151,11 @@ _PKG_VALUE_FLAGS: dict[str, frozenset[str]] = {
     ),
     "uv": frozenset({"--directory", "--project", "--config-file", "--cache-dir", "--python", "-p"}),
     "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
+    "pdm": frozenset({"-p", "--project", "-c", "--config"}),
+    "conda": frozenset({"-n", "--name", "-p", "--prefix"}),
+    "pipx": frozenset({"--python"}),
 }
+_SETUP_PY_MUTATING = frozenset({"install", "develop", "easy_install"})
 
 
 @dataclass(slots=True)
@@ -219,6 +252,14 @@ def _prepare_checkout(
         detail = clone.err or clone.text.strip()
         return f"Error: git clone failed: {detail}"
 
+    try:
+        rm_origin = _git(temp_parent, "-C", str(wt_dir), *git_opts, "remote", "remove", "origin")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"Error: could not disconnect temporary clone remote ({exc})."
+    if rm_origin.returncode != 0:
+        detail = rm_origin.err or rm_origin.text.strip()
+        return f"Error: could not disconnect temporary clone remote: {detail}"
+
     checkout_opts = list(git_opts)
     # Match the repo's checkout formatting (e.g. core.autocrlf=false on Windows)
     # without sharing .git/config with the temporary clone.
@@ -248,107 +289,20 @@ def _prepare_checkout(
     return None
 
 
-def _is_junction(path: Path) -> bool:
-    isjunc = getattr(os.path, "isjunction", None)
-    if isjunc is None:
-        return False
-    try:
-        return bool(isjunc(path))
-    except OSError:
-        return False
+def _safe_hostname() -> str:
+    raw = socket.gethostname() or "host"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", raw).strip("._-")
+    return safe or "host"
 
 
 def _is_link(path: Path) -> bool:
+    isjunc = getattr(os.path, "isjunction", None)
     try:
-        return path.is_symlink() or _is_junction(path)
-    except OSError:
+        return path.is_symlink() or bool(isjunc is not None and isjunc(path))
+    except FileNotFoundError:
         return False
-
-
-def _link_node_modules(src_root: Path, dst_root: Path) -> Path | None:
-    """Link ``src_root/node_modules`` into ``dst_root/node_modules`` if missing; skip on error."""
-    src = src_root / "node_modules"
-    dst = dst_root / "node_modules"
-    if not src.is_dir() or dst.exists() or _is_link(dst):
-        return None
-    try:
-        if sys.platform == "win32":
-            import _winapi
-
-            _winapi.CreateJunction(str(src), str(dst))
-        else:
-            os.symlink(src, dst, target_is_directory=True)
     except OSError:
-        return None
-    return dst
-
-
-def _remove_link_only(path: Path) -> bool:
-    """Remove a symlink or Windows junction without ever touching its target.
-
-    Returns False if removal fails so cleanup stops instead of running ``shutil.rmtree``
-    through a live link.
-    """
-    is_sym = False
-    is_junc = False
-    try:
-        is_sym = path.is_symlink()
-        is_junc = _is_junction(path)
-    except OSError:
-        return False
-
-    if not is_sym and not is_junc:
-        try:
-            exists = path.exists()
-        except OSError:
-            return False
-        # Already gone: nothing to remove. If a real file/dir replaced it, refuse to rmdir it here.
-        return not exists
-
-    try:
-        if is_sym:
-            path.unlink()
-        else:
-            os.rmdir(path)
-    except OSError:
-        return False
-
-    try:
-        return not path.is_symlink() and not _is_junction(path) and not path.exists()
-    except OSError:
-        return False
-
-
-def _remove_all_links(root: Path, known_links: list[Path]) -> bool:
-    """Remove recorded links and any symlinks/junctions inside ``root`` before rmtree."""
-    for link in known_links:
-        if not _remove_link_only(link):
-            return False
-
-    stack = [root]
-    while stack:
-        current = stack.pop()
-        try:
-            with os.scandir(current) as it:
-                entries = list(it)
-        except OSError:
-            continue
-        for entry in entries:
-            entry_path = Path(entry.path)
-            try:
-                is_link = entry.is_symlink() or _is_junction(entry_path)
-            except OSError:
-                return False
-            if is_link:
-                if not _remove_link_only(entry_path):
-                    return False
-                continue
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append(entry_path)
-            except OSError:
-                continue
-    return True
+        return True
 
 
 def _handle_remove_readonly(func: Callable[..., Any], path: str, _exc: BaseException) -> None:
@@ -373,12 +327,12 @@ def _rmtree_force(path: Path) -> bool:
     return not path.exists()
 
 
-def _cleanup_temp_dir(temp_parent: Path, created_links: list[Path]) -> bool:
-    """Remove all links first (stopping on failure), then delete ``temp_parent``."""
-    if not temp_parent.exists() and not _is_link(temp_parent):
-        return True
-    if not _remove_all_links(temp_parent, created_links):
+def _cleanup_temp_dir(temp_parent: Path) -> bool:
+    """Remove ``temp_parent`` unless it is itself a symlink or Windows junction."""
+    if _is_link(temp_parent):
         return False
+    if not temp_parent.exists():
+        return True
     return _rmtree_force(temp_parent)
 
 
@@ -423,28 +377,42 @@ def _is_pid_alive(pid: int) -> bool:
         return True
 
 
-def _cleanup_stale_temp_dirs(base_dir: Path | None = None) -> None:
-    """Remove leftover ``karox-baseline-<pid>-*`` directories belonging to dead processes."""
+def _cleanup_stale_temp_dirs(
+    base_dir: Path | None = None, *, min_age_s: float = _STALE_MIN_AGE_S
+) -> None:
+    """Remove leftover ``karox-baseline-<host>-<pid>-<rand>`` dirs from dead processes."""
     root = base_dir if base_dir is not None else Path(tempfile.gettempdir())
+    prefix = f"{_TEMP_PREFIX}{_safe_hostname()}-"
     own_pid = os.getpid()
+    now = time.time()
+    getuid = getattr(os, "getuid", None)
+    own_uid = getuid() if getuid is not None else None
     try:
         with os.scandir(root) as it:
             entries = list(it)
     except OSError:
         return
     for entry in entries:
-        match = _TEMP_DIR_RE.match(entry.name)
+        if not entry.name.startswith(prefix):
+            continue
+        match = _STALE_SUFFIX_RE.fullmatch(entry.name[len(prefix) :])
         if not match:
             continue
+        entry_path = Path(entry.path)
         try:
-            if not entry.is_dir(follow_symlinks=False):
+            if _is_link(entry_path) or not entry.is_dir(follow_symlinks=False):
                 continue
+            st = entry.stat(follow_symlinks=False)
         except OSError:
+            continue
+        if own_uid is not None and st.st_uid != own_uid:
+            continue
+        if now - st.st_mtime <= min_age_s:
             continue
         pid = int(match.group(1))
         if pid == own_pid or _is_pid_alive(pid):
             continue
-        _cleanup_temp_dir(Path(entry.path), [])
+        _cleanup_temp_dir(entry_path)
 
 
 def _cmd_basename(token: str) -> str:
@@ -520,13 +488,13 @@ def _first_subcommand(args: list[str], value_flags: frozenset[str]) -> str | Non
     return None
 
 
-def _python_module_call(args: list[str]) -> tuple[str, list[str]] | None:
-    """If ``args`` invokes ``python ... -m <module> ...``, return ``(module, rest)``."""
+def _python_target(args: list[str]) -> tuple[str, str, list[str]] | None:
+    """Return ``('module', mod, rest)`` or ``('script', basename, rest)`` for a python call."""
     i = 0
     while i < len(args):
         arg = args[i]
         if arg == "-m" and i + 1 < len(args):
-            return args[i + 1].lower(), args[i + 2 :]
+            return "module", args[i + 1].lower(), args[i + 2 :]
         if arg in {"-c", "-"}:
             return None
         if arg in {"-X", "-W", "--check-hash-based-pycs"}:
@@ -535,7 +503,31 @@ def _python_module_call(args: list[str]) -> tuple[str, list[str]] | None:
         if arg.startswith("-"):
             i += 1
             continue
+        return "script", _cmd_basename(arg), args[i + 1 :]
+    return None
+
+
+def _check_pkg_tool(tool: str, rest: list[str]) -> str | None:
+    if tool not in _PKG_INSTALL_SUBCOMMANDS:
         return None
+    sub = _first_subcommand(rest, _PKG_VALUE_FLAGS.get(tool, frozenset()))
+    if sub in _PKG_INSTALL_SUBCOMMANDS[tool]:
+        return f"{tool} {sub}"
+    if (
+        tool == "yarn"
+        and sub is None
+        and not any(a in {"-v", "--version", "-h", "--help"} for a in rest)
+    ):
+        return "yarn"
+    return None
+
+
+def _check_setup_py(rest: list[str]) -> str | None:
+    for arg in rest:
+        if arg == "--":
+            break
+        if not arg.startswith("-") and arg.lower() in _SETUP_PY_MUTATING:
+            return f"setup.py {arg.lower()}"
     return None
 
 
@@ -575,24 +567,20 @@ def _scan_pkg_install_segment(args: list[str], shell: str, depth: int) -> str | 
     if name == "eval":
         return _package_install_command(" ".join(args[1:]), shell, depth + 1)
 
+    if name == "setup.py":
+        return _check_setup_py(args[1:])
+
     if _PYTHON_NAME_RE.match(name):
-        mod_call = _python_module_call(args[1:])
-        if mod_call is None:
+        target = _python_target(args[1:])
+        if target is None:
             return None
-        mod, rest = mod_call
-        tool = "pip" if _PIP_NAME_RE.match(mod) else mod
-        if tool in _PKG_INSTALL_SUBCOMMANDS:
-            sub = _first_subcommand(rest, _PKG_VALUE_FLAGS.get(tool, frozenset()))
-            if sub in _PKG_INSTALL_SUBCOMMANDS[tool]:
-                return f"{tool} {sub}"
-        return None
+        kind, value, rest = target
+        if kind == "module":
+            return _check_pkg_tool("pip" if _PIP_NAME_RE.match(value) else value, rest)
+        return _check_setup_py(rest) if value == "setup.py" else None
 
     tool = "pip" if _PIP_NAME_RE.match(name) else name
-    if tool in _PKG_INSTALL_SUBCOMMANDS:
-        sub = _first_subcommand(args[1:], _PKG_VALUE_FLAGS.get(tool, frozenset()))
-        if sub in _PKG_INSTALL_SUBCOMMANDS[tool]:
-            return f"{tool} {sub}"
-    return None
+    return _check_pkg_tool(tool, args[1:])
 
 
 def _package_install_command(command: str, shell: str = "bash", depth: int = 0) -> str | None:
@@ -621,12 +609,12 @@ def _package_install_command(command: str, shell: str = "bash", depth: int = 0) 
 
 def _command_references_workspace(command: str, *paths: Path) -> bool:
     """Return True when ``command`` explicitly contains an absolute workspace/repo path."""
-    normalized_cmd = command.replace("\\", "/")
+    normalized_cmd = re.sub(r"[\\/]+", "/", command)
     flags = re.IGNORECASE if sys.platform == "win32" else 0
     variants: set[str] = set()
     for path in paths:
         for candidate in (path, path.resolve()):
-            posix = candidate.as_posix().rstrip("/")
+            posix = re.sub(r"[\\/]+", "/", candidate.as_posix()).rstrip("/")
             if not posix:
                 continue
             variants.add(posix)
@@ -641,24 +629,48 @@ def _command_references_workspace(command: str, *paths: Path) -> bool:
     return False
 
 
+def _prepend_env_path(env: dict[str, str], name: str, entries: list[str]) -> None:
+    """Prepend ``entries`` to a PATH-like environment variable (case-insensitive on Windows)."""
+    if not entries:
+        return
+    existing: str | None = None
+    for key in [
+        k for k in env if k == name or (sys.platform == "win32" and k.upper() == name.upper())
+    ]:
+        existing = env.pop(key)
+    parts = [*entries, existing] if existing else list(entries)
+    env[name] = os.pathsep.join(parts)
+
+
 def _merge_pythonpath(env: dict[str, str], wt_dir: Path) -> dict[str, str]:
     """Prepend the temporary checkout root (and its ``src/`` if present) to PYTHONPATH."""
     prepend = [str(wt_dir)]
     src_dir = wt_dir / "src"
     if src_dir.is_dir():
         prepend.append(str(src_dir))
+    _prepend_env_path(env, "PYTHONPATH", prepend)
+    return env
 
-    existing: str | None = None
-    keys_to_drop: list[str] = []
-    for key, val in env.items():
-        if key == "PYTHONPATH" or (sys.platform == "win32" and key.upper() == "PYTHONPATH"):
-            existing = val
-            keys_to_drop.append(key)
-    for key in keys_to_drop:
-        env.pop(key, None)
 
-    parts = [*prepend, existing] if existing else prepend
-    env["PYTHONPATH"] = os.pathsep.join(parts)
+def _merge_node_env(env: dict[str, str], *search_roots: Path) -> dict[str, str]:
+    """Expose the user's ``node_modules`` read-only via ``PATH`` and ``NODE_PATH``."""
+    bin_dirs: list[str] = []
+    node_dirs: list[str] = []
+    seen: set[Path] = set()
+    for root in search_roots:
+        nm = root / "node_modules"
+        if not nm.is_dir():
+            continue
+        resolved = nm.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        node_dirs.append(str(nm))
+        bin_dir = nm / ".bin"
+        if bin_dir.is_dir():
+            bin_dirs.append(str(bin_dir))
+    _prepend_env_path(env, "PATH", bin_dirs)
+    _prepend_env_path(env, "NODE_PATH", node_dirs)
     return env
 
 
@@ -720,6 +732,9 @@ class BaselineTool:
                 is_error=True,
             )
 
+        if _command_references_workspace(command, ctx.workspace, base_cwd):
+            return ToolResult(_WORKSPACE_PATH_ERROR, is_error=True)
+
         raw_timeout = args.get("timeout", args.get("timeoutMs", args.get("timeout_ms")))
         timeout_ms = DEFAULT_TIMEOUT_MS
         if raw_timeout is not None:
@@ -750,6 +765,9 @@ class BaselineTool:
         if err is not None or repo_root is None or head_sha is None:
             return ToolResult(err or "Error: could not validate git repository.", is_error=True)
 
+        if _command_references_workspace(command, repo_root):
+            return ToolResult(_WORKSPACE_PATH_ERROR, is_error=True)
+
         try:
             rel_cwd = base_cwd.resolve().relative_to(repo_root.resolve())
         except ValueError:
@@ -761,12 +779,14 @@ class BaselineTool:
 
         await asyncio.to_thread(_cleanup_stale_temp_dirs)
 
-        temp_parent = Path(tempfile.mkdtemp(prefix=f"{_TEMP_PREFIX}{os.getpid()}-"))
+        temp_parent = Path(
+            tempfile.mkdtemp(prefix=f"{_TEMP_PREFIX}{_safe_hostname()}-{os.getpid()}-")
+        )
         wt_dir = temp_parent / "wt"
-        created_links: list[Path] = []
         clone_task: asyncio.Future[str | None] | None = None
         run: ProcessRun | None = None
         tree_killed = False
+        cleanup_ok = True
 
         text = ""
         marker = ""
@@ -790,14 +810,6 @@ class BaselineTool:
                 else:
                     run_cwd = candidate_cwd
 
-                    link = _link_node_modules(base_cwd, run_cwd)
-                    if link is not None:
-                        created_links.append(link)
-                    if repo_root.resolve() != base_cwd.resolve():
-                        root_link = _link_node_modules(repo_root, wt_dir)
-                        if root_link is not None:
-                            created_links.append(root_link)
-
                     log_dir = ctx.session_dir / "baseline"
                     log_dir.mkdir(parents=True, exist_ok=True)
                     index = len(list(log_dir.glob("*.log"))) + 1
@@ -812,6 +824,7 @@ class BaselineTool:
                     )
                     cmd_env = _strip_git_env(shell_env({**ctx.env, **extra_env}))
                     _merge_pythonpath(cmd_env, wt_dir)
+                    _merge_node_env(cmd_env, base_cwd, repo_root)
 
                     try:
                         run = await ProcessRun.start(
@@ -820,7 +833,6 @@ class BaselineTool:
                             env=cmd_env,
                             log_path=log_path,
                             command=command,
-                            isolate_tree=True,
                         )
                     except OSError as exc:
                         start_error = f"Error: could not start {self.shell.executable}: {exc}"
@@ -831,12 +843,11 @@ class BaselineTool:
                             finished = await run.wait(waited_s)
                             if not finished:
                                 timed_out = True
-                            # Always kill the command's process tree before cleanup so leftover
-                            # children/grandchildren cannot keep files open in the checkout.
-                            await run.kill(force_tree=True)
+                            # Kill any running or lingering process tree before cleanup.
+                            await run.kill()
                             tree_killed = True
                         except BaseException:
-                            await run.kill_on_cancel(force_tree=True)
+                            await run.kill_on_cancel()
                             tree_killed = True
                             with contextlib.suppress(OSError):
                                 if pipestatus_path is not None:
@@ -852,9 +863,8 @@ class BaselineTool:
                             meta["timed_out"] = True
                         else:
                             pipestatus = read_pipestatus(pipestatus_path)
-                            exit_code = normalize_exit_code(run.returncode, pipestatus)
                             marker, reported_pipe = format_exit_marker(run.returncode, pipestatus)
-                            meta["exit_code"] = exit_code
+                            meta["exit_code"] = run.returncode
                             if reported_pipe is not None:
                                 meta["pipeline_exit_codes"] = reported_pipe
         finally:
@@ -867,18 +877,22 @@ class BaselineTool:
                         clone_task.exception()
             if run is not None and not tree_killed:
                 with contextlib.suppress(BaseException):
-                    await run.kill_on_cancel(force_tree=True)
-            cleanup_task = asyncio.ensure_future(
-                asyncio.to_thread(_cleanup_temp_dir, temp_parent, created_links)
-            )
-            await _await_shielded(cleanup_task)
+                    await run.kill_on_cancel()
+            cleanup_task = asyncio.ensure_future(asyncio.to_thread(_cleanup_temp_dir, temp_parent))
+            cleanup_ok = bool(await _await_shielded(cleanup_task))
 
-        if clone_error is not None:
-            return ToolResult(clone_error, is_error=True)
-        if subdir_error is not None:
-            return ToolResult(subdir_error, is_error=True)
-        if start_error is not None:
-            return ToolResult(start_error, is_error=True, meta=meta)
+        cleanup_warning: str | None = None
+        if not cleanup_ok:
+            cleanup_warning = (
+                f"Warning: failed to remove temporary checkout directory: {temp_parent}"
+            )
+            meta["cleanup_failed"] = True
+            meta["cleanup_path"] = str(temp_parent)
+
+        for err_msg in (clone_error, subdir_error, start_error):
+            if err_msg is not None:
+                msg = f"{err_msg}\n{cleanup_warning}" if cleanup_warning else err_msg
+                return ToolResult(msg, is_error=True, meta=meta)
 
         assert log_path is not None
         inline, spill = limit_output(
@@ -891,12 +905,11 @@ class BaselineTool:
         if spill is not None:
             meta["spill_path"] = str(spill)
 
-        parts: list[str] = []
-        if _command_references_workspace(command, ctx.workspace, base_cwd, repo_root):
-            parts.append(WORKSPACE_PATH_WARNING)
-        parts.append(BASELINE_HEADER)
+        parts: list[str] = [BASELINE_HEADER]
         if inline:
             parts.append(inline.rstrip("\n"))
         if marker:
             parts.append(marker)
+        if cleanup_warning:
+            parts.append(cleanup_warning)
         return ToolResult("\n".join(parts), is_error=False, meta=meta)

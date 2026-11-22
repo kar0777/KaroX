@@ -19,7 +19,6 @@ POSIX needs none of this: children run in their own sessions and the cleanup pat
 
 from __future__ import annotations
 
-import contextlib
 import sys
 import threading
 from typing import Any
@@ -78,112 +77,6 @@ def bind_to_karox(pid: int) -> bool:
         return False
 
 
-def _descendant_pids(kernel32: Any, root_pid: int) -> list[int]:
-    """Return ``root_pid`` and any already-running Windows descendants."""
-    import ctypes
-    from ctypes import wintypes
-
-    class ProcessEntry32W(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD),
-            ("cntUsage", wintypes.DWORD),
-            ("th32ProcessID", wintypes.DWORD),
-            ("th32DefaultHeapID", ctypes.c_size_t),
-            ("th32ModuleID", wintypes.DWORD),
-            ("cntThreads", wintypes.DWORD),
-            ("th32ParentProcessID", wintypes.DWORD),
-            ("pcPriClassBase", ctypes.c_long),
-            ("dwFlags", wintypes.DWORD),
-            ("szExeFile", wintypes.WCHAR * 260),
-        ]
-
-    snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
-    invalid_handle = ctypes.c_void_p(-1).value
-    if not snap or snap == invalid_handle:
-        return [root_pid]
-    children: dict[int, list[int]] = {}
-    try:
-        entry = ProcessEntry32W()
-        entry.dwSize = ctypes.sizeof(entry)
-        if kernel32.Process32FirstW(snap, ctypes.byref(entry)):
-            while True:
-                children.setdefault(int(entry.th32ParentProcessID), []).append(
-                    int(entry.th32ProcessID)
-                )
-                if not kernel32.Process32NextW(snap, ctypes.byref(entry)):
-                    break
-    finally:
-        kernel32.CloseHandle(snap)
-
-    seen = {root_pid}
-    order = [root_pid]
-    stack = [root_pid]
-    while stack:
-        current = stack.pop()
-        for child in children.get(current, ()):
-            if child not in seen:
-                seen.add(child)
-                order.append(child)
-                stack.append(child)
-    return order
-
-
-def create_run_job(pid: int) -> int | None:
-    """Create a per-run Windows job object containing ``pid`` and its descendants.
-
-    Intentionally omits BREAKAWAY_OK so MSYS2 / Git Bash cannot break child processes
-    out of the job, and omits KILL_ON_JOB_CLOSE so callers stop the whole tree explicitly
-    with :func:`terminate_run_job` (catching orphaned grandchildren even after the leader
-    exits). Returns the raw HANDLE as an int, or None outside Windows / on error.
-    """
-    if sys.platform != "win32":
-        return None
-    try:
-        kernel32 = _kernel32()
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
-            return None
-        access = _PROCESS_SET_QUOTA | _PROCESS_TERMINATE
-        assigned_any = False
-        for target_pid in _descendant_pids(kernel32, pid):
-            process = kernel32.OpenProcess(access, False, target_pid)
-            if not process:
-                continue
-            try:
-                if kernel32.AssignProcessToJobObject(job, process):
-                    assigned_any = True
-            finally:
-                kernel32.CloseHandle(process)
-        if not assigned_any:
-            kernel32.CloseHandle(job)
-            return None
-        return int(job)
-    except (OSError, AttributeError, ValueError):
-        return None
-
-
-def terminate_run_job(job: int) -> bool:
-    """Terminate all processes in a per-run Windows job object and close its handle."""
-    if sys.platform != "win32":
-        return False
-    try:
-        kernel32 = _kernel32()
-        try:
-            return bool(kernel32.TerminateJobObject(job, 1))
-        finally:
-            kernel32.CloseHandle(job)
-    except (OSError, AttributeError, ValueError):
-        return False
-
-
-def close_run_job(job: int) -> None:
-    """Close a per-run Windows job handle without terminating its processes."""
-    if sys.platform != "win32":
-        return
-    with contextlib.suppress(OSError, AttributeError, ValueError):
-        _kernel32().CloseHandle(job)
-
-
 def _kernel32() -> Any:
     import ctypes
     from ctypes import wintypes
@@ -200,14 +93,6 @@ def _kernel32() -> Any:
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-    kernel32.TerminateJobObject.restype = wintypes.BOOL
-    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-    kernel32.Process32FirstW.restype = wintypes.BOOL
-    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
-    kernel32.Process32NextW.restype = wintypes.BOOL
-    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     return kernel32

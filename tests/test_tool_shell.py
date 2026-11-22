@@ -17,7 +17,6 @@ from karox6.tools.shell import (
     detect_shell,
     format_exit_marker,
     is_msys_bash,
-    normalize_exit_code,
     wrap_command_for_pipestatus,
 )
 
@@ -626,7 +625,7 @@ def test_pipeline_ignores_sigpipe_141_in_non_last_stages(ctx):
         [1, 141, 0],
     )
     assert format_exit_marker(141, [0, 141]) == (
-        "[exit code: -13] [pipeline exit codes: 0 141]",
+        "[exit code: 141] (128+13, likely signal 13) [pipeline exit codes: 0 141]",
         [0, 141],
     )
 
@@ -644,14 +643,15 @@ def test_pipeline_ignores_sigpipe_141_in_non_last_stages(ctx):
     assert "[pipeline exit codes:" not in head_pipe.content
 
 
-def test_signal_death_restores_negative_exit_code_marker(ctx):
-    assert normalize_exit_code(139, [139]) == -11
-    assert format_exit_marker(139, [139]) == ("[exit code: -11]", None)
-    # Explicit `exit 139` skips writing pipestatus, so it stays 139.
-    assert normalize_exit_code(139, None) == 139
+def test_signal_range_keeps_raw_exit_code_with_hint(ctx):
+    assert format_exit_marker(130, [130]) == ("[exit code: 130] (128+2, likely signal 2)", None)
+    assert format_exit_marker(139, [139]) == ("[exit code: 139] (128+11, likely signal 11)", None)
+    # Explicit `exit 139` skips writing pipestatus, so it stays unchanged with no hint.
     assert format_exit_marker(139, None) == ("[exit code: 139]", None)
-    # 255 is not a POSIX signal code.
-    assert normalize_exit_code(255, [255]) == 255
+    # Boundary and out-of-range codes get no hint.
+    assert format_exit_marker(128, [128]) == ("[exit code: 128]", None)
+    assert format_exit_marker(193, [193]) == ("[exit code: 193]", None)
+    assert format_exit_marker(255, [255]) == ("[exit code: 255]", None)
 
     if ctx.shell.kind != "bash":
         pytest.skip("bash signal reporting")
@@ -660,15 +660,24 @@ def test_signal_death_restores_negative_exit_code_marker(ctx):
     assert explicit.meta["exit_code"] == 139
     assert explicit.content.endswith("[exit code: 139]")
 
+    py_130 = shell(ctx, command=python("import sys; sys.exit(130)"))
+    assert py_130.meta["exit_code"] == 130
+    assert py_130.content.endswith("[exit code: 130] (128+2, likely signal 2)")
+
+    sh_137 = shell(ctx, command="sh -c 'exit 137'")
+    assert sh_137.meta["exit_code"] == 137
+    assert sh_137.content.endswith("[exit code: 137] (128+9, likely signal 9)")
+
     if sys.platform != "win32":
         segv = shell(ctx, command=python("import os, signal; os.kill(os.getpid(), signal.SIGSEGV)"))
-        assert segv.meta["exit_code"] == -11
-        assert segv.content.endswith("[exit code: -11]")
+        assert segv.meta["exit_code"] == 139
+        assert segv.content.endswith("[exit code: 139] (128+11, likely signal 11)")
     else:
-        # In Git Bash, waiting on a signal-killed background child yields exit code 128+11=139.
         sig_wait = shell(ctx, command="sleep 10 & p=$!; kill -11 $p; wait $p")
-        assert sig_wait.meta["exit_code"] == -11, sig_wait.content
-        assert sig_wait.content.endswith("[exit code: -11]"), sig_wait.content
+        assert sig_wait.meta["exit_code"] == 139, sig_wait.content
+        assert sig_wait.content.endswith("[exit code: 139] (128+11, likely signal 11)"), (
+            sig_wait.content
+        )
 
 
 def test_pipeline_wrapper_user_exit_trap_and_exec(ctx):
