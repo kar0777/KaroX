@@ -2330,3 +2330,16 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   line. hab3 (Haiku, dev42 vs dev50, 2 att): 13 vs 10 of 24 (6 vs 4 tasks), calls 327 vs 313
   (-4%). NOT adopted. Haiku still never edits through edit (4 calls), so multi-hunk is moot
   there. 51 interviews collected (hint1+hab3), synthesis by agy Hydrogen.
+- Interview synthesis (51 answers, hint1+hab3): edit friction 32, no safe baseline (git stash
+  dances) 31, missing linters 28, undocumented test command/cwd 24, missing test deps 20,
+  pipeline exit-code masking (`| tail` shows 0) 19.
+- dev51 (steps/dev51, Neon + three Fusion reviews): `baseline` tool (runs one command in a
+  temporary `git clone --shared` of HEAD, origin removed, NODE_PATH/PATH to the user's
+  node_modules, installers refused, user tree/refs/stashes untouched) and
+  `[pipeline exit codes: ...]` marker via a same-line EXIT trap (141 ignored in non-last stages,
+  `(128+N, likely signal N)` hint). hab4 (run 45080742959, Haiku, dev42 vs dev51 first build,
+  2 att): 13 vs 13 of 24 (7 vs 6 tasks), calls 340 vs 308 (-9%), input 8.1M vs 6.9M (-15%).
+  baseline used 14x, manual git stash 16 -> 6, marker shown in 19 sessions. Rule (calls -15%)
+  NOT met: not adopted; best call reduction of dev47-51. Interviews (48): baseline used in 10/24
+  dev51 sessions, all 10 called it useful; marker barely noticed; top remaining complaint:
+  missing tools/deps unknown up front (33/48).
