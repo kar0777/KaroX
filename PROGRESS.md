@@ -1973,3 +1973,28 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   daily limit, the next evening otherwise. A trial ended by the daily limit is void by
   the validity rule and its task is run again. The commands are in DEVIN_REPORT.md; none
   is run in this shift.
+- 04:47 UTC, bench `devin/bench` 182359d: the dev38 wheel (built from bc7fb40 with `python
+  -m build --wheel`; the wheel's prompt was read back from the file: the new rules are in
+  it, "smallest" and "broaden" are not), `scripts/analysis/dshcmp.py` and `scopewords.py`,
+  and the replay's check now prints which prompt the model received: the word count and
+  the sha256 of the system message up to its environment block (`replay/check_replay.py`;
+  dev38's is 599 words, e73cceec60d8; dev37's 522 words, dad10eb48ba6).
+- Registered before any output of the two runs below was read (neither is a comparison;
+  no decision rides on either; neither uses ReformBoss).
+  * Replay (`replay.yml`, no model, no key; run 44986591414, dispatched 04:47 UTC, still
+    running as this is written): the dev38 wheel in five bench images of three
+    Python versions (3.11: sympy-30914; 3.12: a2a-python-1366, pyfakefs-1364; 3.13:
+    pypsa-2051, scrapy-8433), scenario `karox6_basics`, task directory /testbed. Pass =
+    every job prints REPLAY PASSED, the installed version is 6.0.0.dev38, the prompt's
+    digest is e73cceec60d8 and the run ends "completed" with its snapshot. These are tasks
+    of the A/B: the replay installs the wheel and runs a scripted conversation in the
+    image, it solves nothing and no trajectory of the task exists afterwards.
+  * Live check `devl1`: karox6 alone, the dev38 wheel named, disc tasks 2 and 7
+    (isort-2750, plopp-614: dev-pool tasks KaroX solved in ab1 and devs1), 1 attempt, one
+    task on FreeInference (GLM-5.3-Flash, parallel 1) and one on Dahl (`dahl2`, parallel
+    1), so that one lane's outage does not leave the check without an answer. Pass = the
+    job reports karox 6.0.0.dev38, the audit has successful calls and the run ends by the
+    agent's own choice ("completed"). Also noted, as an observation on one trial of another
+    model and not as evidence: whether the reasoning still argues with the words
+    "smallest" or "broaden" and whether a test file is edited. A lane that refuses or is
+    saturated is recorded and not tried again.
