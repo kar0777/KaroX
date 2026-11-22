@@ -2169,3 +2169,18 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   25 reached the app; 400 at 0 ms). Left as it is: Ctrl+C before `_chat` (interpreter start,
   argument parsing, nothing on screen yet) still gets Python's default, and a second Ctrl+C
   once the loop runs raises KeyboardInterrupt as with asyncio's handler.
+- Shift of 2026-11-22 from 07:45 UTC (`date -u`), version 6.0.0.dev40: (1) `karox6 update`
+  and `/update`, a once-a-day background check, `scripts/install_latest.ps1|.sh`; (2) the
+  chat UI redesign. No model call so far, ReformBoss not used, BASE_PROMPT untouched.
+- 08:55 UTC, part 1 in: `karox6/update.py` (temporary clone of `karox6/main`, compare by
+  commit and PEP 440 version, changes = commit titles since the installed build, wheel built
+  with the venv's pip, checked by `--version` from a scratch `--target` before install, deps
+  first then `--force-reinstall --no-deps`; Windows: running `karox6.exe` renamed to
+  `*.exe.<pid>-<t>.old`, put back on failure, deleted on a later run). `karox6 update
+  --check` against GitHub: 1.8 s, "6.0.0.dev39 is newer than the branch (6.0.0.dev34
+  (ee24034))". Tests on a temporary repo with an in-tree build backend and a temporary venv
+  (PIP_NO_INDEX=1): install, up to date, two new commits listed, a build that does not start
+  refused with the old install kept, missing branch, the running launcher replaced (Windows),
+  both install scripts run twice (second: "up to date"). Bug found by the Linux run: a venv's
+  python is a symlink to the base interpreter, `resolve()` made them equal; paths now
+  compared as given.

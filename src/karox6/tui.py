@@ -184,6 +184,12 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "/mcp", "/mcp [SERVER]", "MCP servers: state, tools, how to add one", "Tools & Bridge"
     ),
+    CommandSpec(
+        "/update",
+        "/update [check|force]",
+        "install the newest KaroX (restart to use it)",
+        "Model & Setup",
+    ),
     CommandSpec("/help", "/help", "show commands and keyboard shortcuts", "Tools & Bridge"),
 )
 
@@ -204,6 +210,11 @@ _BRIDGE_ARGS: tuple[tuple[str, str], ...] = (
     ("url", "show the secret no-auth connector link"),
     ("log", "show recent bridge requests"),
     ("stop", "stop the bridge and remove its Tailscale route"),
+)
+
+_UPDATE_ARGS: tuple[tuple[str, str], ...] = (
+    ("check", "only say whether a newer version is there"),
+    ("force", "build and install even when up to date"),
 )
 
 _REASONING_ARGS: tuple[tuple[str, str], ...] = (
@@ -498,6 +509,9 @@ class ChatApp:
         self._read_secret = read_secret or self._read_answer
         self._question_lock = asyncio.Lock()
         self._turn_running = False
+        self.update_source: Any = None  # karox6.update.Source (None: the default)
+        self.update_note = ""  # "6.0.0.dev41" when the background check found it
+        self._updating = False
 
     # -- lifecycle ------------------------------------------------------------------
 
@@ -1261,6 +1275,8 @@ class ChatApp:
             await self._setup()
         elif name == "/bridge":
             await self._bridge(arg)
+        elif name == "/update":
+            await self._update(arg.lower())
         elif name == "/reasoning":
             low = arg.lower()
             if low in ("on", "show", "true", "1"):
@@ -1276,6 +1292,50 @@ class ChatApp:
             meant = f"did you mean {self.paint('cyan', near)}? " if near else ""
             self.write(f"unknown command {name}; {meant}/help lists commands\n")
         return None
+
+    async def _update(self, arg: str) -> None:
+        """/update: what `karox6 update` does, with its lines in the conversation."""
+        from karox6 import update
+
+        if self._updating:
+            self.write("an update is already running\n")
+            return
+        loop = asyncio.get_running_loop()
+
+        def out(line: str) -> None:
+            loop.call_soon_threadsafe(self.write, self.paint("dim", f"  {line}") + "\n")
+
+        source = self.update_source or update.Source.from_settings()
+        self._updating = True
+        try:
+            result = await asyncio.to_thread(
+                update.run_update, source, out, force=arg == "force", check_only=arg == "check"
+            )
+        except update.UpdateError as exc:
+            self.write(self.paint("red", f"{self.glyph['fail']} update failed: {exc}") + "\n")
+            return
+        finally:
+            self._updating = False
+        lines = update.describe(result)
+        color = "green" if result.status in ("updated", "current") else "yellow"
+        self.write(self.paint(color, lines[0]) + "\n")
+        for line in lines[1:]:
+            self.write(self.paint("dim", line) + "\n")
+        if result.status == "updated":
+            self.update_note = ""
+            self.write(
+                self.paint("bold", f"restart KaroX to use {result.new_version}")
+                + self.paint("dim", " (/quit, then karox6; --continue resumes this session)")
+                + "\n"
+            )
+        elif result.status == "available":
+            self.write(self.paint("dim", "/update installs it") + "\n")
+
+    def notice_update(self, version: str) -> None:
+        """The background check found a newer version: one line, never during a turn."""
+        self.update_note = version
+        if not self._turn_running:
+            self.write(self.paint("cyan", f"version {version} is available: /update") + "\n")
 
     def _clear_screen(self) -> None:
         self._end_stream()
@@ -1677,6 +1737,8 @@ def build_completer(*, workspace: Path | None = None, home: Path | None = None) 
                 choices = list(_BRIDGE_ARGS)
             elif cmd == "/reasoning":
                 choices = list(_REASONING_ARGS)
+            elif cmd == "/update":
+                choices = list(_UPDATE_ARGS)
             elif cmd == "/resume":
                 choices = [("last", "most recent saved session")]
                 if home is not None:

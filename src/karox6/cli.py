@@ -284,6 +284,18 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
         "exits unexpectedly (waits 1 s, doubling up to 60 s); Ctrl+C stops both",
     )
 
+    update = sub.add_parser(
+        "update", help="install the newest KaroX from its git branch into this environment"
+    )
+    update.add_argument(
+        "--check", action="store_true", help="only say whether a newer version is there"
+    )
+    update.add_argument(
+        "--force", action="store_true", help="build and install even when already up to date"
+    )
+    update.add_argument("--repo", default=None, help="git repository to update from")
+    update.add_argument("--branch", default=None, help="branch of that repository")
+
     debug = sub.add_parser("debug", help="diagnostics for developers")
     debug_sub = debug.add_subparsers(dest="debug_command", required=True)
     debug_sub.add_parser("rss", help="load the headless stack and print resident memory (MiB)")
@@ -460,9 +472,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _chat(args, parser)
     if args.command == "mcp":
         return _mcp(args, parser, argv)
+    if args.command == "update":
+        return _update(args, settings)
     if args.command == "debug" and args.debug_command == "rss":
         return _debug_rss()
     parser.print_help()
+    return 0
+
+
+def _update(args: argparse.Namespace, settings: dict[str, Any]) -> int:
+    from karox6 import update
+
+    source = update.Source.from_settings(settings, args.repo, args.branch)
+
+    def out(line: str) -> None:
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+    try:
+        result = update.run_update(source, out, force=args.force, check_only=args.check)
+    except update.UpdateError as exc:
+        sys.stderr.write(f"karox: update failed: {exc}\n")
+        return 1
+    for line in update.describe(result):
+        out(line)
+    if result.status == "available" and args.check:
+        out("run `karox6 update` to install it")
     return 0
 
 
@@ -765,6 +800,7 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
                 )
             if app is None:
                 app = make_app()
+            _start_update_check(args, home, app)
             try:
                 return await app.run(banner=banner)
             finally:
@@ -782,6 +818,35 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
             splash.close()  # the app never drew: back to the user's screen first
         if summary:
             stdout_write(summary + "\n")
+
+
+def _start_update_check(args: argparse.Namespace, home: Path, app: Any) -> None:
+    """Look for a newer KaroX in the background (at most once a day; see karox6.update):
+    a daemon thread, so neither the first frame nor the exit waits for the network. Off
+    with ``update_check = false`` or KAROX_UPDATE_CHECK=0, and when KaroX runs from a
+    source tree (KAROX_UPDATE_CHECK=1 turns it on there)."""
+    import asyncio
+    import threading
+
+    wanted = os.environ.get("KAROX_UPDATE_CHECK", "")
+    if wanted == "0" or getattr(args, "update_check", True) is False:
+        return
+    from karox6 import update
+
+    if wanted != "1" and update.from_checkout():
+        return
+    settings = {k: getattr(args, k, None) for k in ("update_repo", "update_branch")}
+    source = update.Source.from_settings(settings)
+    app.update_source = source
+    loop = asyncio.get_running_loop()
+
+    def check() -> None:
+        with contextlib.suppress(Exception):
+            found = update.check_cached(home, source)
+            if found:
+                loop.call_soon_threadsafe(app.notice_update, found)
+
+    threading.Thread(target=check, name="karox-update-check", daemon=True).start()
 
 
 def _session_config(
