@@ -29,12 +29,19 @@ allowance = quota, empty reply resent once, stalled stream = timeout (46 tests).
 ## Part 2: the chat in a real terminal (dev36, dev37) - 9daab3d, 0a616e2, 1326c89, 7096d91, 5d88789
 
 The real `karox6` in a ConPTY/pty, screen read through pyte (`tests/term.py`), scripted
-model. dev36: bugs 1-12 (first frame 453 -> 170 ms; a streamed paragraph cost 11 s of CPU,
-now 10 ms; pasted lines sent one by one; raw JSON errors; a queued message nobody saw; seven
-smaller ones: the list is in this file's history, commit 18cc218), `/undo` `/redo` `/fork`
-`/init`, pictures, `/mcp`, change preview. Tonight the same tests ran on Linux for the first
-time (WSL): 10 of 15 flows failed on one real bug (13 below). `docs/perf.md` has Linux
-figures now: first frame 44 ms, ready for input 148 ms (Windows: 170 and 414 ms).
+model. Bugs 1-12, fixed in dev36, each with a test: (1) first frame 453 -> 170 ms, the
+welcome card popped in a frame late; (2) a streamed paragraph was re-wrapped whole on every
+delta, 11 s of CPU for 30,000 characters, now 10 ms; (3) colour lost after the first line of
+a multi-line write; (4) text pasted without bracketed paste sent every line as its own
+message; (5) provider errors shown as raw JSON, twice; (6) a message sent while a turn runs
+was queued invisibly; (7) the status bar lost the approval mode on narrow windows; (8) a
+scrollbar drawn when nothing could scroll; (9) `/status` and the status bar disagreed on
+context size; (10) a refused command printed the whole refusal in the tool line; (11) tab
+stops counted characters, not cells; (12) "[completed]" printed before the turn had ended.
+Added: `/undo` `/redo` `/fork` `/init`, pictures, `/mcp`, change preview. Tonight the same
+tests ran on Linux for the first time (WSL): 10 of 15 flows failed on one real bug (13).
+`docs/perf.md` has Linux figures: first frame 44 ms, ready for input 148 ms (Windows: 170
+and 414 ms).
 
 ## Part 3: the comparison, providers, hardening - fc34711, ccf8412, 3a6c541, 2d81a0b, 573ded0
 
