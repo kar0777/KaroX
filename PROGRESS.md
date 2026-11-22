@@ -1399,3 +1399,12 @@ git diff --check
   this load; the comparison moves to ReformBoss / a new provider.
 - OpenRouter key (probe orkey): 1000 free-model requests/day, no request limit on paid
   models; account $9.74 left, key cap $6 with $0.44 left; the $1 budget is spent.
+- Mini A/B mab1 (pre-registered 2026-11-22 ~10:50 UTC; user: no big runs, quick mini-tests on Dahl):
+  dev37 (karox6) vs dev39 (karox6b, BASE_PROMPT without "smallest change", no test-adding
+  order), both arms in the same job, Dahl GLM-5.3-Flash (dahl2, 32 keys), night_tasks 18,
+  19, 20, 22, 23, 24 (Devin's held-out pool; trajectories never read), 1 attempt. Context:
+  devl40 (dev40 = dev39 prompt) failed isort-2750 and plopp-614 that dev31/dev33 solved
+  twice on GLM. Rule: dev39 is kept only if it solves >= dev37 on valid tasks
+  (trio_report rule); if dev39 solves 2+ fewer, revert the prompt change before merging
+  devin/big. A 1-task difference is noise either way -> keep dev37 prompt (no change
+  without evidence).
