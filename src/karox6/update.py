@@ -7,7 +7,7 @@ repository by default; ``update_repo`` / ``update_branch`` in config.toml or
 1. clones that branch into a new temporary folder (never into a working copy),
 2. compares its version and commit with the installed ones and lists the commits between,
 3. writes ``karox6/_build.py`` (repository, branch, commit) into the clone and builds the
-   wheel with this interpreter's pip,
+   wheel with this interpreter's pip (or uv, for an environment made without pip),
 4. checks the wheel before touching the installation: its version, and that it starts
    (``--version``) from a scratch folder,
 5. installs its dependencies, then the wheel itself (``pip install --force-reinstall
@@ -281,21 +281,26 @@ def _read_version(init: Path) -> str:
     return match.group(1)
 
 
-def _build_wheel(python: str, repo: Path, dist: Path) -> Path:
-    proc = _run(
-        [
-            python,
-            "-m",
-            "pip",
-            "wheel",
-            "--disable-pip-version-check",
-            "--no-deps",
-            "--wheel-dir",
-            str(dist),
-            str(repo),
-        ],
-        timeout=900,
+def _installer(python: str) -> tuple[list[str], list[str]]:
+    """(build a wheel, install) commands for ``python``'s environment: its own pip, or uv
+    for an environment made without pip (``uv tool install karox6``)."""
+    if _run([python, "-m", "pip", "--version"], timeout=60).returncode == 0:
+        return (
+            [python, "-m", "pip", "wheel", "--disable-pip-version-check", "--no-deps", "-w"],
+            [python, "-m", "pip", "install", "--disable-pip-version-check"],
+        )
+    uv = shutil.which("uv")
+    if uv:
+        return [uv, "build", "--wheel", "--out-dir"], [uv, "pip", "install", "--python", python]
+    raise UpdateError(
+        f"{python} has no pip and uv is not on PATH; run `{python} -m ensurepip` (or install "
+        "uv) and `karox6 update` again"
     )
+
+
+def _build_wheel(python: str, repo: Path, dist: Path) -> Path:
+    build, _install_cmd = _installer(python)
+    proc = _run([*build, str(dist), str(repo)], timeout=900)
     wheels = sorted(dist.glob("karox6-*.whl"))
     if proc.returncode != 0 or not wheels:
         raise UpdateError("building the wheel failed:\n" + _tail(proc))
@@ -314,21 +319,8 @@ def _check_wheel(python: str, wheel: Path, version: str, scratch: Path) -> list[
     match = _VERSION_LINE.search(init)
     if match is None or match.group(1) != version:
         raise UpdateError(f"the built wheel {wheel.name} does not hold KaroX {version}")
-    proc = _run(
-        [
-            python,
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--no-deps",
-            "--no-compile",
-            "--target",
-            str(scratch),
-            str(wheel),
-        ],
-        timeout=300,
-    )
+    _build, install = _installer(python)
+    proc = _run([*install, "--no-deps", "--target", str(scratch), str(wheel)], timeout=300)
     if proc.returncode != 0:
         raise UpdateError("unpacking the new build failed:\n" + _tail(proc))
     probe = (
@@ -346,7 +338,7 @@ def _check_wheel(python: str, wheel: Path, version: str, scratch: Path) -> list[
 
 
 def _install(python: str, wheel: Path, requires: list[str]) -> None:
-    pip = [python, "-m", "pip", "install", "--disable-pip-version-check"]
+    _build, pip = _installer(python)
     if requires:
         proc = _run([*pip, *requires], timeout=900)
         if proc.returncode != 0:

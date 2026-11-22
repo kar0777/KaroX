@@ -323,3 +323,27 @@ def test_install_script_is_idempotent(project: tuple[Path, str], tmp_path: Path)
     )
     assert second.returncode == 0, second.stdout + second.stderr
     assert f"({head[:7]}) is up to date." in second.stdout
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is not installed")
+def test_update_uses_uv_in_an_environment_without_pip(
+    project: tuple[Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`uv tool install karox6` makes a venv without pip: the update builds and installs
+    with uv instead."""
+    repo, _python = project
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    monkeypatch.setenv("UV_NO_CACHE", "1")
+    venv = tmp_path / "nopip"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(venv)],
+        check=True,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+    )
+    scripts = venv / ("Scripts" if sys.platform == "win32" else "bin")
+    python = str(scripts / ("python.exe" if sys.platform == "win32" else "python"))
+    source = update.Source(repo=str(repo), branch="karox6/main")
+    result = update.run_update(source, lambda _l: None, python=python, workdir=tmp_path)
+    assert result.status == "updated"
+    assert update.installed(python, ask=True).version == result.new_version
