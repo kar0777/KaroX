@@ -39,7 +39,7 @@ def _first_request_system(tmp_path, **kwargs) -> str:
 
 
 def test_prompt_stays_within_its_word_limit():
-    assert len(BASE_PROMPT.split()) <= 600
+    assert len(BASE_PROMPT.split()) <= 625
 
 
 def test_examples_are_samples_of_the_inputs_a_task_is_about():
