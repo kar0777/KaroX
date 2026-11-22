@@ -1748,3 +1748,23 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   writes its rows (two successes of harness `codex`). The trio's requests leave as they
   came (offline check: equal to the profile-only result). devc3 runs on 81f5a37, rule
   unchanged.
+- 00:40 UTC, from devt2b's first job (disc 13, 14; the full result follows when the run
+  ends). sentry-python-8185 is void by the rule: KaroX's trial ended on a provider error
+  after two steps. Its third request (nine messages, 106k characters of tool output, two
+  wide greps of the test tree among them) was answered with HTTP 500 "Провайдер вернул
+  внутреннюю ошибку" thirty times in 150 s (six rounds of the gateway's five tries),
+  while every other request on the key went through, the other two CLIs' included; in
+  all saved ReformBoss runs (ab1, ab2, tbd3, rev1/2, devs1, devt1, devt2) this error
+  appears nowhere else. So the server failed on that request, not in general, and
+  sending it again could not help. What in it the server minds is not known (nothing
+  odd in the text: no control characters, no long lines; OpenCode's run on the same task
+  read some of the same test lines and went on).
+  KaroX change, general (commit 573ded0, not in the dev36 wheel under test): a plain 5xx
+  that survives the ordinary retries is answered once with a smaller request, the middle
+  cut out of every big tool result, the newest included (spill files keep the text); at
+  most twice per run; 502/503/529 are waited out as before; if the smaller request fails
+  too the run ends with the provider's error. Whether it would have saved this trial
+  cannot be shown here (the request cannot be replayed without the key). 4 tests, 2
+  failed before the change.
+  Also bench 6a4201d: the codex arm's bridged tools lose the `"strict": false` the bridge
+  adds (devc3 runs on that commit).
