@@ -38,6 +38,7 @@ class ProcessRun:
         self.head = bytearray()
         self.tail = bytearray()
         self.killed = False
+        self._cleanup_paths: list[Path] = []
         self._log = log_path.open("wb")
         self.reader = asyncio.create_task(self._pump())
 
@@ -85,6 +86,18 @@ class ProcessRun:
         finally:
             with contextlib.suppress(OSError):
                 self._log.close()
+            self._cleanup_files()
+
+    def cleanup_on_exit(self, path: Path) -> None:
+        """Delete ``path`` once this process finishes (or right away if already done)."""
+        self._cleanup_paths.append(path)
+        if not self.active:
+            self._cleanup_files()
+
+    def _cleanup_files(self) -> None:
+        for path in self._cleanup_paths:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
 
     @property
     def pid(self) -> int:
@@ -136,6 +149,8 @@ class ProcessRun:
         transport = getattr(self.proc, "_transport", None)
         if transport is not None and self.proc.returncode is not None and self.reader.done():
             transport.close()
+        if self.proc.returncode is not None:
+            self._cleanup_files()
 
     def output_text(self) -> tuple[str, bool]:
         """(text, complete). When output exceeded the buffers, text is head + tail only."""

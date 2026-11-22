@@ -27,28 +27,21 @@ MAX_TIMEOUT_MS = 600_000
 INLINE_CHARS = 30_000
 PIPESTATUS_ENV = "KAROX_PIPESTATUS_FILE"
 
-_BASH_PIPESTATUS_EPILOGUE = (
-    '__karox_rc=$? __karox_ps=("${PIPESTATUS[@]+"${PIPESTATUS[@]}"}")\n'
-    "set +e +u\n"
-    'if [ -n "${KAROX_PIPESTATUS_FILE:-}" ]; then '
-    'printf \'%s\\n\' "${__karox_ps[@]}" >"$KAROX_PIPESTATUS_FILE" 2>/dev/null || true; '
-    "fi\n"
-    'exit "$__karox_rc"\n'
+_BASH_PIPESTATUS_TRAP = (
+    "trap '"
+    '{ __karox_p=("${PIPESTATUS[@]+"${PIPESTATUS[@]}"}") __karox_bc=${BASH_COMMAND:-}; '
+    "builtin set +x +e +u; builtin trap - DEBUG; } 2>/dev/null; "
+    'case "$__karox_bc" in '
+    'exit|exit[[:space:]]*|"builtin exit"|"builtin exit"[[:space:]]*|'
+    '"command exit"|"command exit"[[:space:]]*) ;; '
+    '*) [[ -n "${KAROX_PIPESTATUS_FILE:-}" ]] && '
+    'builtin printf "%s\\n" "${__karox_p[@]}" >"$KAROX_PIPESTATUS_FILE" 2>/dev/null || true ;; '
+    "esac' EXIT\n"
 )
 
-_SH_PIPESTATUS_PROLOGUE = (
-    'if [ -n "${BASH_VERSION:-}" ]; then\n'
-    '  __karox_ps_e=\'__karox_rc=$? __karox_ps=("${PIPESTATUS[@]+"${PIPESTATUS[@]}"}"); '
-    "set +e +u; "
-    '[ -n "${KAROX_PIPESTATUS_FILE:-}" ] && '
-    'printf "%s\\n" "${__karox_ps[@]}" >"$KAROX_PIPESTATUS_FILE" 2>/dev/null; '
-    'exit "$__karox_rc"\'\n'
-    "else\n"
-    "  __karox_ps_e='__karox_rc=$?; exit \"$__karox_rc\"'\n"
-    "fi\n"
+_SH_PIPESTATUS_TRAP = (
+    'if [ -n "${BASH_VERSION:-}" ]; then ' + _BASH_PIPESTATUS_TRAP.rstrip("\n") + "; fi\n"
 )
-
-_SH_PIPESTATUS_EPILOGUE = 'eval "${__karox_ps_e:-exit \\$?}"\n'
 
 ENV_OVERRIDES = {
     "NO_COLOR": "1",
@@ -176,12 +169,8 @@ def wrap_command_for_pipestatus(
         target = status_path.resolve().as_posix()
     except OSError:
         return command, {}
-    sep = "" if command.endswith("\n") else "\n"
-    if shell.flavor == "sh":
-        wrapped = f"{_SH_PIPESTATUS_PROLOGUE}{command}{sep}{_SH_PIPESTATUS_EPILOGUE}"
-    else:
-        wrapped = f"{command}{sep}{_BASH_PIPESTATUS_EPILOGUE}"
-    return wrapped, {PIPESTATUS_ENV: target}
+    prefix = _SH_PIPESTATUS_TRAP if shell.flavor == "sh" else _BASH_PIPESTATUS_TRAP
+    return f"{prefix}{command}", {PIPESTATUS_ENV: target}
 
 
 def read_pipestatus(status_path: Path | None) -> list[int] | None:
@@ -361,6 +350,10 @@ class ShellTool:
                 )
                 meta["job_id"] = job.id
         else:
+            if pipestatus_path is not None:
+                with contextlib.suppress(OSError):
+                    pipestatus_path.unlink(missing_ok=True)
+                run.cleanup_on_exit(pipestatus_path)
             job = ctx.jobs.register(run)
             job.read_offset = run.total_bytes
             marker = (

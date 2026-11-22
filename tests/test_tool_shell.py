@@ -1,6 +1,8 @@
 import asyncio
+import dataclasses
 import os
 import shlex
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -472,4 +474,118 @@ def test_pipeline_wrapper_and_description_skip_pwsh(tmp_path):
 
     sh_cmd, sh_env = wrap_command_for_pipestatus("false | cat", sh_tool.shell, tmp_path / "ps")
     assert "BASH_VERSION" in sh_cmd
+    assert sh_cmd.endswith("false | cat")
     assert "KAROX_PIPESTATUS_FILE" in sh_env
+
+    bash_cmd, bash_env = wrap_command_for_pipestatus(
+        "false | cat", bash_tool.shell, tmp_path / "ps"
+    )
+    assert bash_cmd.endswith("false | cat")
+    assert "trap " in bash_cmd
+    assert "KAROX_PIPESTATUS_FILE" in bash_env
+
+
+@pytest.mark.parametrize("suffix", ["&&", "||", "|"])
+def test_pipeline_wrapper_does_not_execute_incomplete_operator_commands(ctx, suffix):
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash syntax")
+    result = shell(ctx, command=f"echo SHOULD_NOT_RUN {suffix}")
+    assert result.meta["exit_code"] != 0
+    assert "SHOULD_NOT_RUN" not in result.content
+    assert "pipeline_exit_codes" not in result.meta
+
+
+def test_pipeline_wrapper_preserves_trailing_backslash_and_unterminated_heredoc(ctx):
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash syntax")
+    bs = shell(ctx, command="echo hi \\")
+    assert bs.meta["exit_code"] == 0, bs.content
+    assert "hi \\" in bs.content
+
+    heredoc = shell(ctx, command="cat <<EOF\nhello")
+    assert heredoc.meta["exit_code"] == 0, heredoc.content
+    assert "hello" in heredoc.content
+    assert "__karox" not in heredoc.content
+    assert "KAROX_PIPESTATUS_FILE" not in heredoc.content
+    assert "PIPESTATUS" not in heredoc.content
+
+
+def test_pipeline_wrapper_hidden_from_set_x_and_safe_against_user_functions(ctx):
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash syntax")
+    traced = shell(ctx, command="set -x; false | cat")
+    assert traced.meta["exit_code"] == 0
+    assert traced.meta["pipeline_exit_codes"] == [1, 0]
+    assert "+ false" in traced.content
+    assert "+ cat" in traced.content
+    assert "__karox" not in traced.content
+    assert "KAROX_PIPESTATUS_FILE" not in traced.content
+    assert "PIPESTATUS" not in traced.content
+
+    hijack = shell(
+        ctx,
+        command=(
+            "printf() { echo HIJACK_PRINTF; }; "
+            "set() { echo HIJACK_SET; }; "
+            "exit() { echo HIJACK_EXIT; }; "
+            "false | cat"
+        ),
+    )
+    assert hijack.meta["exit_code"] == 0
+    assert hijack.meta["pipeline_exit_codes"] == [1, 0]
+    assert "HIJACK_" not in hijack.content
+
+
+def test_pipeline_side_channel_deleted_on_background_job_handoff(ctx):
+    if ctx.shell.kind != "bash":
+        pytest.skip("bash pipeline statuses")
+
+    capped = dataclasses.replace(ctx, command_wait_cap_s=1)
+
+    async def scenario():
+        result = await ShellTool(ctx.shell).run(
+            {
+                "command": f"false | {python('import time; time.sleep(2); print(123)')}",
+                "timeout": 60_000,
+            },
+            capped,
+        )
+        assert result.meta["timed_out"]
+        shell_dir = ctx.session_dir / "shell"
+        assert list(shell_dir.glob("*.pipestatus")) == []
+        output = await JobOutputTool().run({"job_id": result.meta["job_id"], "wait": True}, ctx)
+        assert "123" in output.content
+        assert "exited with code 0" in output.content
+        assert list(shell_dir.glob("*.pipestatus")) == []
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_sh_flavor_actually_executes(ctx):
+    sh_exe = shutil.which("sh")
+    if sh_exe is None and ctx.shell.kind == "bash":
+        candidate = Path(ctx.shell.executable).resolve().parent.parent / "usr" / "bin" / "sh.exe"
+        if candidate.is_file():
+            sh_exe = str(candidate)
+    if sh_exe is None and Path("/bin/sh").is_file():
+        sh_exe = "/bin/sh"
+    if sh_exe is None:
+        pytest.skip("sh executable not installed")
+
+    sh_info = ShellInfo("bash", sh_exe, "sh")
+    sh_ctx = dataclasses.replace(ctx, shell=sh_info)
+
+    ok_res = shell(sh_ctx, command="echo sh-works | cat")
+    assert ok_res.meta["exit_code"] == 0, ok_res.content
+    assert "sh-works" in ok_res.content
+    assert "pipeline_exit_codes" not in ok_res.meta
+
+    fail_pipe = shell(sh_ctx, command="false | cat")
+    assert fail_pipe.meta["exit_code"] == 0, fail_pipe.content
+    # When sh is bash (e.g. Git Bash sh.exe), PIPESTATUS is captured; on pure dash it stays clean.
+    if "pipeline_exit_codes" in fail_pipe.meta:
+        assert fail_pipe.meta["pipeline_exit_codes"] == [1, 0]
+
+    explicit = shell(sh_ctx, command="false | cat; exit 3")
+    assert explicit.meta["exit_code"] == 3, explicit.content
+    assert "pipeline_exit_codes" not in explicit.meta
