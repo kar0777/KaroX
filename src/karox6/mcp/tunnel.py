@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -90,6 +91,7 @@ def open_tailscale(
     exe: str | None = None,
     run: Runner = run_cli,
     mount: str = "/karox6",
+    alive: Callable[[str], bool] | None = None,
 ) -> Tunnel:
     """Route ``https://<this machine>.ts.net[:port][/mount]/`` to
     ``http://<local_host>:<local_port>``; ``Tunnel.url`` ends with the mount when one was
@@ -132,7 +134,9 @@ def open_tailscale(
     found: int | None = 443
     path = "/"
     if not usable(config, host, 443, target, public=public):
-        if mount and mount_free(config, host, mount, target, public=public):
+        if mount and mount_free(
+            config, host, mount, target, public=public, alive=alive or loopback_alive
+        ):
             path = mount
         else:
             found = free_port(config, host, target, public=public)
@@ -245,9 +249,34 @@ def usable(config: dict[str, Any], host: str, port: int, target: str, *, public:
     return ours and bool(funnel.get(f"{host}:{port}")) == public
 
 
-def mount_free(config: dict[str, Any], host: str, mount: str, target: str, *, public: bool) -> bool:
+def loopback_alive(target: str) -> bool:
+    """Something accepts connections at ``target`` (``http://127.0.0.1:PORT``). A target
+    that is not on this machine's loopback counts as alive: it is not ours to judge."""
+    found = re.fullmatch(r"https?://(127\.0\.0\.1|\[::1\]|localhost):(\d+)/?", target)
+    if not found:
+        return True
+    host = "::1" if found.group(1) == "[::1]" else "127.0.0.1"
+    try:
+        with socket.create_connection((host, int(found.group(2))), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def mount_free(
+    config: dict[str, Any],
+    host: str,
+    mount: str,
+    target: str,
+    *,
+    public: bool,
+    alive: Callable[[str], bool] | None = None,
+) -> bool:
     """Port 443 already serves web routes with the same visibility and ``mount`` on it is
-    unused or already routes to ``target``: KaroX may add (or reuse) that one path."""
+    unused or already routes to ``target``: KaroX may add (or reuse) that one path. With
+    ``alive``, a route at ``mount`` to a loopback port nobody listens on is free too: it
+    was left by a KaroX that died (each start binds a new port), and taking it back keeps
+    the connector URL the same instead of moving to 8443/10000."""
     for session in _section(config, "Foreground").values():
         if isinstance(session, dict) and 443 in _ports(session):
             return False
@@ -257,7 +286,13 @@ def mount_free(config: dict[str, Any], host: str, mount: str, target: str, *, pu
         return False  # not a web listener (raw TCP forward) or not in a shape we know
     if bool(_section(config, "AllowFunnel").get(f"{host}:443")) != public:
         return False
-    return routes.get(mount) in (None, {"Proxy": target})
+    route = routes.get(mount)
+    if route in (None, {"Proxy": target}):
+        return True
+    if alive is None or not isinstance(route, dict) or set(route) != {"Proxy"}:
+        return False
+    proxy = route["Proxy"]
+    return isinstance(proxy, str) and not alive(proxy)
 
 
 def _ports(config: dict[str, Any]) -> set[int]:

@@ -131,8 +131,43 @@ def test_443_that_is_no_web_listener_is_left_alone() -> None:
     assert tunnel.url == f"https://{HOST}:8443"
     taken = busy(443, "http://127.0.0.1:3001")
     taken["Web"][f"{HOST}:443"]["Handlers"]["/karox6"] = {"Proxy": "http://127.0.0.1:1"}
-    tunnel = open_tailscale(8765, exe="ts", run=FakeTailscale(serve=taken))
-    assert tunnel.url == f"https://{HOST}:8443"
+    fake = FakeTailscale(serve=taken)
+    tunnel = open_tailscale(8765, exe="ts", run=fake, alive=lambda _t: True)
+    assert tunnel.url == f"https://{HOST}:8443"  # someone serves /karox6: left alone
+
+
+def test_a_karox_path_left_by_a_dead_karox_is_taken_back() -> None:
+    """Each start binds a new local port, so a KaroX that died left /karox6 pointing at a
+    port nobody listens on: the next start takes the path back and the URL stays put."""
+    stale = busy(443, "http://127.0.0.1:3001")
+    stale["Web"][f"{HOST}:443"]["Handlers"]["/karox6"] = {"Proxy": "http://127.0.0.1:6306"}
+    asked: list[str] = []
+
+    def dead(target: str) -> bool:
+        asked.append(target)
+        return False
+
+    fake = FakeTailscale(serve=stale)
+    tunnel = open_tailscale(8765, exe="ts", run=fake, alive=dead)
+    assert tunnel.url == f"https://{HOST}/karox6"
+    assert asked == ["http://127.0.0.1:6306"]
+    routes = fake.serve["Web"][f"{HOST}:443"]["Handlers"]
+    assert routes["/karox6"] == {"Proxy": TARGET}
+    assert routes["/"] == {"Proxy": "http://127.0.0.1:3001"}  # the site stays
+
+
+def test_loopback_alive_probes_only_this_machine() -> None:
+    import socket
+
+    from karox6.mcp.tunnel import loopback_alive
+
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port = server.getsockname()[1]
+        assert loopback_alive(f"http://127.0.0.1:{port}")
+    assert not loopback_alive(f"http://127.0.0.1:{port}")
+    assert loopback_alive("http://10.0.0.5:80")  # not ours to judge
 
 
 def test_a_route_left_by_a_killed_karox_is_reused() -> None:
