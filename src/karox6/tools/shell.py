@@ -292,7 +292,12 @@ def _description(shell: ShellInfo) -> str:
         "killed. Use `run_in_background` for servers and watchers, then job_output/job_kill. "
         "Long output keeps its head and tail; the full output is saved to a file whose path is "
         "reported. Never start interactive programs (editors, pagers, prompts). Before any "
-        "delete or move, check that the target path is the intended one."
+        "delete or move, check that the target path is the intended one. Use the file tools "
+        "for file work: read files with read (not cat, head, tail or sed -n), search with the "
+        "grep and glob tools, and make hand edits with edit or write (not sed -i, heredocs, "
+        "echo redirection or ad-hoc scripts that rewrite source files). The shell is still "
+        "right for commands whose job is to produce or transform files (builds, generators, "
+        "formatters, codemods, git, bulk moves) and for scratch files in a temp directory."
     )
     if shell.kind == "bash":
         intro = "Execute a bash command (`bash -c`) and return its output."

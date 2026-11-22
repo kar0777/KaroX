@@ -410,3 +410,9 @@ def test_command_wait_cap_turns_a_long_wait_into_a_job(ctx):
         assert "later" in output.content
 
     asyncio.run(scenario())
+
+
+def test_description_points_file_work_to_the_file_tools():
+    text = ShellTool(detect_shell()).description
+    assert "read files with read" in text
+    assert "make hand edits with edit or write" in text
