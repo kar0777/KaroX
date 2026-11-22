@@ -1408,3 +1408,8 @@ git diff --check
   (trio_report rule); if dev39 solves 2+ fewer, revert the prompt change before merging
   devin/big. A 1-task difference is noise either way -> keep dev37 prompt (no change
   without evidence).
+- mab1 result (run 45015076461, 6/6 tasks valid): dev37 3, dev39 4 (pypsa-2051 only by
+  dev39). dev39 used 266 calls / 12.9M input tokens vs 344 / 16.2M (-22% / -20%).
+  Pre-registered rule: 1-task difference = noise -> no prompt change yet. Replication mab2
+  (same wheels, Dahl, night_tasks 25-30, never read) dispatched as run 45020634203; same
+  rule; if dev39 again >= dev37 with lower cost on both, adopt dev39.
