@@ -12,7 +12,11 @@ Gemini. Работает на Windows, Linux и macOS. [English](README.md)
 karox chat --model МОДЕЛЬ           # интерактивный чат (или просто `karox` в терминале)
 karox run --model МОДЕЛЬ "задача"   # одна задача без интерфейса; --json — поток событий JSON
 karox mcp --model МОДЕЛЬ            # KaroX как MCP-сервер по stdio (--http ПОРТ — по HTTP)
+karox update                        # поставить свежую сборку karox6/main (в чате: /update)
 ```
+
+KaroX ещё не установлен или не запускается: `scripts/install_latest.ps1` (Windows) или
+`scripts/install_latest.sh` создаёт venv и ставит в него свежую сборку.
 
 Провайдер: `--provider openai-chat|openai-responses|anthropic|gemini`, `--base-url`,
 `--api-key-env` (имя переменной окружения с ключом; сам ключ в аргументы не передаётся).

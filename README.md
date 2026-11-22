@@ -12,7 +12,11 @@ Status: under construction — see [PROGRESS.md](PROGRESS.md) and [DECISIONS.md]
 karox chat --model MODEL            # interactive chat (also: bare `karox` in a terminal)
 karox run --model MODEL "task"      # one task headless; --json for a JSON-lines event stream
 karox mcp --model MODEL             # serve KaroX to MCP clients over stdio (--http PORT for HTTP)
+karox update                        # install the newest karox6/main build here (/update in the chat)
 ```
+
+No working KaroX yet: `scripts/install_latest.ps1` (Windows) or `scripts/install_latest.sh`
+creates a venv and installs the newest build into it.
 
 Provider flags: `--provider openai-chat|openai-responses|anthropic|gemini`, `--base-url`,
 `--api-key-env`. External MCP servers become tools when listed in `~/.karox6/mcp.json`

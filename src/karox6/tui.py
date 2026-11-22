@@ -1135,10 +1135,16 @@ class ChatApp:
         if start is not None and not failed:
             # What the edit changed, right under its line (the whole change: /diff).
             colors = {"-": "error+del_bg", "+": "success+add_bg", "…": "muted"}
-            for kind, text in diff_preview(event.name, start.arguments, event.meta):
-                short.append(f"{pad}  {p(colors[kind], text)}\n")
-            for kind, text in diff_preview(event.name, start.arguments, event.meta, 400):
-                full.append(f"{pad}  {p(colors[kind], text)}\n")
+            # Tinted lines run to the edge, as a diff viewer draws them: "erase to the end
+            # of the line" paints the rest in the current background.
+            tinted = bool(p.enabled and p.theme.sgr("add_bg"))
+
+            def row(kind: str, text: str) -> str:
+                fill = "\x1b[K" if tinted and kind != "…" else ""
+                return f"{pad}  {p(colors[kind], text + fill)}\n"
+
+            short += [row(*r) for r in diff_preview(event.name, start.arguments, event.meta)]
+            full += [row(*r) for r in diff_preview(event.name, start.arguments, event.meta, 400)]
         output = self._tool_output_lines(event)
         if output and len(full) == 1:
             shown = output[-200:]

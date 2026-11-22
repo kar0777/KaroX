@@ -37,6 +37,21 @@ On a POSIX terminal the keys typed before the app reads them are kept as typed o
 Enter arrived as Ctrl+J and the "ready for input" figure would have been the terminal's
 own echo, not the app's).
 
+6.0.0.dev40 (the new layout: activity line, framed input box, status bar below it, markdown
+answers; 2026-11-22, same PC, `python scripts/tui_perf.py --runs 7`):
+
+| what | Windows (ConPTY) | Linux (WSL2 pty) |
+|---|---|---|
+| first frame | 175 ms (median of 7) | 45 ms |
+| without the start-up frame | 368 ms | 122 ms |
+| ready for input | 424 ms | 143 ms |
+| 6,000 lines streamed and shown | 1.14 s, 9 KB written | 0.28 s, 9 KB written |
+| PageUp / Ctrl+Home / Ctrl+End | 24 / 47 / 24 ms | 23 / 23 / 23 ms |
+| key -> echo while a reply streams | median 27 ms, p90 30 ms | median 25 ms, p90 48 ms |
+| terminal output while a reply streams | 7.7 KB/s | 8.6 KB/s |
+
+`scripts/perf_check.py`: start 116.8 ms, idle RSS 30.0 MiB.
+
 What the numbers mean:
 
 * First frame. Python needs ~65 ms to start here and the imports the app needs (asyncio

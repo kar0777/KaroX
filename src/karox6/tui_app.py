@@ -108,7 +108,30 @@ _FLAGS = {1: "bold", 2: "dim", 3: "italic", 4: "underline", 7: "reverse"}
 _FLAG_OFF = {22: ("bold", "dim"), 23: ("italic",), 24: ("underline",), 27: ("reverse",)}
 
 
+_ERASE_LINE = "\x1b[K"
+_FILL_MARK = "\ue000"
+FILL = "class:fill"
+
+
 def _runs(text: str) -> list[Run]:
+    """``text`` (plain, or with SGR colour codes) as styled runs. "Erase to the end of the
+    line" (``ESC [ K``) after coloured text, which a terminal answers by painting the rest
+    of the line in the current background, marks that run ``class:fill``: the pane pads it
+    to the edge at whatever width it is drawn (tinted diff lines)."""
+    if _ERASE_LINE not in text:
+        return _sgr_runs(text)
+    out: list[Run] = []
+    for style, chunk in _sgr_runs(text.replace(_ERASE_LINE, _FILL_MARK)):
+        if _FILL_MARK in chunk:
+            head = chunk.replace(_FILL_MARK, "")
+            if head:
+                out.append((f"{style} {FILL}".strip(), head))
+        else:
+            out.append((style, chunk))
+    return out
+
+
+def _sgr_runs(text: str) -> list[Run]:
     """``text`` (plain, or with SGR colour codes) as styled runs. The codes the chat itself
     writes are read here directly (a run per colour change, not a fragment per character);
     anything richer goes through prompt_toolkit's ANSI parser."""
@@ -505,8 +528,18 @@ class _TranscriptControl(UIControl):
         known = len(visual)
         total = known + len(live)
         cursor_y = min(self.scroll_top, total - 1)
+        width = self.last_width
+
+        def get_line(i: int) -> StyleAndTextTuples:
+            line = visual[i] if i < known else live[i - known]
+            if line and FILL in line[-1][0]:  # a tinted line runs to the edge
+                used = sum(cell_width(fragment[1]) for fragment in line)
+                if used < width:
+                    return [*line, (line[-1][0], " " * (width - used))]
+            return line
+
         return UIContent(
-            get_line=lambda i: visual[i] if i < known else live[i - known],
+            get_line=get_line,
             line_count=total,
             cursor_position=Point(x=0, y=cursor_y),
             show_cursor=False,

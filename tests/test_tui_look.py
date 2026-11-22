@@ -275,3 +275,16 @@ def test_file_menu_matches_prefix_name_substring_then_letters_in_order() -> None
     assert _match_workspace_files(files, "guide")[0] == "docs/guide.md"
     assert _match_workspace_files(files, "tuiap") == ["src/karox6/tui_app.py"]
     assert _match_workspace_files(files, "zz") == []
+
+
+def test_tinted_lines_run_to_the_edge_at_any_width() -> None:
+    line = "\x1b[32;48;2;30;58;42m+ added\x1b[K\x1b[0m\n"
+    assert _runs(line) == [("ansigreen bg:#1e3a2a class:fill", "+ added"), ("", "\n")]
+    pane = _TranscriptControl()
+    pane.append("plain\n" + line)
+    for width in (40, 12):
+        content = pane.create_content(width, 5)
+        texts = ["".join(f[1] for f in content.get_line(i)) for i in range(content.line_count)]
+        assert texts[0] == "plain"  # untouched
+        assert texts[1] == "+ added".ljust(width)  # padded to the edge, never wrapped
+    assert pane.plain_text == "plain\n+ added\n"

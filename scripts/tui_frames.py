@@ -48,7 +48,8 @@ _NAMED = {
     "brightcyan": "61d6d6",
     "brightwhite": "f2f2f2",
 }
-_FG, _BG = "cccccc", "0c0c0c"
+THEME = os.environ.get("FRAME_THEME", "")  # "light": KAROX_THEME=light on a white page
+_FG, _BG = ("1f2328", "ffffff") if THEME == "light" else ("cccccc", "0c0c0c")
 
 MARKDOWN_ANSWER = """\
 ## Done: the greeting is fixed
@@ -161,6 +162,7 @@ class Run:
             PYTHONPATH=str(src),
             TERM="xterm-256color",
             COLORTERM="truecolor",
+            **({"KAROX_THEME": THEME} if THEME else {}),
         )
         argv = [sys.executable, "-m", "karox6", "chat", "--home", str(self.home)]
         argv += ["--cwd", str(self.ws), "--no-mcp", "--model", "demo-model"]

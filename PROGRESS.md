@@ -2200,3 +2200,12 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   Windows 1231 passed, 6 skipped (before the last two test fixes); Linux 1232 passed,
   8 skipped. A test failed only on Linux: a scripted turn takes 0.0 s, and the turn time
   was hidden when it was zero; now it is hidden only before the first turn.
+- 08:48 UTC, registered before the run (a check that KaroX dev40 works, not a comparison;
+  no decision rides on it; ReformBoss not used). Live check `devl40` in GitHub Actions:
+  karox6 alone, wheel 6.0.0.dev40 (built from 66a0741, added to bench `devin/bench`), disc
+  tasks 2 and 7 (isort-2750, plopp-614), 1 attempt, upstream `dahl2` (free GLM-5.3-Flash),
+  parallel 1, chunk 2 (one runner). About 120 requests (56 per task last time). Pass = the
+  job reports karox 6.0.0.dev40, the audit has successful calls and each trial ends by the
+  agent's own choice ("completed"). An overloaded or slow lane is recorded, not a failure
+  of KaroX. Locally: the configured provider in `~/.karox6/config.toml` is ReformBoss, so
+  no local chat with a live model (the user can run `karox6` -> `/setup` for another).

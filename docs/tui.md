@@ -63,6 +63,7 @@ while streaming); keys stay responsive during a turn (median 27 ms key to echo).
 |---|---|---|
 | welcome | [text](tui/before/1-welcome.txt), [picture](tui/before/1-welcome.svg) | [text](tui/after/1-welcome.txt), [picture](tui/after/1-welcome.svg) |
 | a turn: read, run, edit, markdown answer | [text](tui/before/2-turn.txt), [picture](tui/before/2-turn.svg) | [text](tui/after/2-turn.txt), [picture](tui/after/2-turn.svg) |
+| the same turn, `theme = "light"` | (no themes before) | [text](tui/after/2-turn-light.txt), [picture](tui/after/2-turn-light.svg) |
 | the `/` menu | [text](tui/before/3-commands.txt), [picture](tui/before/3-commands.svg) | [text](tui/after/3-commands.txt), [picture](tui/after/3-commands.svg) |
 | the agent at work | [text](tui/before/6-working.txt), [picture](tui/before/6-working.svg) | [text](tui/after/6-working.txt), [picture](tui/after/6-working.svg) |
 
