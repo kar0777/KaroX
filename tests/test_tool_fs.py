@@ -299,16 +299,29 @@ def test_read_several_files_in_one_call(ctx):
 
 
 def test_read_several_files_share_one_byte_budget(ctx):
-    from karox6.tools.fs import READ_MAX_BYTES
+    from karox6.tools.fs import READ_MANY_MAX_BYTES, READ_MAX_BYTES
 
+    assert READ_MAX_BYTES == 50 * 1024
+    assert READ_MANY_MAX_BYTES == 120 * 1024
+
+    # Two ~40 KB files exceed the per-file 50 KB cap combined, but both fit in 120 KB total.
     line = "x" * 99 + "\n"
-    (ctx.workspace / "big.txt").write_text(line * (READ_MAX_BYTES // 100 + 50))
-    (ctx.workspace / "big2.txt").write_text(line * 100)
-    result = call(ReadTool(), ctx, file_paths=["big.txt", "big2.txt"])
-    first, second = result.content.split("<path>big2.txt</path>")
-    assert "Use offset=" in first
-    assert "Use offset=" in second or "(Not read" in second
-    assert len(result.content.encode()) < READ_MAX_BYTES + 2_000
+    (ctx.workspace / "a.txt").write_text(line * 380)
+    (ctx.workspace / "b.txt").write_text(line * 380)
+    both = call(ReadTool(), ctx, file_paths=["a.txt", "b.txt"])
+    assert not both.is_error
+    assert "Use offset=" not in both.content
+    assert "(Not read" not in both.content
+
+    # Each file is still capped at 50 KB and the whole call shares the 120 KB budget.
+    for i in range(4):
+        (ctx.workspace / f"big{i}.txt").write_text(line * (READ_MAX_BYTES // 100 + 50))
+    result = call(ReadTool(), ctx, file_paths=[f"big{i}.txt" for i in range(4)])
+    parts = result.content.split("<path>big")
+    assert "Use offset=" in parts[1]  # big0 capped at per-file 50 KB
+    assert "Use offset=" in parts[2]  # big1 capped at per-file 50 KB
+    assert "Use offset=" in parts[-1] or "(Not read" in result.content
+    assert len(result.content.encode()) < READ_MANY_MAX_BYTES + 4_000
 
 
 def test_read_needs_a_path(ctx):
@@ -398,3 +411,135 @@ def test_edit_next_to_latin1_bytes_shows_and_logs_clean_text(ctx):
     result = edit(ctx, "y = 1", "y = 2")
     assert not result.is_error
     json.dumps(result.content, ensure_ascii=False).encode("utf-8")  # no lone surrogate
+
+
+def test_edit_multi_hunk_success_and_evolving_text(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("".join(f"line{i}\n" for i in range(1, 31)))
+    read(ctx)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "line2\n", "new_string": "TWO\n"},
+            {"old_string": "TWO\nline3\n", "new_string": "TWO_FINAL\nline3\n"},
+            {"old_string": "line25\n", "new_string": "TWENTY_FIVE\n"},
+        ],
+    )
+    assert not result.is_error
+    text = path.read_text()
+    assert "TWO_FINAL\nline3\n" in text
+    assert "TWENTY_FIVE\n" in text
+    assert "2: TWO_FINAL" in result.content
+    assert "25: TWENTY_FIVE" in result.content
+
+
+def test_edit_multi_hunk_replace_all(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("tag = 1\nfoo = 1\ntag = 2\n")
+    read(ctx)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "tag", "new_string": "key", "replace_all": True},
+            {"old_string": "foo = 1", "new_string": "bar = 2"},
+        ],
+    )
+    assert not result.is_error
+    assert path.read_text() == "key = 1\nbar = 2\nkey = 2\n"
+
+
+def test_edit_multi_hunk_failure_rolls_back_and_names_index(ctx):
+    path = ctx.workspace / "file"
+    original = "alpha\nbeta\ngamma\n"
+    path.write_text(original)
+    read(ctx)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "alpha", "new_string": "ALPHA"},
+            {"old_string": "missing_text", "new_string": "X"},
+        ],
+    )
+    assert result.is_error
+    assert "edits[1]" in result.content
+    assert path.read_text() == original
+
+
+def test_edit_multi_hunk_validation(ctx):
+    (ctx.workspace / "file").write_text("a\nb\n")
+    read(ctx)
+    assert call(EditTool(), ctx, file_path="file", edits=[]).is_error
+    assert call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        old_string="a",
+        new_string="c",
+        edits=[{"old_string": "b", "new_string": "d"}],
+    ).is_error
+    bad = call(EditTool(), ctx, file_path="file", edits=[{"old_string": "a"}])
+    assert bad.is_error
+    assert "edits[0]" in bad.content
+
+
+def test_edit_not_found_returns_closest_numbered_lines(ctx):
+    lines = [f"def fn_{i}(arg):" for i in range(1, 31)]
+    lines[15] = "    result = compute_total(items,   tax_rate)  # " + "z" * 250
+    lines[16] = "    return result + 1"
+    (ctx.workspace / "file").write_text("\n".join(lines) + "\n")
+    read(ctx)
+
+    # First line differs and spacing differs, but nearby lines match after collapsing whitespace.
+    result = edit(
+        ctx,
+        "def fn_15_typo(arg):\n"
+        "  result = compute_total(items, tax_rate) # wrong\n"
+        "  return result + 1",
+        "    return 0",
+    )
+    assert result.is_error
+    assert "Closest lines in file:" in result.content
+    shown = result.content.split("Closest lines in file:\n")[1].splitlines()
+    assert 1 <= len(shown) <= 12
+    assert any(ln.startswith("17:     return result + 1") for ln in shown)
+    # Long line is capped at 200 chars of content.
+    line16 = next(ln for ln in shown if ln.startswith("16: "))
+    assert len(line16.removeprefix("16: ")) <= 200
+    assert line16.endswith("...")
+
+
+def test_edit_not_found_already_applied_note(ctx):
+    (ctx.workspace / "file").write_text(
+        "say(\u201chello \u2014 world\u201d)\nother = 1\n", encoding="utf-8"
+    )
+    read(ctx)
+    # Normalised quotes/dashes/whitespace match new_string (>= 20 chars).
+    applied = edit(ctx, 'say("old message")', 'say("hello   -   world")')
+    assert applied.is_error
+    assert "new_string is already in the file: this edit may already be applied" in applied.content
+
+    # Short new_string (< 20 chars) must not claim already-applied even when present.
+    short = edit(ctx, "other = 999", "other = 1")
+    assert short.is_error
+    assert "already be applied" not in short.content
+    assert "2: other = 1" in short.content
+
+
+def test_fs_tool_descriptions_mention_new_usage():
+    edit_desc = EditTool.description.lower()
+    assert "`edits`" in edit_desc
+    assert "parallel" in edit_desc
+    assert "different files" in edit_desc
+
+    read_desc = ReadTool.description.lower()
+    assert "`file_paths`" in read_desc
+    assert "120 kb" in read_desc
+    assert "50 kb" in read_desc
+    assert "whole files" in read_desc
+    assert "small slices" in read_desc

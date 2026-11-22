@@ -410,3 +410,16 @@ def test_command_wait_cap_turns_a_long_wait_into_a_job(ctx):
         assert "later" in output.content
 
     asyncio.run(scenario())
+
+
+def test_shell_descriptions_guide_foreground_vs_background(ctx):
+    tool = ShellTool(ctx.shell)
+    bg_desc = tool.parameters["properties"]["run_in_background"]["description"].lower()
+    desc = tool.description.lower()
+    for text in (desc, bg_desc):
+        assert "foreground" in text
+        assert "servers" in text
+        assert "daemons" in text
+        assert "watchers" in text
+        assert "timeout" in text
+        assert "long builds" not in text

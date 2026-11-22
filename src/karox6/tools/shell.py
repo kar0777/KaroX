@@ -164,8 +164,11 @@ class ShellTool:
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Start as a background job and return at once "
-                    "(servers, watchers, long builds).",
+                    "description": (
+                        "Only for servers, daemons, and watchers that never end. Run finite "
+                        "builds, tests, and scripts in the foreground (a command exceeding "
+                        "timeout moves to a background job automatically)."
+                    ),
                 },
             },
             "required": ["command"],
@@ -287,12 +290,13 @@ def _description(shell: ShellInfo) -> str:
         " Each call runs in a fresh process with stdin closed, in the workspace root unless "
         "`workdir` is given (prefer `workdir` over `cd`). Output is stdout and stderr merged, "
         "followed by an `[exit code: N]` marker; check it and investigate failures before "
-        f"moving on. Default timeout {DEFAULT_TIMEOUT_MS} ms (max {MAX_TIMEOUT_MS}); a command "
-        "still running at its timeout keeps running as a background job instead of being "
-        "killed. Use `run_in_background` for servers and watchers, then job_output/job_kill. "
-        "Long output keeps its head and tail; the full output is saved to a file whose path is "
-        "reported. Never start interactive programs (editors, pagers, prompts). Before any "
-        "delete or move, check that the target path is the intended one."
+        f"moving on. Default timeout {DEFAULT_TIMEOUT_MS} ms (max {MAX_TIMEOUT_MS}); run "
+        "finite builds, tests, and scripts in the foreground (a command still running at its "
+        "timeout automatically moves to a background job instead of being killed). Use "
+        "`run_in_background` only for servers, daemons, and watchers that never end, then "
+        "job_output/job_kill. Long output keeps its head and tail; the full output is saved to "
+        "a file whose path is reported. Never start interactive programs (editors, pagers, "
+        "prompts). Before any delete or move, check that the target path is the intended one."
     )
     if shell.kind == "bash":
         intro = "Execute a bash command (`bash -c`) and return its output."

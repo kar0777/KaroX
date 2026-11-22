@@ -10,10 +10,12 @@ punctuation) is tried; a fallback is used only when it matches exactly one place
 from __future__ import annotations
 
 import asyncio
+import difflib
 import re
 import stat
 import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ from karox6.tools.clones import TIME_BUDGET_S, copies_note, find_copies
 READ_LIMIT = 2000
 READ_MAX_LINE = 2000
 READ_MAX_BYTES = 50 * 1024
+READ_MANY_MAX_BYTES = 120 * 1024
 READ_MAX_FILE_BYTES = 64 * 1024 * 1024  # larger files: grep or a shell slice
 BINARY_PROBE = 8000
 
@@ -59,11 +62,12 @@ def _decode(data: bytes) -> str:
 class ReadTool:
     name = "read"
     description = (
-        "Read a UTF-8 text file and return line-numbered content (`N: text`). Reads up to "
-        f"{READ_LIMIT} lines from `offset` (1-based); use offset and limit to continue in large "
-        "files. A directory path lists its entries. `file_paths` reads several whole files in "
-        f"one call (together at most {READ_MAX_BYTES // 1024} KB). Use this tool, not shell "
-        "commands like cat, to inspect files."
+        "Read UTF-8 text files and return line-numbered content (`N: text`). Pass every file "
+        "you need in one call via `file_paths` (up to "
+        f"{READ_MAX_BYTES // 1024} KB per file, {READ_MANY_MAX_BYTES // 1024} KB total). "
+        "Read whole files or large sections rather than small slices; use `offset` and `limit` "
+        f"(default {READ_LIMIT}) only to continue in large files. A directory path lists its "
+        "entries. Use this tool, not shell commands like cat."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -74,7 +78,9 @@ class ReadTool:
             "file_paths": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Several files to read from the start, instead of file_path.",
+                "description": (
+                    "Pass all files you need to read in one call, instead of file_path."
+                ),
             },
         },
     }
@@ -107,13 +113,13 @@ READ_MAX_FILES = 20
 def _read_many(paths: list[str], ctx: ToolContext) -> ToolResult:
     parts: list[str] = []
     errors = 0
-    budget = READ_MAX_BYTES
+    budget = READ_MANY_MAX_BYTES
     skipped: list[str] = []
     for raw in paths[:READ_MAX_FILES]:
         if budget <= 0:
             skipped.append(raw[:200])
             continue
-        result, used = _read_file(raw, ctx, 1, READ_LIMIT, budget)
+        result, used = _read_file(raw, ctx, 1, READ_LIMIT, min(budget, READ_MAX_BYTES))
         budget -= used if not result.is_error else len(result.content)
         errors += result.is_error
         parts.append(result.content)
@@ -124,7 +130,7 @@ def _read_many(paths: list[str], ctx: ToolContext) -> ToolResult:
         )
         parts.append(
             f"(Not read - this call reads at most {READ_MAX_FILES} files and "
-            f"{READ_MAX_BYTES // 1024} KB: {names}. Read them in another call.)"
+            f"{READ_MANY_MAX_BYTES // 1024} KB: {names}. Read them in another call.)"
         )
     return ToolResult("\n\n".join(parts), is_error=errors == len(parts) and not skipped)
 
@@ -262,13 +268,125 @@ class WriteTool:
         return ToolResult(f"{verb} {shown} ({lines} lines).", meta={"path": str(path)})
 
 
+@dataclass(frozen=True, slots=True)
+class _EditHunk:
+    old: str
+    new: str
+    replace_all: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _AppliedHunk:
+    old_n: str
+    new_n: str
+    count: int
+    how: str
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower == "true":
+            return True
+        if lower == "false":
+            return False
+    return bool(value)
+
+
+def _parse_edit_hunks(args: dict[str, Any]) -> tuple[list[_EditHunk], bool] | str:
+    """Return ``(hunks, is_multi)`` or an error message."""
+    raw_edits = args.get("edits")
+    has_single = args.get("old_string") is not None or args.get("new_string") is not None
+    if raw_edits is not None:
+        if has_single:
+            return "invalid arguments: pass either old_string/new_string or edits, not both."
+        if not isinstance(raw_edits, list) or not raw_edits:
+            return "invalid arguments: 'edits' must be a non-empty array."
+        hunks: list[_EditHunk] = []
+        for idx, item in enumerate(raw_edits):
+            if not isinstance(item, dict):
+                return f"invalid arguments: edits[{idx}] must be an object."
+            old = item.get("old_string")
+            new = item.get("new_string")
+            if old is None or new is None:
+                return f"invalid arguments: edits[{idx}] requires 'old_string' and 'new_string'."
+            if not isinstance(old, str) or not isinstance(new, str):
+                return (
+                    f"invalid arguments: edits[{idx}] 'old_string' and 'new_string' "
+                    "must be strings."
+                )
+            hunks.append(_EditHunk(old, new, _parse_bool(item.get("replace_all"))))
+        return hunks, True
+
+    if args.get("old_string") is None:
+        return "invalid arguments: missing required 'old_string' (or 'edits')."
+    if args.get("new_string") is None:
+        return "invalid arguments: missing required 'new_string' (or 'edits')."
+    return (
+        [
+            _EditHunk(
+                str(args["old_string"]), str(args["new_string"]), bool(args.get("replace_all"))
+            )
+        ],
+        False,
+    )
+
+
+def _can_keep_mixed(raw: str, hunks: list[_EditHunk]) -> bool:
+    """True when every hunk matches raw mixed-ending text with the same count as LF."""
+    current = raw
+    for hunk in hunks:
+        old_n = hunk.old.replace("\r\n", "\n")
+        new_n = hunk.new.replace("\r\n", "\n")
+        if old_n not in current or current.count(old_n) != text_lf_count(current, old_n):
+            return False
+        current = (
+            current.replace(old_n, new_n) if hunk.replace_all else current.replace(old_n, new_n, 1)
+        )
+    return True
+
+
+def _preflight_hunks(
+    text: str,
+    hunks: list[_EditHunk],
+    *,
+    is_multi: bool,
+    shown: str,
+    unsure: str,
+) -> tuple[str, list[_AppliedHunk]] | str:
+    current = text
+    applied: list[_AppliedHunk] = []
+    for idx, hunk in enumerate(hunks):
+        prefix = f"edits[{idx}]: " if is_multi else ""
+        old_n = hunk.old.replace("\r\n", "\n")
+        new_n = hunk.new.replace("\r\n", "\n")
+        result = apply_edit(current, old_n, new_n, hunk.replace_all)
+        if isinstance(result, str):
+            return f"{prefix}{result.replace('{path}', shown)}"
+        next_text, count, how = result
+        if unsure and how != "exactly":
+            return (
+                f"{prefix}old_string matches {shown} only approximately ({how}) and the file "
+                f"{unsure}. Read it, then retry."
+            )
+        if unsure and count != 1:
+            return (
+                f"{prefix}replace_all would change {count} places in {shown}, which "
+                f"{unsure}. Read it, then retry."
+            )
+        applied.append(_AppliedHunk(old_n, new_n, count, how))
+        current = next_text
+    return current, applied
+
+
 class EditTool:
     name = "edit"
     description = (
         "Edit an existing UTF-8 text file by replacing literal text. `old_string` must match "
-        "exactly one place in the file (include enough surrounding lines to make it unique) "
-        "unless `replace_all` is true; do not include the `N: ` line-number prefixes shown by "
-        "read."
+        "exactly one place (include surrounding lines to make it unique) unless `replace_all` "
+        "is true; omit `N: ` line-number prefixes from read. Use `edits` for several changes "
+        "in one file (applied in order, all-or-nothing); issue edits to different files as "
+        "parallel calls in one response."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -277,26 +395,51 @@ class EditTool:
             "old_string": {"type": "string", "description": "Exact text to replace."},
             "new_string": {"type": "string", "description": "Replacement text."},
             "replace_all": {"type": "boolean", "description": "Replace every occurrence."},
+            "edits": {
+                "type": "array",
+                "description": (
+                    "Ordered list of replacements in this file instead of "
+                    "old_string/new_string (all-or-nothing)."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_string": {"type": "string", "description": "Exact text to replace."},
+                        "new_string": {"type": "string", "description": "Replacement text."},
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Replace every occurrence.",
+                        },
+                    },
+                    "required": ["old_string", "new_string"],
+                },
+            },
         },
-        "required": ["file_path", "old_string", "new_string"],
+        "required": ["file_path"],
     }
     read_only = False
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         path = ctx.resolve(str(args.get("file_path") or args.get("path") or ""))
         shown = _display(path, ctx)
-        old = str(args["old_string"])
-        new = str(args["new_string"])
+        parsed = _parse_edit_hunks(args)
+        if isinstance(parsed, str):
+            return ToolResult(f"Error: {parsed}", is_error=True)
+        hunks, is_multi = parsed
         if not path.exists():
-            hint = " Use write to create a new file." if old == "" else ""
+            hint = " Use write to create a new file." if any(h.old == "" for h in hunks) else ""
             return ToolResult(f"Error: {shown} does not exist.{hint}", is_error=True)
-        if old == new:
-            return ToolResult("Error: old_string and new_string are identical.", is_error=True)
-        if old == "":
-            return ToolResult(
-                "Error: old_string is empty. Quote the text to replace, or use write.",
-                is_error=True,
-            )
+        for idx, hunk in enumerate(hunks):
+            prefix = f"edits[{idx}]: " if is_multi else ""
+            if hunk.old == hunk.new:
+                return ToolResult(
+                    f"Error: {prefix}old_string and new_string are identical.", is_error=True
+                )
+            if hunk.old == "":
+                return ToolResult(
+                    f"Error: {prefix}old_string is empty. Quote the text to replace, or use write.",
+                    is_error=True,
+                )
         # An exact, unique old_string proves the agent knows the text it replaces, even if
         # it saw the file only through shell output or the file changed since its last
         # read (its own shell command, a formatter). Only a fuzzy match needs a fresh read.
@@ -318,34 +461,18 @@ class EditTool:
         crlfs = raw.count("\r\n")
         mixed = 0 < crlfs < raw.count("\n")
         crlf = crlfs > 0 and not mixed
-        old_n = old.replace("\r\n", "\n")
-        new_n = new.replace("\r\n", "\n")
-        replace_all = bool(args.get("replace_all"))
-
-        result: tuple[str, int, str] | str
-        if mixed and old_n in raw and raw.count(old_n) == text_lf_count(raw, old_n):
+        if mixed and _can_keep_mixed(raw, hunks):
             # Mixed line endings: edit the text as it is, so lines outside the edit keep
             # their own endings.
-            result = apply_edit(raw, old_n, new_n, replace_all)
             text = raw
         else:
             text = raw.replace("\r\n", "\n") if crlfs else raw
-            result = apply_edit(text, old_n, new_n, replace_all)
-        if isinstance(result, str):
-            return ToolResult(f"Error: {result.replace('{path}', shown)}", is_error=True)
-        updated, count, how = result
-        if unsure and how != "exactly":
-            return ToolResult(
-                f"Error: old_string matches {shown} only approximately ({how}) and the file "
-                f"{unsure}. Read it, then retry.",
-                is_error=True,
-            )
-        if unsure and count != 1:
-            return ToolResult(
-                f"Error: replace_all would change {count} places in {shown}, which "
-                f"{unsure}. Read it, then retry.",
-                is_error=True,
-            )
+
+        preflight = _preflight_hunks(text, hunks, is_multi=is_multi, shown=shown, unsure=unsure)
+        if isinstance(preflight, str):
+            return ToolResult(f"Error: {_shown_text(preflight)}", is_error=True)
+        updated, applied = preflight
+        updated_lf = updated.replace("\r\n", "\n")
         if crlf:
             updated = updated.replace("\n", "\r\n")
         payload = updated.encode("utf-8", "surrogateescape")
@@ -356,18 +483,41 @@ class EditTool:
         except OSError as exc:
             return ToolResult(f"Error: cannot write {shown}: {exc}", is_error=True)
         ctx.files.record_write(path, observe=not unsure)
-        note = f" (matched {how})" if how != "exactly" else ""
-        plural = "s" if count != 1 else ""
-        snippet = (
-            _shown_text(changed_snippet(text, updated.replace("\r\n", "\n"))) if count == 1 else ""
-        )
-        copies = await _copies_note(ctx, path, old_n, new_n) if ctx.copy_notes else ""
-        meta: dict[str, Any] = {"path": str(path), "match": how}
-        if count == 1 and how == "exactly":
-            # 1-based line where the replaced text began (the chat numbers its preview)
-            meta["line"] = text.count("\n", 0, text.find(old_n)) + 1
+
+        if not is_multi:
+            step = applied[0]
+            note = f" (matched {step.how})" if step.how != "exactly" else ""
+            plural = "s" if step.count != 1 else ""
+            snippet = _shown_text(changed_snippet(text, updated_lf)) if step.count == 1 else ""
+            copies = await _copies_note(ctx, path, step.old_n, step.new_n) if ctx.copy_notes else ""
+            meta: dict[str, Any] = {"path": str(path), "match": step.how}
+            if step.count == 1 and step.how == "exactly":
+                # 1-based line where the replaced text began (the chat numbers its preview)
+                meta["line"] = text.count("\n", 0, text.find(step.old_n)) + 1
+            return ToolResult(
+                f"Edited {shown}: replaced {step.count} occurrence{plural}{note}.{snippet}{copies}",
+                meta=meta,
+            )
+
+        total_count = sum(s.count for s in applied)
+        fuzzy = [f"edits[{i}] {s.how}" for i, s in enumerate(applied) if s.how != "exactly"]
+        note = f" (matched {', '.join(fuzzy)})" if fuzzy else ""
+        edits_word = "edit" if len(applied) == 1 else "edits"
+        repl_word = "replacement" if total_count == 1 else "replacements"
+        has_targeted = any(s.count == 1 for s in applied)
+        snippet = _shown_text(changed_snippets(text, updated_lf)) if has_targeted else ""
+        copies = ""
+        if ctx.copy_notes:
+            notes = [await _copies_note(ctx, path, s.old_n, s.new_n) for s in applied]
+            copies = "".join(n for n in notes if n)
+        meta = {
+            "path": str(path),
+            "edits": len(applied),
+            "match": "exactly" if not fuzzy else "fuzzy",
+        }
         return ToolResult(
-            f"Edited {shown}: replaced {count} occurrence{plural}{note}.{snippet}{copies}",
+            f"Edited {shown}: applied {len(applied)} {edits_word} "
+            f"({total_count} {repl_word}){note}.{snippet}{copies}",
             meta=meta,
         )
 
@@ -422,6 +572,51 @@ def changed_snippet(before: str, after: str) -> str:
     return f"\nThe edited region now reads:\n{body}{more}"
 
 
+def changed_snippets(before: str, after: str, max_lines: int = SNIPPET_MAX_LINES * 2) -> str:
+    """Changed regions of ``after`` with surrounding context, numbered as read shows them."""
+    if before == after:
+        return ""
+    before_lines = before.split("\n")
+    if len(before_lines) > 1 and before_lines[-1] == "":
+        before_lines.pop()
+    after_lines = after.split("\n")
+    if len(after_lines) > 1 and after_lines[-1] == "":
+        after_lines.pop()
+    if len(before_lines) > 10_000 or len(after_lines) > 10_000:
+        return changed_snippet(before, after)
+    groups = list(
+        difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False).get_grouped_opcodes(
+            SNIPPET_CONTEXT
+        )
+    )
+    if not groups:
+        return ""
+    if len(groups) == 1:
+        return changed_snippet(before, after)
+    chunks: list[str] = []
+    remaining = max_lines
+    truncated = False
+    for group in groups:
+        if remaining <= 0:
+            truncated = True
+            break
+        j1 = group[0][3]
+        j2 = group[-1][4]
+        span = j2 - j1
+        take = min(span, remaining)
+        if take < span:
+            truncated = True
+        chunk_lines = [f"{n + 1}: {after_lines[n]}" for n in range(j1, j1 + take)]
+        if chunk_lines:
+            chunks.append("\n".join(chunk_lines))
+            remaining -= take
+    if not chunks:
+        return ""
+    body = "\n...\n".join(chunks)
+    more = "\n..." if truncated else ""
+    return f"\nThe edited regions now read:\n{body}{more}"
+
+
 # --- matching -----------------------------------------------------------------
 
 _LINE_PREFIX = re.compile(r"^\s*\d+: ?")
@@ -443,7 +638,7 @@ def apply_edit(text: str, old: str, new: str, replace_all: bool) -> tuple[str, i
         done = attempt(text, old, new)
         if done is not None:
             return done, 1, how
-    return _not_found(text, old)
+    return _not_found(text, old, new)
 
 
 def _match_lines(text: str, needle: str) -> list[int]:
@@ -576,7 +771,101 @@ _FALLBACKS: list[tuple[str, Callable[[str, str, str], str | None]]] = [
 ]
 
 
-def _not_found(text: str, old: str) -> str:
+MISS_MAX_LINES = 12
+MISS_MAX_LINE_CHARS = 200
+MISS_MIN_APPLIED_CHARS = 20
+
+
+def _norm_loose(text: str) -> str:
+    """Normalise quotes, dashes, and collapse whitespace for loose comparison."""
+    return " ".join(_norm_punct(text).split())
+
+
+def _closest_region(text: str, old: str) -> str | None:
+    """Locate the most similar region of ``text`` to ``old`` and return up to
+    ``MISS_MAX_LINES`` numbered lines (each capped at ``MISS_MAX_LINE_CHARS`` chars)."""
+    file_lines = text.split("\n")
+    if len(file_lines) > 1 and file_lines[-1] == "":
+        file_lines.pop()
+    if not file_lines:
+        return None
+    old_lines = old.split("\n")
+    while old_lines and not old_lines[-1].strip():
+        old_lines.pop()
+    while old_lines and not old_lines[0].strip():
+        old_lines.pop(0)
+    query = [(i, _norm_loose(ln)) for i, ln in enumerate(old_lines) if _norm_loose(ln)]
+    if not query:
+        return None
+
+    norm_file = [_norm_loose(ln) for ln in file_lines]
+    positions: dict[str, list[int]] = {}
+    for idx, norm in enumerate(norm_file):
+        if norm:
+            positions.setdefault(norm, []).append(idx)
+
+    votes: dict[int, float] = {}
+    for q_idx, q_norm in query:
+        hits = positions.get(q_norm)
+        if not hits or len(hits) > 200:
+            continue
+        weight = 1.0 / len(hits)
+        for f_idx in hits:
+            start = f_idx - q_idx
+            votes[start] = votes.get(start, 0.0) + weight
+            votes[start - 1] = votes.get(start - 1, 0.0) + weight * 0.5
+            votes[start + 1] = votes.get(start + 1, 0.0) + weight * 0.5
+
+    if not votes and len(norm_file) <= 5000:
+        for q_idx, q_norm in query[:8]:
+            q_len = len(q_norm)
+            for f_idx, f_norm in enumerate(norm_file):
+                if not f_norm:
+                    continue
+                f_len = len(f_norm)
+                if min(q_len, f_len) * 2 < max(q_len, f_len):
+                    continue
+                matcher = difflib.SequenceMatcher(None, q_norm, f_norm, autojunk=False)
+                if matcher.quick_ratio() >= 0.5:
+                    ratio = matcher.ratio()
+                    if ratio >= 0.5:
+                        start = f_idx - q_idx
+                        votes[start] = votes.get(start, 0.0) + ratio
+
+    if not votes:
+        return None
+
+    best = max(votes, key=lambda s: (votes[s], -s))
+    span = len(old_lines)
+    region_start = max(0, min(best, len(file_lines) - 1))
+    region_end = min(len(file_lines), region_start + max(span, 1))
+    shown_span = region_end - region_start
+    if shown_span >= MISS_MAX_LINES:
+        start = region_start
+        end = min(len(file_lines), start + MISS_MAX_LINES)
+    else:
+        pad = min(3, (MISS_MAX_LINES - shown_span) // 2)
+        start = max(0, region_start - pad)
+        end = min(len(file_lines), region_end + pad)
+        if end - start > MISS_MAX_LINES:
+            end = start + MISS_MAX_LINES
+
+    out: list[str] = []
+    for n in range(start, end):
+        line = file_lines[n]
+        if len(line) > MISS_MAX_LINE_CHARS:
+            line = line[: MISS_MAX_LINE_CHARS - 3] + "..."
+        out.append(f"{n + 1}: {line}")
+    return "\n".join(out)
+
+
+def _not_found(text: str, old: str, new: str = "") -> str:
+    norm_new = _norm_loose(new) if new else ""
+    if len(norm_new) >= MISS_MIN_APPLIED_CHARS and norm_new in _norm_loose(text):
+        return (
+            "old_string was not found in {path}. "
+            "new_string is already in the file: this edit may already be applied."
+        )
     first = next((ln.strip() for ln in old.split("\n") if ln.strip()), "")
     hint = ""
     if first:
@@ -587,6 +876,9 @@ def _not_found(text: str, old: str) -> str:
                 f" Its first line occurs at line(s) {', '.join(map(str, near))}; "
                 "compare the following lines with the file."
             )
+    region = _closest_region(text, old)
+    if region:
+        return f"old_string was not found in {{path}}.{hint}\nClosest lines in {{path}}:\n{region}"
     return (
         "old_string was not found in {path}."
         + hint
