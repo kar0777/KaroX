@@ -2111,3 +2111,17 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   time. Not fixed here (40 minutes left, chat start-up code, POSIX only): the fix is one
   SIGINT handler set before the imports that ends the start through the same path as the
   key, replaced when the app takes the keyboard.
+- Correction to the entry above: the key was lost in 2 of 840 starts (0.2%, not 0.5%); 20
+  ended with exit -2 and 1 with a traceback (2.5%). The sixty failures of the test when
+  it was repeated as a shell background job are the other case named there (SIGINT
+  ignored at start), not this race.
+- 06:25 UTC, end of the shift (started 04:20:33 UTC). `DEVIN_REPORT.md` rewritten for it
+  (170 lines): KaroX against DSH with figures, dev38 and dev39, replay and live check,
+  the commands for the probe, the A/B and the 3-attempt comparison with request counts,
+  merge status, checks. KaroX `devin/big`: code at f328136 (6.0.0.dev39), docs after it.
+  Bench `devin/bench` a257fec: wheels dev38 and dev39, `scripts/analysis/{dshcmp,
+  scopewords,scope_probe_read}.py`, `scripts/build_scope_cases.py`, `probes/scope1`, the
+  replay's prompt digest. Run data: `karox6-bench-data/runs/{devr38,devr39,devl1d,devl1f}`.
+  Scratch, safe to delete: `%TEMP%\devin-shift`, `/tmp/dsh-src` (DSH's npm packages, read
+  only), in WSL `~/devin-k6`. Nothing was merged, tagged or published; ReformBoss was not
+  called; `D:\проекты\KaroX-6` was not touched.
