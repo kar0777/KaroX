@@ -796,6 +796,7 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
             legacy_glyphs=legacy,
             write_block=ui.write_block if ui is not None else None,
             live=ui.set_live if ui is not None else None,
+            copy_to_clipboard=ui.copy_to_clipboard if ui is not None else None,
         )
         if ui is not None:
             ui.attach_app(created)

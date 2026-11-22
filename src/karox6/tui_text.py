@@ -397,6 +397,7 @@ def key_hints(mode: str) -> list[tuple[str, str]]:
         ("/", "commands"),
         ("@", "files"),
         ("ctrl+o", "tool output"),
+        ("drag", "copy"),
     ]
 
 

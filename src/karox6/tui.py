@@ -29,8 +29,9 @@ from karox6.chat_features import (
     closest_command,
     diff_preview,
     find_images,
-    image_label,
+    last_code_block,
     mcp_report,
+    picture_chip,
     store_image,
 )
 from karox6.core import events as ev
@@ -163,7 +164,13 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "/paste",
         "/paste",
-        "attach the picture in the clipboard to your next message (Alt+V)",
+        "attach the picture in the clipboard to your next message (Alt+V, Ctrl+V)",
+        "Workspace & Context",
+    ),
+    CommandSpec(
+        "/copy",
+        "/copy [N|code]",
+        "copy the last answer to the clipboard (N-th back, or its last code block)",
         "Workspace & Context",
     ),
     CommandSpec("/model", "/model [NAME]", "show or change the model", "Model & Setup"),
@@ -230,7 +237,8 @@ _HELP_GROUPS = ("Session", "Workspace & Context", "Model & Setup", "Tools & Brid
 
 _HELP_SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("@path", "mention a workspace file to attach it to your message"),
-    ("@shot.png / Alt+V", "attach a picture: its path, or the one in the clipboard"),
+    ("@shot.png / Ctrl+V", "attach a picture: its path, or the one in the clipboard (Alt+V)"),
+    ("mouse drag", "select conversation text; letting go copies it (see /copy)"),
     ("Enter / Alt+Enter", "send message / insert newline (Ctrl+J or trailing \\ also work)"),
     ("Tab", "complete /commands, arguments and @file paths"),
     ("Ctrl+R", "search persistent input history"),
@@ -443,6 +451,18 @@ class _PromptInterrupt(KeyboardInterrupt):
         self.empty = empty
 
 
+def _default_copy_text(text: str) -> str:
+    """How ``/copy`` copies when no clipboard writer was injected: the system
+    clipboard; OSC 52 is sent to stdout only when it is a terminal."""
+    from karox6.clipboard import copy_text
+
+    def emit(seq: str) -> None:
+        sys.stdout.write(seq)
+        sys.stdout.flush()
+
+    return copy_text(text, emit_osc52=emit if sys.stdout.isatty() else None)
+
+
 class ChatApp:
     def __init__(
         self,
@@ -470,6 +490,7 @@ class ChatApp:
         legacy_glyphs: bool = False,
         write_block: Callable[[str, str], None] | None = None,
         live: Callable[[str], None] | None = None,
+        copy_to_clipboard: Callable[[str], str] | None = None,
     ) -> None:
         if approval_mode not in APPROVAL_MODES:
             raise ValueError(f"approval mode must be one of {APPROVAL_MODES}")
@@ -483,6 +504,7 @@ class ChatApp:
         self.glyph = _glyphs(encoding, legacy_glyphs)
         self._write_block = write_block  # (collapsed, expanded): Ctrl+O switches them
         self._live = live  # shows the line of the answer still being streamed
+        self._copy_text = copy_to_clipboard or _default_copy_text
         self._md = Markdown(self.paint, self.glyph, columns)
         self._last_turn_s: float | None = None  # how long the last turn took
         self.extra_tools = list(extra_tools or [])
@@ -855,12 +877,13 @@ class ChatApp:
         base = sum(len(m.images) for m in self.session.messages)
         for path in [*pending, *found.paths]:
             try:
-                labels.append(image_label(path))
+                labels.append(picture_chip(path, len(labels) + 1))
                 images.append(store_image(self.session.store.dir, path, base + len(images) + 1))
             except OSError as exc:
+                labels.pop()
                 self.write(self.paint("yellow", f"  skipped {path.name} ({exc})") + "\n")
         if labels:
-            self.write(self.paint("dim", "  pictures: " + ", ".join(labels)) + "\n")
+            self.write(self.paint("dim", "  " + " ".join(labels)) + "\n")
         return found.text, images
 
     async def paste_image(self) -> None:
@@ -881,10 +904,61 @@ class ChatApp:
             return
         self._pending_images.append(path)
         self.write(
-            self.paint("dim", f"  picture ready: {image_label(path)}; it goes with your next ")
-            + self.paint("dim", "message (/paste again adds another)")
+            self.paint(
+                "dim", f"  {picture_chip(path, len(self._pending_images))} — goes with your "
+            )
+            + self.paint("dim", "next message (/paste or Ctrl+V adds another)")
             + "\n"
         )
+
+    # -- clipboard ---------------------------------------------------------------------
+
+    @property
+    def pending_images(self) -> list[Path]:
+        """The pictures waiting to go with the next message (the UI shows their chips)."""
+        return self._pending_images
+
+    async def _copy(self, arg: str) -> None:
+        """``/copy``, ``/copy code``, ``/copy N``: an answer or its last code block
+        onto the system clipboard (drag-selecting text copies any piece of it)."""
+        from karox6.clipboard import ClipboardError
+
+        session = getattr(self, "session", None)
+        answers = [
+            m.content.rstrip()
+            for m in (session.messages if session is not None else [])
+            if m.role == "assistant" and m.content.strip()
+        ]
+        low = arg.lower()
+        if low == "code":
+            if not answers:
+                self.write("nothing to copy yet\n")
+                return
+            text = last_code_block(answers[-1])
+            if text is None:
+                self.write("the last answer has no code block\n")
+                return
+            what = "code block"
+        else:
+            if low and not low.isdigit():
+                self.write("usage: /copy, /copy code or /copy N\n")
+                return
+            n = int(low) if low else 1
+            if n < 1 or n > len(answers):
+                if answers:
+                    self.write(f"there is no answer {n} (only {len(answers)} so far)\n")
+                else:
+                    self.write("nothing to copy yet\n")
+                return
+            text = answers[-n]
+            what = f"answer {n}" if n > 1 else "answer"
+        try:
+            how = await asyncio.to_thread(self._copy_text, text)
+        except ClipboardError as exc:
+            self.write(self.paint("yellow", f"  {exc}") + "\n")
+            return
+        via = " via OSC 52" if how == "osc52" else ""
+        self.write(self.paint("dim", f"  copied {len(text)} chars ({what}){via}") + "\n")
 
     # -- undo -----------------------------------------------------------------------
 
@@ -1317,6 +1391,8 @@ class ChatApp:
             await self.turn(INIT_PROMPT + focus, label="/init" + (f" {arg}" if arg else ""))
         elif name == "/paste":
             await self.paste_image()
+        elif name == "/copy":
+            await self._copy(arg)
         elif name == "/mcp":
             self.write(mcp_report(self.mcp, self.paint, self.glyph, arg))
         elif name == "/sessions":
@@ -1874,6 +1950,8 @@ def build_completer(*, workspace: Path | None = None, home: Path | None = None) 
                 choices = list(_REASONING_ARGS)
             elif cmd == "/update":
                 choices = list(_UPDATE_ARGS)
+            elif cmd == "/copy":
+                choices = [("code", "the last code block of the answer")]
             elif cmd == "/resume":
                 choices = [("last", "most recent saved session")]
                 if home is not None:
@@ -2042,6 +2120,9 @@ def terminal_io(
         return _plain_read, _plain_read
 
     main = build_prompt_session(history=history, workspace=workspace, home=home)
+    from karox6.tui_input import coalescing_input
+
+    main.app.input = coalescing_input(main.app.input)
     answers: PromptSession[str] | None = None
 
     async def read_line(prompt: str) -> str:

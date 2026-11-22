@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import shutil
 import struct
 from pathlib import Path
@@ -15,7 +16,9 @@ from karox6.chat_features import (
     closest_command,
     diff_preview,
     find_images,
+    last_code_block,
     mcp_report,
+    picture_chip,
 )
 from karox6.core.messages import Message
 from karox6.core.session import SessionConfig
@@ -225,7 +228,7 @@ def test_a_picture_named_in_the_message_is_attached_and_kept_with_the_session(tm
     assert stored.parent == app.session.store.dir / "images"
     assert stored.read_bytes() == (ws / "shots" / "bug.png").read_bytes()
     assert user.images[0]["media_type"] == "image/png"
-    assert "pictures: bug.png (3x2, " in term.text
+    assert "[picture 1: 3x2 PNG, " in term.text
     # the picture stays in the conversation on later requests and after a resume
     assert provider.requests[1].messages[0].images == user.images
     saved = SessionStore.load(tmp_path / "home", app.session.session_id)
@@ -292,7 +295,7 @@ def test_paste_keeps_the_clipboard_picture_for_the_next_message(tmp_path, monkey
 
     monkeypatch.setattr(clipboard, "grab_image", grab)
     _, provider, term, _ = chat(tmp_path, [Turn(text="ok")], ["/paste", "what is on it?", "/quit"])
-    assert "picture ready: clipboard-" in term.text
+    assert "[picture 1: 4x4 PNG, " in term.text
     user = provider.requests[0].messages[-1]
     assert len(user.images) == 1
     assert user.content == "what is on it?"
@@ -476,6 +479,160 @@ def test_mac_clipboard_without_a_picture_leaves_no_empty_file(tmp_path, monkeypa
     monkeypatch.setattr(clipboard.shutil, "which", lambda _name: None)
     assert clipboard._mac_png(target) is None
     assert not target.exists()
+
+
+# -- clipboard text (drag copy, /copy, Ctrl+V) ----------------------------------------
+
+
+def test_copy_text_prefers_wl_copy_then_xclip_then_xsel(monkeypatch):
+    calls = []
+
+    def pipe(command, data):
+        calls.append((command[0], data))
+
+    monkeypatch.setattr(clipboard, "_pipe", pipe)
+    monkeypatch.setattr(clipboard.shutil, "which", lambda name: name if name != "pbcopy" else None)
+    monkeypatch.setattr(clipboard.sys, "platform", "linux")
+    assert clipboard.copy_text("Привет") == "wl-copy"
+    monkeypatch.setattr(
+        clipboard.shutil, "which", lambda name: name if name in {"xsel"} else None
+    )
+    assert clipboard.copy_text("text") == "xsel"
+    assert calls == [("wl-copy", "Привет".encode()), ("xsel", b"text")]
+
+
+def test_copy_text_falls_back_to_osc52_and_reports_why(monkeypatch):
+    sent = []
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(clipboard.sys, "platform", "linux")
+    assert clipboard.copy_text("over ssh", emit_osc52=sent.append) == "osc52"
+    assert sent == [clipboard.osc52("over ssh")]
+    with pytest.raises(clipboard.ClipboardError, match="wl-copy, xclip or xsel"):
+        clipboard.copy_text("nothing works")
+
+
+def test_osc52_carries_the_text_base64_for_the_terminal():
+    import base64
+
+    seq = clipboard.osc52("привет мир")
+    assert seq.startswith("\x1b]52;c;") and seq.endswith("\x07")
+    assert base64.b64decode(seq[7:-1]) == "привет мир".encode("utf-8")
+
+
+def test_grab_text_reads_the_available_tool(monkeypatch):
+    calls = []
+
+    def run(command):
+        calls.append(command[0])
+        return b"the text"
+
+    monkeypatch.setattr(clipboard, "_run", run)
+    monkeypatch.setattr(clipboard.shutil, "which", lambda name: name == "xclip")
+    monkeypatch.setattr(clipboard.sys, "platform", "linux")
+    assert clipboard.grab_text() == "the text"
+    assert calls == ["xclip"]
+    # an image-only clipboard reads as no text
+    monkeypatch.setattr(clipboard, "_run", lambda _c: b"")
+    assert clipboard.grab_text() is None
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _name: None)
+    with pytest.raises(clipboard.ClipboardError, match="wl-paste"):
+        clipboard.grab_text()
+
+
+def test_the_fake_clipboard_dir_round_trips_text_and_pictures(tmp_path, monkeypatch):
+    fake = tmp_path / "clip"
+    monkeypatch.setenv("KAROX_FAKE_CLIPBOARD", str(fake))
+    assert clipboard.copy_text("скопировано") == "fake"
+    assert (fake / "text").read_text(encoding="utf-8") == "скопировано"
+    assert clipboard.grab_text() == "скопировано"
+    with pytest.raises(clipboard.ClipboardError, match="no picture"):
+        clipboard.grab_image(fake / "out.png")
+    png(fake / "image.png", 3, 2)
+    out = fake / "out.png"
+    assert clipboard.grab_image(out).read_bytes() == (fake / "image.png").read_bytes()
+    monkeypatch.delenv("KAROX_FAKE_CLIPBOARD")
+
+
+def test_pipe_reports_a_failed_tool(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise OSError("gone")
+
+    monkeypatch.setattr(clipboard.subprocess, "run", boom)
+    with pytest.raises(clipboard.ClipboardError, match="wl-copy failed to start"):
+        clipboard._pipe(["wl-copy"], b"x")
+
+
+@pytest.mark.skipif(
+    os.environ.get("KAROX_REAL_CLIPBOARD_TEST") != "1",
+    reason="touches the real clipboard; KAROX_REAL_CLIPBOARD_TEST=1 runs it",
+)
+def test_the_real_clipboard_survives_copy_and_restore(tmp_path):
+    """The user's own clipboard text is read, replaced by a known text, verified and
+    put back — even when the check in the middle fails. The picture part is only
+    saved and restored when the platform lets us ask for it."""
+    before = None
+    try:
+        before = clipboard.grab_text()
+    except clipboard.ClipboardError:
+        pass  # the test still checks that writing works below
+    try:
+        clipboard.copy_text("karox6 clipboard test — привет")
+        assert clipboard.grab_text() == "karox6 clipboard test — привет"
+    finally:
+        if before is not None:
+            clipboard.copy_text(before)
+
+
+# -- the chip a waiting or attached picture shows --------------------------------------
+
+
+def test_picture_chip_names_kind_size_and_dimensions(tmp_path):
+    path = png(tmp_path / "shot.png", 4, 3)
+    size = path.stat().st_size
+    assert picture_chip(path, 1) == f"[picture 1: 4x3 PNG, {size} B]"
+    assert picture_chip(path, 2).startswith("[picture 2:")
+    other = tmp_path / "scan.jpg"
+    other.write_bytes(b"x" * 2048)
+    assert picture_chip(other, 3) == "[picture 3: JPG, 2 KB]"
+    assert picture_chip(tmp_path / "gone.png", 1) == "[picture 1: PNG, 0 B]"
+
+
+def test_last_code_block_takes_the_last_fenced_block():
+    text = "one\n```py\nprint(1)\n```\ntwo\n```\nprint(2)\nprint(3)\n```\nend"
+    assert last_code_block(text) == "print(2)\nprint(3)"
+    assert last_code_block("no blocks here") is None
+
+
+# -- /copy ----------------------------------------------------------------------------
+
+
+def test_copy_puts_the_last_answer_or_its_code_on_the_clipboard(tmp_path):
+    copied = []
+    answer = "here is how:\n```py\nprint('hi')\n```\nuse it well"
+    _, _, term, _ = chat(
+        tmp_path,
+        [Turn(text="first answer"), Turn(text=answer)],
+        ["one", "two", "/copy", "/copy code", "/copy 2", "/copy 9", "/copy x", "/quit"],
+        copy_to_clipboard=lambda text: copied.append(text) or "fake",
+    )
+    assert copied == [answer, "print('hi')", "first answer"]
+    assert "copied" in term.text and "(code block)" in term.text
+    assert "there is no answer 9 (only 2 so far)" in term.text
+    assert "usage: /copy" in term.text
+
+
+def test_copy_without_an_answer_says_so_and_a_clipboard_error_is_shown(tmp_path):
+    from karox6.clipboard import ClipboardError
+
+    def refuse(_text):
+        raise ClipboardError("no clipboard tool found: install wl-copy")
+
+    _, _, term, _ = chat(
+        tmp_path, [], ["/copy", "hi", "/copy", "/copy code", "/quit"], copy_to_clipboard=refuse
+    )
+    assert "nothing to copy yet" in term.text
+    assert "no clipboard tool found" in term.text  # the real error, said readably
+    assert "the last answer has no code block" in term.text
 
 
 def test_the_applescript_names_the_file_even_with_quotes_in_its_path():

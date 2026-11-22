@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import re
 import sys
+import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from types import TracebackType
@@ -868,3 +869,295 @@ def test_cli_non_tty_falls_back_to_inline_without_fullscreen(
     )
     assert rc == 0
     assert any("KaroX " in chunk for chunk in captured)
+
+
+# -- 12. mouse drag selection: highlight on the drag, plain text on the clipboard ------
+
+
+def _mouse(x: int, y: int, kind: MouseEventType, button: MouseButton) -> MouseEvent:
+    return MouseEvent(
+        position=Point(x=x, y=y), event_type=kind, button=button, modifiers=frozenset()
+    )
+
+
+def test_drag_selects_text_highlights_and_release_copies_plain_text(tmp_path: Path) -> None:
+    async def go() -> None:
+        copied: list[str] = []
+        out = ScreenOutput()
+        with create_pipe_input() as keys:
+            ui = FullScreenTui(
+                workspace=tmp_path / "ws",
+                home=tmp_path / "home",
+                input=keys,
+                output=out,
+                complete_in_thread=False,
+                copy_to_clipboard=lambda text: copied.append(text) or "fake",
+            )
+            async with ui:
+                ui.write("first line here\n╭─ frame ─╮\nsecond line there\n")
+                await eventually(lambda: any("second line" in r for r in rendered_rows(ui)))
+                t = ui.transcript
+                t.mouse_handler(_mouse(1, 0, MouseEventType.MOUSE_DOWN, MouseButton.LEFT))
+                t.mouse_handler(_mouse(5, 2, MouseEventType.MOUSE_MOVE, MouseButton.LEFT))
+                ui.invalidate()
+                await asyncio.sleep(0.1)
+                screen = ui.app.renderer.last_rendered_screen
+                assert screen is not None
+                selected = {
+                    (y, x)
+                    for y in range(3)
+                    for x in range(10)
+                    if "class:selected" in screen.data_buffer[y][x].style
+                }
+                assert (0, 1) in selected and (2, 4) in selected and (0, 0) not in selected
+                t.mouse_handler(_mouse(5, 2, MouseEventType.MOUSE_UP, MouseButton.LEFT))
+                await eventually(lambda: copied)
+                # plain text, no frame glyphs, visual wraps of one line stay joined
+                assert copied == ["irst line here\n frame \nsecon"]
+                await eventually(
+                    lambda: any("copied 28 chars" in r for r in rendered_rows(ui))
+                )
+
+    run_timed(go())
+
+
+def test_selection_stays_anchored_to_content_when_scrolled_or_streaming(
+    tmp_path: Path,
+) -> None:
+    async def go() -> None:
+        copied: list[str] = []
+        out = ScreenOutput(rows=10, columns=40)
+        with create_pipe_input() as keys:
+            ui = FullScreenTui(
+                workspace=tmp_path / "ws",
+                home=tmp_path / "home",
+                input=keys,
+                output=out,
+                complete_in_thread=False,
+                copy_to_clipboard=lambda text: copied.append(text) or "fake",
+            )
+            async with ui:
+                for i in range(30):
+                    ui.write(f"line-{i:02d} some words\n")
+                await eventually(lambda: ui.transcript.total_visual_lines > 10)
+                t = ui.transcript
+                t.scroll_page_up()  # a selection names content rows, scrolled or not
+                assert not t.follow
+                t.mouse_handler(_mouse(0, 3, MouseEventType.MOUSE_DOWN, MouseButton.LEFT))
+                t.mouse_handler(_mouse(6, 4, MouseEventType.MOUSE_MOVE, MouseButton.LEFT))
+                t.mouse_handler(_mouse(6, 4, MouseEventType.MOUSE_UP, MouseButton.LEFT))
+                await eventually(lambda: copied)
+                # content row 3 is "line-03" wherever the viewport stands
+                assert copied == ["line-03 some words\nline-0"]
+                ui.write("fresh output while selected\n")
+                t.mouse_handler(_mouse(0, 3, MouseEventType.MOUSE_DOWN, MouseButton.LEFT))
+                t.mouse_handler(_mouse(6, 4, MouseEventType.MOUSE_MOVE, MouseButton.LEFT))
+                t.mouse_handler(_mouse(6, 4, MouseEventType.MOUSE_UP, MouseButton.LEFT))
+                await eventually(lambda: len(copied) == 2)
+                assert copied[1] == copied[0]  # streaming did not shift the selection
+
+    run_timed(go())
+
+
+# -- 13. long paste: compact placeholder, full text sent, big-paste warning ------------
+
+
+def test_a_long_paste_shows_one_placeholder_and_sends_everything(tmp_path: Path) -> None:
+    async def go() -> None:
+        out = ScreenOutput()
+        with create_pipe_input() as keys:
+            ui = FullScreenTui(
+                workspace=tmp_path / "ws",
+                home=tmp_path / "home",
+                input=keys,
+                output=out,
+                complete_in_thread=False,
+            )
+            data = "\n".join(f"pasted row {i} with some text" for i in range(5000))
+            app, provider = make_full_app(tmp_path, [Turn(text="got it")], ui)
+            async with ui:
+                running = asyncio.create_task(app.run())
+                await eventually(lambda: ui.mode == "prompt")
+
+                t0 = time.perf_counter()
+                keys.send_text("see this \x1b[200~" + data + "\x1b[201~")
+                await eventually(
+                    lambda: ui.input_buffer.text.startswith("see this [pasted 5,000 lines")
+                )
+                assert time.perf_counter() - t0 < 0.3  # paste-to-responsive, this PC
+                shown = ui.input_buffer.text
+                assert shown == "see this [pasted 5,000 lines · 150 KB]"
+                assert len(chat_requests(provider)) == 0  # a paste never sends itself
+
+                keys.send_text(" attached\r")
+                await eventually(lambda: "got it" in ui.transcript.plain_text)
+                sent = provider.requests[0].messages[-1].content
+                assert sent == f"see this {data} attached"
+                assert "[pasted 5,000 lines" in ui.transcript.plain_text  # compact echo
+
+                # The placeholder is just text: typing around it and deleting works.
+                keys.send_text("\x1b[200~" + data + "\x1b[201~")
+                await eventually(lambda: "[pasted" in ui.input_buffer.text)
+                buf = ui.input_buffer
+                buf.cursor_position = len(buf.text)
+                buf.delete_before_cursor(len(buf.text))
+                assert buf.text == ""
+                keys.send_text("/quit\r")
+                assert await asyncio.wait_for(running, 3) == 0
+
+    run_timed(go())
+
+
+def chat_requests(provider: ScriptedProvider) -> list[object]:
+    return provider.requests
+
+
+def test_a_paste_over_two_mb_asks_before_it_sends(tmp_path: Path) -> None:
+    async def go() -> None:
+        out = ScreenOutput()
+        with create_pipe_input() as keys:
+            ui = FullScreenTui(
+                workspace=tmp_path / "ws",
+                home=tmp_path / "home",
+                input=keys,
+                output=out,
+                complete_in_thread=False,
+            )
+            data = "top line\n" + ("x" * (2 * 1024 * 1024 + 100))
+            # a huge model window keeps the ~600k-token message below the compaction
+            # threshold, so the only request is the chat call itself
+            app, provider = make_full_app(
+                tmp_path,
+                [Turn(text="read all")],
+                ui,
+                config_kwargs={"context_window": 4_000_000, "context_limit": 4_000_000},
+            )
+            async with ui:
+                running = asyncio.create_task(app.run())
+                await eventually(lambda: ui.mode == "prompt")
+                keys.send_text("\x1b[200~" + data + "\x1b[201~")
+                # the parser collects the whole 2 MB before the placeholder shows
+                await eventually(lambda: "[pasted" in ui.input_buffer.text, timeout=10)
+                keys.send_text("\r")
+                await eventually(lambda: "2.0 MB" in ui.transcript.plain_text)
+                assert provider.requests == []  # warned, not sent
+                keys.send_text("\r")
+                await eventually(lambda: "read all" in ui.transcript.plain_text)
+                assert provider.requests[0].messages[-1].content == data
+                keys.send_text("/quit\r")
+                assert await asyncio.wait_for(running, 3) == 0
+
+    run_timed(go())
+
+
+# -- 14. Ctrl+V: text into the input, a picture onto the message ------------------------
+
+
+def test_ctrl_v_pastes_clipboard_text_and_an_image_only_clipboard_attaches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from karox6 import clipboard
+
+    clip: dict[str, object] = {"text": "clipboard text here", "image": False}
+    monkeypatch.setattr(clipboard, "grab_text", lambda: clip["text"])  # type: ignore[return-value]
+    monkeypatch.setattr(
+        clipboard,
+        "grab_image",
+        lambda target: _png(target) if clip["image"] else _no_picture(),
+    )
+
+    async def go() -> None:
+        out = ScreenOutput()
+        with create_pipe_input() as keys:
+            ui = FullScreenTui(
+                workspace=tmp_path / "ws",
+                home=tmp_path / "home",
+                input=keys,
+                output=out,
+                complete_in_thread=False,
+            )
+            app, provider = make_full_app(
+                tmp_path, [Turn(text="nice"), Turn(text="a cat")], ui
+            )
+            async with ui:
+                running = asyncio.create_task(app.run())
+                await eventually(lambda: ui.mode == "prompt")
+
+                # Text on the clipboard pastes into the input like any paste.
+                keys.send_text("\x16")  # Ctrl+V
+                await eventually(lambda: ui.input_buffer.text == "clipboard text here")
+                keys.send_text("\r")
+                await eventually(lambda: "nice" in ui.transcript.plain_text)
+                assert provider.requests[0].messages[-1].content == "clipboard text here"
+
+                # An image-only clipboard (no text) attaches a picture instead.
+                clip["text"], clip["image"] = None, True
+                keys.send_text("\x16")
+                await eventually(lambda: "[picture 1:" in ui.transcript.plain_text)
+                await eventually(lambda: any("[picture 1:" in r for r in rendered_rows(ui)))
+                keys.send_text("what is it?\r")
+                await eventually(lambda: "a cat" in ui.transcript.plain_text)
+                assert len(provider.requests[1].messages[-1].images) == 1
+
+                # A Windows Terminal sends an empty bracketed paste for the same.
+                keys.send_text("\x1b[200~\x1b[201~")
+                await eventually(lambda: len(app.pending_images) == 1)
+                await eventually(
+                    lambda: ui.transcript.plain_text.count("goes with your next message") == 2
+                )
+                keys.send_text("/quit\r")
+                assert await asyncio.wait_for(running, 3) == 0
+
+    run_timed(go())
+
+
+def _no_picture() -> Path:
+    from karox6 import clipboard
+
+    raise clipboard.ClipboardError("the clipboard holds no picture")
+
+
+def _png(path: Path) -> Path:
+    from karox6.tools.screen import encode_png
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(encode_png(4, 3, bytes([10, 200, 30]) * 12))
+    return path
+
+
+# -- 15. /copy on the full screen: the answer lands on the clipboard -------------------
+
+
+def test_copy_command_writes_the_answer_through_the_clipboard_fn(tmp_path: Path) -> None:
+    async def go() -> None:
+        copied: list[str] = []
+        out = ScreenOutput()
+        with create_pipe_input() as keys:
+            ui = FullScreenTui(
+                workspace=tmp_path / "ws",
+                home=tmp_path / "home",
+                input=keys,
+                output=out,
+                complete_in_thread=False,
+                copy_to_clipboard=lambda text: copied.append(text) or "fake",
+            )
+            app, _ = make_full_app(
+                tmp_path,
+                [Turn(text="the answer")],
+                ui,
+                copy_to_clipboard=lambda text: copied.append(text) or "fake",
+            )
+            async with ui:
+                running = asyncio.create_task(app.run())
+                await eventually(lambda: ui.mode == "prompt")
+                keys.send_text("hi\r")
+                await eventually(lambda: "the answer" in ui.transcript.plain_text)
+                keys.send_text("/copy\r")
+                await eventually(
+                    lambda: "copied 10 chars (answer)" in ui.transcript.plain_text
+                )
+                assert copied == ["the answer"]
+                keys.send_text("/quit\r")
+                assert await asyncio.wait_for(running, 3) == 0
+
+    run_timed(go())

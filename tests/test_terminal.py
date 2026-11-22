@@ -592,11 +592,108 @@ def test_a_picture_named_in_the_message_reaches_the_model(launch: Launcher) -> N
     (launch.ws / "shot.png").write_bytes(encode_png(4, 3, bytes([10, 200, 30]) * 12))
     chat = launch.start([Reply(text="a green rectangle")])
     chat.turn("what is on @shot.png ?")
-    assert "pictures: shot.png (4x3, " in chat.term.text()
+    assert "[picture 1: 4x3 PNG, " in chat.term.text()
     content = chat.last_user_message()
     assert isinstance(content, list)
     assert content[0] == {"type": "text", "text": "what is on [image 1] ?"}
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,iVBOR")
+
+
+def test_a_long_paste_is_a_placeholder_and_one_message(launch: Launcher) -> None:
+    chat = launch.start([Reply(text="read the paste")])
+    t = chat.term
+    data = "\n".join(f"line {i} of a long paste" for i in range(1, 5001))
+    t.send("\x1b[200~")
+    for i in range(0, len(data), 8192):  # a real paste arrives in chunks
+        t.send(data[i : i + 8192])
+    t.send("\x1b[201~")
+    t.wait(lambda _s: any("[pasted 5,000 lines · " in line for line in typed(t)), 30)
+    assert "line 1 of a long paste" not in t.text()  # the payload stays out of the editor
+    assert len(chat.model.requests) == 0  # a paste never sends by itself
+    t.key("enter")
+    t.wait("read the paste")
+    assert chat.last_user_message() == data
+
+
+def test_ctrl_v_pastes_clipboard_text_and_attaches_pictures(launch: Launcher) -> None:
+    sys.path.insert(0, str(SRC))
+    from karox6.tools.screen import encode_png
+
+    clip = launch.tmp / "clip"
+    clip.mkdir()
+    (clip / "text").write_text("text off the clipboard", encoding="utf-8")
+    chat = launch.start(
+        [Reply(text="got the text"), Reply(text="two pictures")],
+        env=launch.env(KAROX_FAKE_CLIPBOARD=str(clip)),
+    )
+    t = chat.term
+    t.send("\x16")  # Ctrl+V
+    t.wait(lambda _s: typed(t)[-1:] == ["› text off the clipboard"])
+    t.key("enter")
+    t.wait("got the text")
+    assert chat.last_user_message() == "text off the clipboard"
+    # A clipboard with a picture but no text attaches it instead. Windows Terminal
+    # sends nothing at all for Ctrl+V then, so an empty bracketed paste is how the
+    # ask arrives; Ctrl+V itself asks the same way. One of each here.
+    (clip / "text").unlink()
+    (clip / "image.png").write_bytes(encode_png(4, 3, bytes([10, 200, 30]) * 12))
+    t.send("\x1b[200~\x1b[201~")
+    t.wait("[picture 1: 4x3 PNG, ")
+    t.send("\x16")
+    t.wait("[picture 2: 4x3 PNG, ")
+    chat.turn("two pictures")
+    content = chat.last_user_message()
+    assert isinstance(content, list)
+    assert len(content) == 3
+    assert content[0] == {"type": "text", "text": "two pictures"}
+    assert all(
+        part["image_url"]["url"].startswith("data:image/png;base64,iVBOR") for part in content[1:]
+    )
+
+
+def test_drag_selecting_the_answer_copies_plain_text(launch: Launcher) -> None:
+    clip = launch.tmp / "clip"
+    clip.mkdir()
+    chat = launch.start(
+        [Reply(text="the quick brown fox jumped")],
+        env=launch.env(KAROX_FAKE_CLIPBOARD=str(clip)),
+    )
+    t = chat.term
+    chat.turn("a sentence please")
+    row, col = next((i, line.index("quick")) for i, line in enumerate(t.lines()) if "quick" in line)
+    y, x = row + 1, col + 1  # the terminal counts rows and columns from 1
+    t.send(f"\x1b[<0;{x};{y}M")  # left button down
+    t.send(f"\x1b[<32;{x + 11};{y}M")  # drag 11 cells right
+    t.send(f"\x1b[<0;{x + 11};{y}m")  # release: the selection is copied
+    t.wait("copied ", 15)
+    copied = (clip / "text").read_text(encoding="utf-8")
+    assert "quick brown" in copied
+    assert all(ch not in copied for ch in "│╭╮╰╯─")  # plain text, no frame pieces
+
+
+def test_copy_put_answers_and_code_on_the_clipboard(launch: Launcher) -> None:
+    clip = launch.tmp / "clip"
+    clip.mkdir()
+    chat = launch.start(
+        [Reply(text="here is the code\n\n```python\nsome_code()\n```\n"), Reply(text="2nd")],
+        env=launch.env(KAROX_FAKE_CLIPBOARD=str(clip)),
+    )
+    t = chat.term
+    t.line("/copy")
+    t.wait("nothing to copy yet")
+    chat.turn("give me code")
+    t.line("/copy")
+    t.wait("copied ")
+    assert (clip / "text").read_text(encoding="utf-8") == (
+        "here is the code\n\n```python\nsome_code()\n```"
+    )
+    t.line("/copy code")
+    t.wait(lambda _s: (clip / "text").read_text(encoding="utf-8") == "some_code()", 15)
+    chat.turn("another")
+    t.line("/copy 2")
+    t.wait(lambda _s: (clip / "text").read_text(encoding="utf-8").startswith("here is"), 15)
+    t.line("/copy bogus")
+    t.wait("usage: /copy, /copy code or /copy N")
 
 
 # -- long sessions, resizing, errors --------------------------------------------------

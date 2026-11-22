@@ -88,8 +88,9 @@ def test_slash_command_and_argument_completion(tmp_path):
     assert all(c.display_meta_text for c in all_cmds)
 
     co = {c.text: c.display_meta_text for c in _complete(completer, "/co")}
-    assert set(co) == {"/cost", "/compact"}
+    assert set(co) == {"/cost", "/compact", "/copy"}
     assert "token" in co["/cost"].lower()
+    assert "cop" in co["/copy"].lower()
 
     ex = [c.text for c in _complete(completer, "/ex")]
     assert ex == ["/exit"]

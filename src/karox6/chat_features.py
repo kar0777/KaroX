@@ -181,6 +181,38 @@ def image_label(path: Path) -> str:
     return f"{path.name} ({dims}{shown})"
 
 
+def picture_chip(path: Path, number: int) -> str:
+    """``[picture 1: 1920x1080 PNG, 240 KB]`` — the thumbnail line a waiting or
+    attached picture shows in the input box and the message."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    shown = f"{size / 1024:.0f} KB" if size >= 1024 else f"{size} B"
+    kind = path.suffix.lstrip(".").upper() or "PNG"
+    dims = ""
+    if path.suffix.lower() == ".png":
+        from karox6.tools.screen import ScreenError, png_size
+
+        try:
+            with path.open("rb") as stream:
+                width, height = png_size(stream.read(32))
+            dims = f"{width}x{height} "
+        except (OSError, ScreenError):
+            dims = ""
+    return f"[picture {number}: {dims}{kind}, {shown}]"
+
+
+_CODE_BLOCK = re.compile(r"```[^\n]*\n(.*?)```", re.S)
+
+
+def last_code_block(text: str) -> str | None:
+    """The text of the last ```fenced``` block in ``text``, None when there is none
+    (``/copy code``)."""
+    blocks = _CODE_BLOCK.findall(text)
+    return blocks[-1].rstrip("\n") if blocks else None
+
+
 # -- /mcp -----------------------------------------------------------------------------
 
 
