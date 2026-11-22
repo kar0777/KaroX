@@ -2310,3 +2310,11 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   Claude Code 2.1.329 7, OpenCode 6 of 12. Calls 151 / 306 / 241; input 3.6M / 15.9M / 6.5M;
   est. cost $0.15 / $0.35 / $0.19. hkcal (dev42, same tasks): 5 solved, 170 calls, 3.9M.
   First trio where KaroX ties the best solve count at half the calls and a quarter of the input.
+- hduo1 (run 45062950008, Haiku, night 58-69, 2 attempts; Claude Code now served under the real
+  model id - in htrio1 it warned unrecognized_model): KaroX dev48 12/24 attempts, Claude Code
+  10/24 (5 vs 5 tasks, same tasks); calls 303 vs 362, input 6.6M vs 13.1M, ~$0.27 vs $0.32.
+  Claude Code healthy: 0 failed requests, all sessions success, thinking on.
+- mab7 result (run 45058058840, Dahl GLM, dev42 vs dev48, 2 attempts): solved 10 vs 11 of 24
+  attempts (5 vs 5 tasks); calls 897 vs 860 (-4%), input 28.5M vs 26.6M (-7%). Pre-registered
+  rule (calls >= 15% lower) NOT met: dev48 not adopted on GLM evidence. Neutral-to-slightly
+  better. Deciding run on the Haiku lane: hab1 (dev42 vs dev48, same tasks, 2 attempts), same rule.
