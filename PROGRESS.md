@@ -1413,3 +1413,20 @@ git diff --check
   Pre-registered rule: 1-task difference = noise -> no prompt change yet. Replication mab2
   (same wheels, Dahl, night_tasks 25-30, never read) dispatched as run 45020634203; same
   rule; if dev39 again >= dev37 with lower cost on both, adopt dev39.
+- mab2 result (run 45023577343; the first dispatch 45020634203 was void: wrong wheel path, no
+  model calls; trio_report now voids trials that never reached the model): 6/6 valid,
+  dev37 1, dev39 1 (django-ninja-1803 both). Input 8.3M vs 8.1M (-2%), calls 252 vs 264.
+  Rule met in the letter (dev39 >= dev37 and lower input tokens in both runs); pooled
+  mab1+mab2: solved 4 vs 5 of 12, input 24.5M vs 21.0M (-14%). Decision: adopt dev39
+  prompt (no "smallest change", no mandatory added tests). The old-bench audit
+  (2026-11-22) points the same way: the old line's general cost win came from not forcing
+  tests and from output/reasoning budget rules. Effect on solves is within noise.
+- Old-bench audit (Devin gemini-4-carbon-high, read-only, D:/проекты/karox5-audit @ aa5b590):
+  all four early-November reports (wandb 11-02, 11-03, sbx-1017 11-04, sbx 11-05) were run
+  on the same 17 tasks KaroX was tuned on between rounds; task recipes (three.js skill,
+  aquarium thresholds, WASD gate, pageperf PMREM hints); verdicts PARTLY TUNED (11-02),
+  TUNED-ON-TEST (others). KaroX was dearer than OpenCode in the first three; the 11-05
+  cost win came from general changes. Port candidates (general): anti-drafting / single
+  write rule, no forced tests, pytest log condenser + superseded write/read elision,
+  DSML/<tool_call> text salvage (current session.py treats a leaked call as the final
+  answer), multi-hunk edits, tighter loop guard. Do not port web/3D/game recipes.
