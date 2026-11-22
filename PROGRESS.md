@@ -2072,3 +2072,42 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   pass = REPLAY PASSED in each, `karox 6.0.0.dev39`, prompt digest dc5dea2fdcb3, run
   "completed" with its snapshot. No second live check: the two tasks allowed for it are
   used, and dev39 differs from the checked wheel by one sentence of the prompt.
+- dev39 replay result (run 44988919342, 05:19-05:22 UTC, bench a257fec; artifacts in
+  `karox6-bench-data/runs/devr39`): PASS by the registered rule in 5 of 5 images: `karox
+  6.0.0.dev39` installed in 3-7 s, 16 of 16 scripted turns ok, "completed" after 17 steps
+  with its snapshot, prompt 600 words, sha256 dc5dea2fdcb3 in every image.
+- Live check on FreeInference, result (`devl1f`, run 44986695557, 04:49-05:26 UTC, karox6
+  alone, the dev38 wheel, disc task 2 isort-2750; data in
+  `karox6-bench-data/runs/devl1f`): the lane refused. All 238 requests were answered
+  with 503 "FreeInference is temporarily paused due to a security incident", the outage
+  devc1 met last night. KaroX reported 6.0.0.dev38, retried its first request 16 times
+  and ended "error" with the provider's message after 2,027 s; no step ran. By the
+  registered rule the lane is recorded and not tried again; the live check's answer is
+  Dahl's (PASS). One thing this shows: an outage took 34 minutes of the trial before
+  KaroX gave up, although its budget for an outage is 600 s. The budget counts KaroX's own
+  waits (576 s here); each of its 17 tries then spent 85-145 s inside the gateway, which
+  retries a refused request 14 times itself. Not changed in this shift.
+- Checks at f328136 (dev39; docs only after it). Windows (Python 3.12.10): ruff check and
+  format clean (119 files), mypy clean (68 files), 1175 passed, 7 skipped in 191.88s,
+  `git diff --check` clean, wheel built, `scripts/perf_check.py` start 141.4 ms, idle RSS
+  31.4 MiB. Linux (WSL, Python 3.12.14): ruff, format and mypy clean; three full runs:
+  1 failed, 1176 passed; then 1177 passed, 6 skipped in 71.01s; then 1177 passed, 6
+  skipped in 71.83s.
+- The one Linux failure is a real defect of last night's work, not of this shift's (the
+  prompt text is all dev38 and dev39 change): `tests/test_terminal.py::
+  test_ctrl_c_under_the_first_frame_leaves_a_clean_terminal` (2d81a0b) timed out with the
+  chat fully drawn. Measured with the same pty harness, Ctrl+C sent the moment the
+  start-up frame appears, 420 starts twice: 408 and 409 ended cleanly with exit 0; 10 and
+  10 ended by the signal itself (exit -2: KeyboardInterrupt raised before `_chat`'s
+  handler is in place); 2 and 0 lost the key (Python printed "Exception ignored ...
+  KeyboardInterrupt": it was raised inside a callback, the chat stayed up and nothing was
+  armed, which is the test's timeout); 0 and 1 printed a traceback and exit 1
+  (KeyboardInterrupt inside `import ssl` surfaced as "TypeError: expected a message
+  argument"). Sent 80 ms or more after the frame the key always arms the exit; up to 60
+  ms it always ends the start. So about 3% of interrupts in the first 70 ms of a start on
+  Linux end with a wrong exit code or a traceback and 0.5% are lost, and the test fails
+  at about that last rate. Also seen: started with SIGINT ignored (a background job of a
+  non-interactive shell), Ctrl+C under the frame does nothing and the test fails every
+  time. Not fixed here (40 minutes left, chat start-up code, POSIX only): the fix is one
+  SIGINT handler set before the imports that ends the start through the same path as the
+  key, replaced when the app takes the keyboard.
