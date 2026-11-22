@@ -207,6 +207,7 @@ class Session:
     ) -> AsyncGenerator[ev.Event, None]:
         """Run one user turn; yields events until (and including) ``RunFinished``.
         ``images`` are pictures attached to the prompt (``core.messages.Message.images``)."""
+        self._effort, self._effort_steps = None, 0  # an eased effort ends with its turn
         queue: asyncio.Queue[ev.Event | None] = asyncio.Queue()
 
         def emit(event: ev.Event) -> None:

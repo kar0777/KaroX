@@ -62,8 +62,9 @@ def test_checker_inventory_reports_present_and_absent_tools(tmp_path, monkeypatc
     line = checker_inventory(tmp_path)
     assert "\n" not in line
     assert len(line) <= CHECKER_INVENTORY_MAX_CHARS
-    available_part, missing_part = line.split("; not installed: ")
-    assert available_part == "Checkers (PATH/venv): pytest, ruff, node, go"
+    available_part, missing_part = line.split("; not found on PATH/venv: ")
+    assert available_part == "Checkers found: pytest (.venv), ruff (.venv), node, go"
+    assert missing_part.endswith("(do not install checkers)")
     for absent in ("mypy", "pyright", "flake8", "npx", "tsc", "eslint", "cargo"):
         assert absent in missing_part
     # Stable across calls (prefix caching)
@@ -76,12 +77,23 @@ def test_checker_inventory_reports_present_and_absent_tools(tmp_path, monkeypatc
 def test_checker_inventory_handles_all_absent_and_all_present(tmp_path, monkeypatch):
     monkeypatch.setattr(prompt_mod.shutil, "which", lambda _name: None)
     none_line = checker_inventory(tmp_path)
-    assert none_line.startswith("Checkers (PATH/venv): none; not installed: ")
+    assert none_line.startswith("Checkers found: none; not found on PATH/venv: ")
     assert all(tool in none_line for tool in COMMON_CHECKERS)
     assert len(none_line) <= CHECKER_INVENTORY_MAX_CHARS
 
     monkeypatch.setattr(prompt_mod.shutil, "which", lambda name: f"/bin/{name}")
     all_line = checker_inventory(tmp_path)
-    assert "not installed" not in all_line
+    assert "not found" not in all_line
     assert all(tool in all_line for tool in COMMON_CHECKERS)
     assert len(all_line) <= CHECKER_INVENTORY_MAX_CHARS
+
+
+def test_checker_inventory_finds_local_node_tools(tmp_path, monkeypatch):
+    (tmp_path / "node_modules" / ".bin").mkdir(parents=True)
+    (tmp_path / "node_modules" / ".bin" / "tsc.cmd").write_text("")
+    (tmp_path / "node_modules" / ".bin" / "eslint").write_text("")
+    monkeypatch.setattr(prompt_mod.shutil, "which", lambda _name: None)
+    line = checker_inventory(tmp_path)
+    assert "tsc (node_modules)" in line
+    assert "eslint (node_modules)" in line
+    assert "tsc," not in line.split("not found")[1]

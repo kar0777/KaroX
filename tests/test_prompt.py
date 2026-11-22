@@ -92,8 +92,8 @@ def test_verification_is_proportionate_and_keeps_core_rules():
     # The mandatory build/type-check + broader-tests ritual is gone
     assert "build or type check and the broader related tests" not in verify
     assert "only when crossing module boundaries" in verify
-    assert "Never re-run a passing check" in verify
-    assert "finish instead of probing further" in verify
+    assert "Re-run a passing check only if code it covers changed" in verify
+    assert "once relevant checks and extra inputs pass, finish" in verify
     # Build/test configuration in Explore is conditional, not mandatory
     assert "only if needed to run checks" in explore
     # Core rules remain intact

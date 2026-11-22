@@ -29,7 +29,7 @@ BASE_PROMPT = """You are KaroX, an autonomous software engineering agent. You wo
 # Verify
 - Reproduce or observe the problem; after fixing, run the closest relevant tests and reproduction (check every [exit code: N] marker). Run broader tests or a build only when crossing module boundaries, touching shared/public behaviour, or the project requires it.
 - Passing the task's example proves only that example: check a few inputs the task did not spell out (another form of the same input, a boundary, an input that must be rejected, another path to the same code) in one command and fix what fails for the same cause; take expected values from the task or real source of truth, not from your implementation.
-- Never re-run a passing check with unchanged inputs; once relevant checks pass, finish instead of probing further.
+- Re-run a passing check only if code it covers changed; once relevant checks and extra inputs pass, finish.
 - Whether to add tests is the task's and the project's call; use distinctive names so they cannot collide. Delete temporary scripts before finishing.
 - If the same fix fails three times, stop: read the full error, recheck constraints, and change approach.
 
@@ -101,23 +101,33 @@ _VENV_EXE_EXTS = ("", ".exe", ".cmd", ".bat")
 def checker_inventory(workspace: Path) -> str:
     """One-line inventory of common checkers/runners found on PATH or in a project venv.
     Pure filesystem + PATH lookup (no subprocesses), bounded to <= 300 chars."""
-    venv_dirs = [
-        d
-        for venv in (".venv", "venv")
-        for sub in ("Scripts", "bin")
+    local_dirs = [
+        (venv, d)
+        for venv, sub in (
+            (".venv", "Scripts"),
+            (".venv", "bin"),
+            ("venv", "Scripts"),
+            ("venv", "bin"),
+            ("node_modules", ".bin"),
+        )
         if (d := workspace / venv / sub).is_dir()
     ]
 
-    def has_tool(name: str) -> bool:
-        if any((d / f"{name}{ext}").is_file() for d in venv_dirs for ext in _VENV_EXE_EXTS):
-            return True
-        return shutil.which(name) is not None
+    def where(name: str) -> str | None:
+        # "" when on PATH, the local directory when only there, None when not found.
+        if shutil.which(name) is not None:
+            return ""
+        for label, d in local_dirs:
+            if any((d / f"{name}{ext}").is_file() for ext in _VENV_EXE_EXTS):
+                return label
+        return None
 
-    present = [name for name in COMMON_CHECKERS if has_tool(name)]
-    absent = [name for name in COMMON_CHECKERS if name not in present]
-    parts = [f"Checkers (PATH/venv): {', '.join(present) if present else 'none'}"]
+    found = {name: where(name) for name in COMMON_CHECKERS}
+    present = [f"{n} ({loc})" if loc else n for n, loc in found.items() if loc is not None]
+    absent = [n for n, loc in found.items() if loc is None]
+    parts = [f"Checkers found: {', '.join(present) if present else 'none'}"]
     if absent:
-        parts.append(f"not installed: {', '.join(absent)}")
+        parts.append(f"not found on PATH/venv: {', '.join(absent)} (do not install checkers)")
     line = "; ".join(parts)
     if len(line) > CHECKER_INVENTORY_MAX_CHARS:
         line = line[: CHECKER_INVENTORY_MAX_CHARS - 3] + "..."
