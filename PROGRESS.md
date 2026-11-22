@@ -2326,3 +2326,7 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   dev42, all solved): Haiku says it used bash because one command chains several steps; asks for
   a multi-hunk edit, a clean-baseline test run (it did git stash dances), and project test/lint
   commands + test interpreter in the environment. Hypotheses only: test by A/B.
+- dev50 (steps/dev50 9d21e0c, Neon + Fusion review fixes): multi-hunk edit + test interpreter
+  line. hab3 (Haiku, dev42 vs dev50, 2 att): 13 vs 10 of 24 (6 vs 4 tasks), calls 327 vs 313
+  (-4%). NOT adopted. Haiku still never edits through edit (4 calls), so multi-hunk is moot
+  there. 51 interviews collected (hint1+hab3), synthesis by agy Hydrogen.
