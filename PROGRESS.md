@@ -2246,3 +2246,9 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   cap 600 -> 625 words). Dahl GLM-5.3-Flash, night_tasks 31-36 (held out, never read),
   1 attempt. Rule: keep dev43 if it solves >= dev42 on valid tasks AND its output +
   reasoning tokens are >= 15% lower; otherwise revert the line.
+- Mini A/B mab4 (pre-registered 2026-11-22, run 45036987665): dev43 (karox6) vs dev44
+  (karox6b = devin/big 8306a10: test-output condenser, superseded read/write elision on the
+  wire; prompt unchanged). Dahl GLM-5.3-Flash, night_tasks 37-42 (held out), 1 attempt.
+  Rule: keep dev44 if it solves >= dev43 on valid tasks AND input tokens are >= 15% lower;
+  a solve loss of 2+ reverts it; otherwise (cheaper by < 15%) keep it only if a second
+  mini-run on 6 more held-out tasks confirms.
