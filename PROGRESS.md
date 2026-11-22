@@ -2031,3 +2031,44 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   ancestor of `devin/big`, so the merge is a fast-forward with no conflict (`git
   merge-tree --write-tree origin/karox6/main devin/big` exits 0 and prints the tree of
   `devin/big`); nothing to resolve, nothing was pushed to `karox6/main`.
+- Live check on Dahl, result (`devl1d`, run 44986701735, 04:49-05:12 UTC, karox6 alone,
+  the dev38 wheel, disc task 7 plopp-614, GLM-5.3-Flash; data in
+  `karox6-bench-data/runs/devl1d`): PASS by the registered rule. `karox 6.0.0.dev38`, 48
+  successful calls of 48 (no refusal, no retry, no notice: the lane was not saturated this
+  time), the run ended by the agent's own choice ("completed") after 48 steps and 992 s;
+  input 1.05M tokens, output 14.0k (reasoning 8.0k). The task was solved (reward 1.0),
+  which was not the question. Observed on this one trial of another model, as registered,
+  not evidence: the reasoning has neither "smallest" nor "broaden"; a test file was edited
+  all the same (two edits of the project's test file), and the reasoning never weighs
+  the task's sentence about tests against the prompt.
+- What that observation pointed to, checked on the saved runs of the bench model (no
+  model call): DSV4.1F does see the conflict between the task's "Do not modify benchmark
+  tests unless the task explicitly requires test changes" and the prompt's order, and the
+  prompt's order settles it. KaroX: "adding tests is allowed/encouraged by instructions
+  'Add a few focused tests'", "The instructions say add focused tests. But task says
+  don't modify benchmark tests ... We can add tests to ..."; DSH, with no order: "adding
+  new tests not necessary; we can avoid. We can use temporary script under /tmp". dev38's
+  wording ("Unless the task says to leave tests alone, add a few focused tests ...")
+  keeps an order to add tests and leaves the model to decide whether a new test "modifies
+  benchmark tests", which the same reasoning answers both ways.
+- 6.0.0.dev39 (commit f328136; the second change, made before any ReformBoss run and
+  before its own replay): the bullet becomes "Whether to add tests is the task's and the
+  project's call; if you do, give new test functions distinctive names so they cannot
+  collide with other test suites. Delete temporary scripts before finishing." KaroX gives
+  no standing order
+  about tests, as DSH gives none; the task, the project's instructions (AGENTS.md is
+  passed on as before) and the model decide. The check of inputs the task did not spell
+  out stays. General for the same reasons as dev38, and it removes a rule that never had
+  an A/B (D-021). 600 words, sha256 dc5dea2fdcb3. `tests/test_prompt.py`: the test of
+  this bullet fails on dev38's prompt.
+- The registered A/B (04:50 UTC entry) stands with one change of arm, fixed here before
+  any of its runs: karox6b = the dev39 wheel (dev37 against dev39; tags, tasks, order,
+  rule and estimates as registered). The mechanism reading gains its reason: trials that
+  edit a test file are expected to fall to DSH's share (6 of 17) or below. dev38 stays in
+  the bench; dev38 against dev39 would isolate the order to add tests, dev37 against
+  dev38 the scope sentences, if a split is wanted later. The probe `scope1` is rebuilt
+  with dev39's prompt as its `new` variant (the scope sentences are the same in both).
+- Registered before the dev39 replay: the same five images and scenario as for dev38;
+  pass = REPLAY PASSED in each, `karox 6.0.0.dev39`, prompt digest dc5dea2fdcb3, run
+  "completed" with its snapshot. No second live check: the two tasks allowed for it are
+  used, and dev39 differs from the checked wheel by one sentence of the prompt.
