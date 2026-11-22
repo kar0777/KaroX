@@ -26,6 +26,8 @@ _TERMINAL_CONTROL = re.compile(
     r"|[\x00-\x08\x0b-\x1f\x7f-\x9f]"
 )
 ELLIPSIS = "…"
+DECO_START = "\ue001"  # private-use marks around decoration the full screen must not copy
+DECO_END = "\ue002"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,12 +59,22 @@ class Palette:
     def __init__(self, enabled: bool, theme: Theme | None = None) -> None:
         self.enabled = enabled
         self.theme = theme if theme is not None else Theme("ansi", 4 if enabled else 0)
+        self.mark_frames = False  # the full screen sets it: it must know what is decoration
 
     def __call__(self, style: str, text: str) -> str:
         if not self.enabled or not text:
             return text
         code = ";".join(c for c in (self.theme.sgr(s) for s in style.split("+")) if c)
         return f"\x1b[{code}m{text}\x1b[0m" if code else text
+
+    def frame(self, text: str) -> str:
+        """``text`` (a rule, a quote's bar, a box edge) in the ``subtle`` role. Where the
+        screen copies text out of the conversation it is marked as decoration, which the
+        copy leaves out; text that merely contains such characters is not marked."""
+        shown = self("subtle", text)
+        if self.mark_frames and self.enabled and text:
+            return f"{DECO_START}{shown}{DECO_END}"
+        return shown
 
 
 _RICH = {
@@ -248,7 +260,7 @@ def _box(
     never wraps on a narrow terminal. ``paint`` colours the frame (role ``subtle``) and the
     labels (``muted``)."""
     tl, tr, bl, br, h, v = _BOX_FANCY if fancy else _BOX_ASCII
-    frame = (lambda text: paint("subtle", text)) if paint is not None else (lambda text: text)
+    frame = paint.frame if paint is not None else (lambda text: text)
     label = (lambda text: paint("muted", text)) if paint is not None else (lambda text: text)
     wide = max((len(k) for k, _ in rows), default=0)
     lines = [(label(f"{k:<{wide}}") + f"  {val}" if wide else val) for k, val in rows]

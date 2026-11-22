@@ -15,13 +15,20 @@ in one read. Once a batch merged, the batches right after it merge too, so a
 paste long enough to span several reads stays one paste instead of leaking its
 tail in as keystrokes.
 
-POSIX terminals are untouched by this: a real ``[200~ … [201~`` already reaches
-``Vt100Parser`` as one ``BracketedPaste`` press, which is not a text press and
-passes through here unchanged.
+ConPTY leaves a stray ``[201~`` behind at the end of a paste. It closes the paste
+only where a marker can be: at the end of a run of text, or followed by nothing but
+the Enter that submits. The same five characters anywhere else are text. A marker
+cut in two by a read boundary (``[20`` | ``1~``) is held back until the rest comes.
+
+Only the Windows console needs any of this. A POSIX terminal sends a real
+``[200~ … [201~`` that ``Vt100Parser`` delivers as one ``BracketedPaste`` press, and
+the burst heuristics would only misread auto-repeat or an input method's burst
+there, so ``coalescing_input`` leaves such an input alone.
 """
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import TYPE_CHECKING
 
@@ -35,6 +42,11 @@ _BULK_CHARS = 32  # more text than this in one batch is a paste, not typing
 _HOT_SECONDS = 0.1  # after a merged batch, text this soon after merges too
 _NEWLINE_KEYS = (Keys.ControlJ, Keys.ControlM)
 _END_MARK = "[201~"  # what ConPTY leaves of the paste-end marker
+_START_MARK = "[200~"
+
+
+def _windows_console() -> bool:
+    return sys.platform == "win32"
 
 
 def _press_char(press: KeyPress) -> str | None:
@@ -51,74 +63,159 @@ def _press_char(press: KeyPress) -> str | None:
     return None
 
 
-def merge_pasted_runs(keys: list[KeyPress], hot: bool) -> tuple[list[KeyPress], bool]:
+def _partial_marker(text: str, hot: bool) -> int:
+    """How many trailing characters of ``text`` may be the start of a paste-end marker
+    still to arrive (one character only counts inside a paste: a typed ``[`` must not
+    wait)."""
+    for size in range(len(_END_MARK) - 1, 0, -1):
+        if text.endswith(_END_MARK[:size]):
+            return size if size > 1 or hot else 0
+    return 0
+
+
+class _PasteRun(KeyPress):
+    """A ``BracketedPaste`` the heuristics made of plain key events (a real one from the
+    terminal is an ordinary ``KeyPress``)."""
+
+    def __init__(self, data: str) -> None:
+        super().__init__(Keys.BracketedPaste, data)
+
+
+class _Batch:
+    """What ``merge_batch`` made of a batch of presses."""
+
+    def __init__(self) -> None:
+        self.out: list[KeyPress] = []
+        self.held: list[KeyPress] = []  # the start of a marker whose rest is not here yet
+        self.open = False  # a merged paste may continue in the next batch
+        self.ended = False  # a marker closed the paste
+
+
+def merge_batch(keys: list[KeyPress], hot: bool, hold: bool = False) -> _Batch:
     """Merge each run of text presses that a paste would make into one
     ``BracketedPaste`` press. ``hot`` merges every text run (the tail of a paste
-    still arriving); returns whether anything merged, so the caller keeps the
-    paste hot for the next batch. A paste-end marker closes the paste: what comes
-    after it (an Enter that submits) stays ordinary key presses."""
-    out: list[KeyPress] = []
+    still arriving). A paste-end marker closes the paste: what comes after it (an
+    Enter that submits) stays ordinary key presses. With ``hold`` the start of a
+    marker at the very end is returned in ``held`` for the caller to put in front of
+    the next batch."""
+    batch = _Batch()
     run: list[KeyPress] = []
-    merged = False
-    ended = False
 
-    def flush(force: bool = False) -> None:
-        nonlocal merged
+    def drop_escape() -> None:
+        # ConPTY hands the marker over as an Escape press and its text: the Escape
+        # would wait for a key to join (an Enter right after the paste: Alt+Enter).
+        if batch.out and batch.out[-1].key == Keys.Escape:
+            batch.out.pop()
+
+    def flush(last: bool) -> None:
+        nonlocal hot
         if not run:
             return
-        ends = sum(p.key in _NEWLINE_KEYS for p in run)
-        inside = ends - (1 if run[-1].key in _NEWLINE_KEYS else 0)
-        chars = len(run) - ends
-        if force or hot or inside >= 2 or chars >= _BULK_CHARS:
-            data = "".join(_press_char(p) or "" for p in run)
-            # ConPTY eats the markers except for a stray "[201~" tail it leaves
-            # behind; a "[200~" head goes with it in case a console is kinder.
-            data = data.removeprefix("[200~").removesuffix(_END_MARK)
+        chars = [_press_char(p) or "" for p in run]
+        text = "".join(chars)
+        exact = len(text) == len(run)  # one character per press: indexes line up
+        cut = len(text)
+        if exact:
+            at = text.rfind(_END_MARK)
+            if at >= 0 and not text[at + len(_END_MARK) :].strip("\r\n"):
+                cut = at  # the marker has only Enter keys after it: it is the end
+        if cut < len(text):
+            if cut == 0 or text.startswith(_START_MARK):
+                drop_escape()
+            data = "".join(chars[:cut]).removeprefix(_START_MARK)
             if data:
-                out.append(KeyPress(Keys.BracketedPaste, data))
-                merged = True
+                batch.out.append(_PasteRun(data))
+            batch.out.extend(run[cut + len(_END_MARK) :])
+            batch.open, batch.ended, hot = False, True, False
         else:
-            out.extend(run)
+            keep = len(run)
+            if hold and last and exact:
+                size = _partial_marker(text, hot or batch.open)
+                batch.held = run[len(run) - size :] if size else []
+                keep -= size
+            body = run[:keep]
+            ends = sum(p.key in _NEWLINE_KEYS for p in body)
+            inside = ends - (1 if body and body[-1].key in _NEWLINE_KEYS else 0)
+            if body and (hot or inside >= 2 or keep - ends >= _BULK_CHARS):
+                if text.startswith(_START_MARK):
+                    drop_escape()
+                data = "".join(chars[:keep]).removeprefix(_START_MARK)
+                if data:
+                    batch.out.append(_PasteRun(data))
+                    batch.open, batch.ended = True, False
+            else:
+                batch.out.extend(body)
         run.clear()
 
     for press in keys:
         if _press_char(press) is None:
-            flush()
-            out.append(press)
-            continue
-        run.append(press)
-        tail = "".join(_press_char(p) or "" for p in run[-len(_END_MARK) :])
-        if tail == _END_MARK:
-            flush(force=True)
-            hot = False  # the paste is over: the rest of the batch is typing
-            ended = True
-    flush()
-    return out, merged and not ended
+            flush(False)
+            batch.out.append(press)
+        else:
+            run.append(press)
+    flush(True)
+    return batch
+
+
+def merge_pasted_runs(keys: list[KeyPress], hot: bool) -> tuple[list[KeyPress], bool]:
+    """``merge_batch`` without a marker held back: the presses and whether a merged
+    paste is still open (the next batch should merge too)."""
+    batch = merge_batch(keys, hot)
+    return batch.out, batch.open
 
 
 class _CoalescingInput:
-    """An ``Input`` wrapper: ``read_keys`` merges a paste's key-event burst."""
+    """An ``Input`` wrapper: ``read_keys`` merges a paste's key-event burst.
+
+    A merged paste may go on in the next read, so it is kept back until its marker, any
+    other key, or ``flush_keys`` (prompt_toolkit calls it when no read follows soon)
+    ends it. It is handed over whole and always before whatever comes after it, so the
+    app inserts it in one piece and in order."""
 
     def __init__(self, inner: Input) -> None:
         self._inner = inner
         self._hot_until = 0.0
+        self._held: list[KeyPress] = []
+        self._pending: str | None = None  # a merged paste not handed over yet
 
-    def _merge(self, keys: list[KeyPress]) -> list[KeyPress]:
-        out, merged = merge_pasted_runs(keys, time.monotonic() <= self._hot_until)
-        if merged:
-            self._hot_until = time.monotonic() + _HOT_SECONDS
+    def _merge(self, keys: list[KeyPress], reading: bool) -> list[KeyPress]:
+        keys, self._held = [*self._held, *keys], []
+        now = time.monotonic()
+        batch = merge_batch(keys, self._pending is not None or now <= self._hot_until, hold=reading)
+        self._held = batch.held
+        out: list[KeyPress] = []
+        pending = self._pending
+        for press in batch.out:
+            if isinstance(press, _PasteRun):
+                pending = (pending or "") + (press.data or "")
+                continue
+            if pending is not None:
+                out.append(KeyPress(Keys.BracketedPaste, pending))
+                pending = None
+            out.append(press)
+        if pending is not None and (batch.ended or not reading):
+            out.append(KeyPress(Keys.BracketedPaste, pending))
+            pending = None
+        self._pending = pending
+        if batch.open:
+            self._hot_until = now + _HOT_SECONDS
+        elif batch.ended or not reading:
+            self._hot_until = 0.0
         return out
 
     def read_keys(self) -> list[KeyPress]:
-        return self._merge(list(self._inner.read_keys()))
+        return self._merge(list(self._inner.read_keys()), True)
 
     def flush_keys(self) -> list[KeyPress]:
-        return self._merge(list(self._inner.flush_keys()))
+        return self._merge(list(self._inner.flush_keys()), False)
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._inner, name)
 
 
 def coalescing_input(inner: Input) -> Input:
-    """``inner`` with paste bursts merged into ``BracketedPaste`` presses."""
+    """``inner`` with paste bursts merged into ``BracketedPaste`` presses (a Windows
+    console; any other input is returned as it is)."""
+    if not _windows_console():
+        return inner
     return _CoalescingInput(inner)  # type: ignore[return-value]

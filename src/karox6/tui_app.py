@@ -15,10 +15,10 @@ import sys
 import time
 from bisect import bisect_right
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Coroutine
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, NamedTuple, override
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -62,6 +62,8 @@ from karox6.tui import (
 from karox6.tui_input import coalescing_input
 from karox6.tui_paste import WARN_BYTES, PasteChunks
 from karox6.tui_text import (
+    DECO_END,
+    DECO_START,
     StatusSnapshot,
     _git_branch,
     _glyphs,
@@ -116,9 +118,25 @@ _FLAG_OFF = {22: ("bold", "dim"), 23: ("italic",), 24: ("underline",), 27: ("rev
 _ERASE_LINE = "\x1b[K"
 _FILL_MARK = "\ue000"
 FILL = "class:fill"
+DECO = "class:deco"  # what the app draws around the text (a quote's bar, a rule), not text
 
 
 def _runs(text: str) -> list[Run]:
+    """``text`` as styled runs, the stretches the chat wrapped in ``Palette.frame`` marks
+    (``DECO_START`` .. ``DECO_END``) flagged ``class:deco``: copying leaves them out."""
+    if DECO_START not in text:
+        return _fill_runs(text)
+    out: list[Run] = []
+    head, *pieces = text.split(DECO_START)
+    out += _fill_runs(head)
+    for piece in pieces:
+        inner, _, rest = piece.partition(DECO_END)
+        out += [(f"{style} {DECO}".strip(), chunk) for style, chunk in _fill_runs(inner)]
+        out += _fill_runs(rest)
+    return out
+
+
+def _fill_runs(text: str) -> list[Run]:
     """``text`` (plain, or with SGR colour codes) as styled runs. "Erase to the end of the
     line" (``ESC [ K``) after coloured text, which a terminal answers by painting the rest
     of the line in the current background, marks that run ``class:fill``: the pane pads it
@@ -336,7 +354,15 @@ class _TranscriptControl(UIControl):
         # column) of the content on screen. ``on_copy`` gets the selected plain text.
         self._sel_anchor: tuple[int, int] | None = None
         self._sel_point: tuple[int, int] | None = None
+        # The rows as they were when the button went down: text that streams in (and a
+        # markdown line that re-formats when its closing mark arrives) must not move
+        # under a selection being dragged.
+        self._frozen: _RowsView | None = None
         self.on_copy: Callable[[str], None] | None = None
+
+    def _reset_selection(self) -> None:
+        self._sel_anchor = self._sel_point = None
+        self._frozen = None
 
     @property
     def max_scroll(self) -> int:
@@ -364,7 +390,7 @@ class _TranscriptControl(UIControl):
         self.follow = True
         self.scroll_top = 0
         self.total_visual_lines = 1
-        self._sel_anchor = self._sel_point = None
+        self._reset_selection()
 
     def set_live(self, text: str) -> None:
         """Show ``text`` (one line, may hold colours) after the last line until replaced."""
@@ -396,7 +422,7 @@ class _TranscriptControl(UIControl):
             block[1] = len(lines)
         self._dirty_from = min(self._dirty_from, self._blocks[0][0])
         self._tail = None
-        self._sel_anchor = self._sel_point = None  # line numbers moved
+        self._reset_selection()  # line numbers moved
         return True
 
     def append(self, text: str) -> None:
@@ -430,7 +456,7 @@ class _TranscriptControl(UIControl):
             for block in self._blocks:
                 block[0] -= drop
             self._blocks = [block for block in self._blocks if block[0] >= 0]
-            self._sel_anchor = self._sel_point = None  # line numbers moved
+            self._reset_selection()  # line numbers moved
             if not self.follow:
                 self.scroll_top = max(0, self.scroll_top - drop)
 
@@ -443,6 +469,8 @@ class _TranscriptControl(UIControl):
         width = max(1, width)
         count = self._displayed_logical_count()
         if width != self._wrap_width:
+            if self._wrap_width:
+                self._reset_selection()  # the rows re-wrap: their numbers mean other text
             self._wrap_width = width
             self._wrapped_cache = []
             self._visual_offsets = []
@@ -564,46 +592,54 @@ class _TranscriptControl(UIControl):
 
     # -- mouse drag selection ----------------------------------------------------------
 
-    def _row_content(self, visual_row: int) -> tuple[int, str]:
-        """A visual row as (its logical line, plain text). Rows of a wrapped logical
-        line share its index; the still-streaming line counts as one logical line."""
-        known = len(self._visual_lines)
-        if visual_row < known:
-            logical = bisect_right(self._visual_offsets, visual_row) - 1
-            plain = "".join(frag[1] for frag in self._visual_lines[visual_row])
-            return max(logical, 0), plain
-        row = min(visual_row - known, len(self._live_lines) - 1)
-        plain = "".join(frag[1] for frag in self._live_lines[row]) if row >= 0 else ""
-        return len(self._lines), plain
+    def _view(self) -> _RowsView:
+        """The rows now: the ones frozen at the start of a drag, else the live ones."""
+        if self._frozen is not None:
+            return self._frozen
+        return _RowsView(
+            self._visual_lines, self._visual_offsets, self._live_lines, len(self._lines)
+        )
+
+    def _freeze(self) -> _RowsView:
+        """A copy of the rows that no streaming write changes: every row but the open
+        line's is never touched again, so only its rows are copied."""
+        rows, offsets = list(self._visual_lines), list(self._visual_offsets)
+        start = offsets[-1] if offsets else 0
+        rows[start:] = [list(row) for row in rows[start:]]
+        live = [list(row) for row in self._live_lines]
+        return _RowsView(rows, offsets, live, len(self._lines))
 
     def _normalized_selection(self) -> tuple[int, int, int, int] | None:
-        """The selection as (first row, first col, last row, last col), None when
-        there is none or it is empty."""
+        """The selection as (first row, first character, last row, end), the end being
+        the boundary after the last selected character: None when there is none or it
+        is empty. The mouse names the character it is over, and a position past the end
+        of a row names its last character: a drag that ends on or beyond it takes it."""
         if self._sel_anchor is None or self._sel_point is None:
             return None
         a, b = sorted((self._sel_anchor, self._sel_point))
         if a == b:
             return None
-        return a[0], a[1], b[0], b[1]
+        size = len(self._view().plain(b[0]))
+        return a[0], a[1], b[0], size if b[1] >= size - 1 else b[1]
 
     def selection_text(self) -> str:
-        """The selected text, plain: no colours, no box frame. Visual rows of one
-        wrapped logical line join without a newline; separate logical lines with one."""
+        """The selected text, plain: no colours, none of the decoration the chat itself
+        drew (marked ``class:deco``), nothing else left out. Visual rows of one wrapped
+        logical line join without a newline; separate logical lines with one."""
         sel = self._normalized_selection()
         if sel is None:
             return ""
         r1, c1, r2, c2 = sel
-        rows: list[str] = []
+        view = self._view()
+        parts: list[str] = []
         prev_logical = -1
-        for r in range(r1, r2 + 1):
-            logical, plain = self._row_content(r)
+        for r in range(r1, min(r2, view.total - 1) + 1):
+            logical = view.logical(r)
             if r > r1 and logical != prev_logical:
-                rows.append("\n")
+                parts.append("\n")
             prev_logical = logical
-            lo = min(c1, len(plain)) if r == r1 else 0
-            hi = min(c2, len(plain)) if r == r2 else len(plain)
-            rows.append(plain[lo:hi])
-        return "".join(rows).translate(_NO_FRAME).rstrip()
+            parts.append(_slice_row(view.row(r), c1 if r == r1 else 0, c2 if r == r2 else 1 << 30))
+        return "".join(parts)
 
     @override
     def mouse_handler(self, mouse_event: MouseEvent) -> NotImplementedOrNone:
@@ -617,6 +653,7 @@ class _TranscriptControl(UIControl):
         pos = (mouse_event.position.y, mouse_event.position.x)
         if kind == MouseEventType.MOUSE_DOWN:
             if mouse_event.button in (MouseButton.LEFT, MouseButton.UNKNOWN):
+                self._frozen = self._freeze()
                 self._sel_anchor = self._sel_point = pos
                 return None
             return NotImplemented
@@ -629,13 +666,53 @@ class _TranscriptControl(UIControl):
             if self._sel_anchor is None:
                 return NotImplemented
             text = self.selection_text()
+            self._frozen = None
             if text and self.on_copy is not None:
                 self.on_copy(text)
             return None
         return NotImplemented
 
 
-_NO_FRAME = str.maketrans("", "", "╭╮╰╯─│")  # box frame chars are not text to copy
+class _RowsView(NamedTuple):
+    """The visual rows of the conversation, for turning a selection into text."""
+
+    rows: list[StyleAndTextTuples]
+    offsets: list[int]  # the first visual row of each logical line
+    live: list[StyleAndTextTuples]  # the answer line still streaming, after the rows
+    logical_count: int
+
+    @property
+    def total(self) -> int:
+        return len(self.rows) + len(self.live)
+
+    def row(self, number: int) -> StyleAndTextTuples:
+        known = len(self.rows)
+        if number < known:
+            return self.rows[number]
+        return self.live[number - known] if number - known < len(self.live) else []
+
+    def plain(self, number: int) -> str:
+        return "".join(fragment[1] for fragment in self.row(number))
+
+    def logical(self, number: int) -> int:
+        """Rows of one wrapped logical line share its index; the streaming line counts
+        as one logical line."""
+        if number < len(self.rows):
+            return max(bisect_right(self.offsets, number) - 1, 0)
+        return self.logical_count
+
+
+def _slice_row(row: StyleAndTextTuples, start: int, end: int) -> str:
+    """The characters ``start`` .. ``end`` of a row, the decoration among them left out."""
+    out: list[str] = []
+    pos = 0
+    for style, text, *_rest in row:
+        s = min(max(start - pos, 0), len(text))
+        e = min(max(end - pos, 0), len(text))
+        if e > s and DECO not in style:
+            out.append(text[s:e])
+        pos += len(text)
+    return "".join(out)
 
 
 def _mark_selection(
@@ -648,14 +725,12 @@ def _mark_selection(
     out: StyleAndTextTuples = []
     pos = 0
     for style, text, *_rest in line:
-        s = max(start - pos, 0)
-        e = min(end - pos, len(text))
-        if s > 0:
-            _extend(out, style, text[:s])
+        s = min(max(start - pos, 0), len(text))
+        e = min(max(end - pos, 0), len(text))
+        _extend(out, style, text[:s])
         if e > s:
             _extend(out, f"{style} class:selected".strip(), text[s:e])
-        if e < len(text):
-            _extend(out, style, text[e:])
+        _extend(out, style, text[e:])
         pos += len(text)
     return out
 
@@ -672,6 +747,17 @@ class _QuietScrollbar(ScrollbarMargin):
         if window_render_info.content_height <= window_render_info.window_height:
             return []
         return super().create_margin(window_render_info, width, height)
+
+
+def _windows_terminal() -> bool:
+    return sys.platform == "win32"
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 class _FullScreenTurnView:
@@ -825,17 +911,21 @@ class FullScreenTui:
 
         self._read_future: asyncio.Future[str] | None = None
         self._question_future: asyncio.Future[str] | None = None
-        self._paste_task: asyncio.Future[None] | None = None
         self._closed = False  # _stop ran: reads after it get EOF, never a dead future
         self._queued_inputs: deque[str | BaseException] = deque()
         self._copy_fn = copy_to_clipboard
         self._pastes = PasteChunks()
-        self._paste_parts: list[str] = []  # a paste's pieces, joined on flush
-        self._paste_timer: asyncio.TimerHandle | None = None
         self._large_ok: str | None = None  # the draft whose size the user confirmed
+        # Clipboard reads (Ctrl+V, Alt+V) run one after another, each for the draft that
+        # was being typed when its key was pressed and at the cursor position then.
+        self._draft = 0  # changes when a draft ends: what is still on its way is dropped
+        self._paste_tasks: list[asyncio.Future[None]] = []
+        self._paste_slot: int | None = None  # where the next clipboard text lands
+        self._enter_waiting = False  # an Enter waiting for the clipboard reads to end
+        self._cr_at: tuple[int, float] | None = None  # a paste ended in CR: (cursor, time)
         self._notice: tuple[str, float] | None = None  # (text, until) on the activity line
         self._notice_timer: asyncio.TimerHandle | None = None
-        self._pending_osc52: list[str] = []  # sequences a copy queued for the terminal
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._copy_tasks: set[asyncio.Task[None]] = set()  # a selection copy in flight
 
         self._transcript = _TranscriptControl()
@@ -1042,16 +1132,12 @@ class FullScreenTui:
 
     def attach_app(self, chat_app: ChatApp) -> None:
         self._chat_app = chat_app
+        chat_app.paint.mark_frames = True  # the conversation pane copies without the frames
         self.invalidate()
 
     def columns(self) -> int:
         """Cells a line of the conversation can take (the scrollbar column left out)."""
         return max(self._app.output.get_size().columns - 1, 20)
-
-    def _paste_done(self, task: asyncio.Future[None]) -> None:
-        self._paste_task = None
-        if not task.cancelled() and task.exception() is not None:
-            self.write(f"  cannot read the clipboard: {task.exception()}\n")
 
     def prefill(self, text: str) -> None:
         """Put ``text`` into the input line, cursor at its end (an undone message comes
@@ -1062,20 +1148,27 @@ class FullScreenTui:
 
     def copy_to_clipboard(self, text: str) -> str:
         """How the selection and ``/copy`` copy: the injected writer, or the real
-        system clipboard (OSC 52 goes out on the next repaint, not into the screen
-        layout, so it is queued for ``invalidate`` to write raw)."""
+        system clipboard. This runs in a worker thread; an OSC 52 sequence is written
+        to the terminal by the event loop, not from here."""
         if self._copy_fn is not None:
             return self._copy_fn(text)
         from karox6.clipboard import copy_text
 
-        return copy_text(text, emit_osc52=self._pending_osc52.append)
+        return copy_text(text, emit_osc52=self._emit_osc52)
+
+    def _emit_osc52(self, seq: str) -> None:
+        loop = self._loop
+        if loop is None or loop is _running_loop():
+            self._write_osc52(seq)
+        else:
+            with contextlib.suppress(RuntimeError):  # the loop closed: the app is gone
+                loop.call_soon_threadsafe(self._write_osc52, seq)
+
+    def _write_osc52(self, seq: str) -> None:
+        self._app.output.write_raw(seq)
+        self._app.output.flush()
 
     def invalidate(self) -> None:
-        if self._pending_osc52:
-            seqs, self._pending_osc52 = self._pending_osc52, []
-            for seq in seqs:
-                self._app.output.write_raw(seq)
-            self._app.output.flush()
         if self._app.is_running and not self._app.is_done:
             self._app.invalidate()
 
@@ -1096,6 +1189,7 @@ class FullScreenTui:
 
     async def __aenter__(self) -> FullScreenTui:
         self._active = True
+        self._loop = asyncio.get_running_loop()
         atexit.register(self._restore_terminal)
         try:
             self._app_task = asyncio.create_task(self._app.run_async(handle_sigint=False))
@@ -1119,10 +1213,12 @@ class FullScreenTui:
 
     async def _stop(self) -> None:
         self._closed = True  # a read arriving after this point gets EOF, not a dead future
-        if self._paste_timer is not None:
-            self._paste_timer.cancel()
-            self._paste_timer = None
-            self._paste_parts = []
+        self._enter_waiting = False
+        if self._notice_timer is not None:
+            self._notice_timer.cancel()
+            self._notice_timer = None
+        for pending in [*self._paste_tasks, *self._copy_tasks]:
+            pending.cancel()  # the clipboard thread (a daemon) is left to finish alone
         self._fail_pending(EOFError())
         try:
             task = self._app_task
@@ -1388,6 +1484,8 @@ class FullScreenTui:
 
     def _set_notice(self, text: str, seconds: float = 3.0) -> None:
         """A short message on the right of the activity line ("copied 42 chars")."""
+        if self._closed:
+            return
         self._notice = (text, time.monotonic() + seconds)
         if self._notice_timer is not None:
             self._notice_timer.cancel()
@@ -1400,10 +1498,11 @@ class FullScreenTui:
     def _copy_selection(self, text: str) -> None:
         """Drag released with text under it: put it on the clipboard off the event
         loop (a Windows clipboard call can block on another app's window)."""
+        from karox6.clipboard import in_daemon_thread
 
         async def go() -> None:
             try:
-                how = await asyncio.to_thread(self.copy_to_clipboard, text)
+                how = await in_daemon_thread(self.copy_to_clipboard, text)
             except Exception as exc:
                 self._set_notice(f"copy failed: {exc}", 4.0)
             else:
@@ -1414,39 +1513,107 @@ class FullScreenTui:
         self._copy_tasks.add(task)
         task.add_done_callback(self._copy_tasks.discard)
 
+    # -- the draft and what is pasted into it -------------------------------------------
+
+    def _end_draft(self) -> None:
+        """The draft is over (sent, or cancelled with Ctrl+C): the pastes behind its
+        placeholders go, and a clipboard read still on its way is dropped, so that
+        neither lands in the next draft."""
+        self._draft += 1
+        self._pastes.clear()
+        self._large_ok = None
+        self._cr_at = None
+        self._enter_waiting = False
+        self._paste_slot = None
+        for task in self._paste_tasks:
+            task.cancel()
+        self._paste_tasks.clear()
+
+    def _queue_clipboard(self, job: Callable[[int], Coroutine[Any, Any, None]]) -> None:
+        """Run ``job`` (it gets the draft it was asked for) after the clipboard reads
+        asked before it: two quick Ctrl+V both land, in order."""
+        if self._chat_app is None or self._closed:
+            return
+        if not self._paste_tasks:
+            self._paste_slot = self._input_buffer.cursor_position
+        previous = self._paste_tasks[-1] if self._paste_tasks else None
+        draft = self._draft
+
+        async def run() -> None:
+            if previous is not None:
+                await asyncio.wait([previous])
+            if draft == self._draft:
+                await job(draft)
+
+        task = asyncio.ensure_future(run())
+        self._paste_tasks.append(task)
+        task.add_done_callback(self._paste_done)
+
+    def _paste_done(self, task: asyncio.Future[None]) -> None:
+        if task in self._paste_tasks:
+            self._paste_tasks.remove(task)
+        if not task.cancelled() and task.exception() is not None:
+            self.write(f"  cannot read the clipboard: {task.exception()}\n")
+        if not self._paste_tasks:
+            self._paste_slot = None
+            if self._enter_waiting and not self._closed:
+                self._enter_waiting = False
+                self._submit(None)
+
     def _paste_from_clipboard(self) -> None:
         """Ctrl+V, or a bracketed paste that arrived empty: text goes into the input
         like any paste; a picture attaches to the next message. The Windows Terminal
         sends nothing for an image-only clipboard, so the empty case looks there."""
-        if self._paste_task is not None or self._chat_app is None:
+        self._queue_clipboard(self._clipboard_text_or_image)
+
+    def _attach_clipboard_image(self) -> None:
+        async def job(_draft: int) -> None:
+            await self._chat_app.paste_image()  # type: ignore[union-attr]
+
+        self._queue_clipboard(job)
+
+    async def _clipboard_text_or_image(self, draft: int) -> None:
+        from karox6.clipboard import grab_text, in_daemon_thread
+
+        text = await in_daemon_thread(grab_text)
+        if draft != self._draft:
             return
-        task = asyncio.ensure_future(self._clipboard_text_or_image())
-        self._paste_task = task
-        task.add_done_callback(self._paste_done)
-
-    async def _clipboard_text_or_image(self) -> None:
-        from karox6.clipboard import grab_text
-
-        text = await asyncio.to_thread(grab_text)
         if text:
-            shown = self._pastes.offer(text.replace("\r\n", "\n").replace("\r", "\n"))
-            self._input_buffer.insert_text(shown)
-            self.invalidate()
+            self._insert_clipboard_text(text.replace("\r\n", "\n").replace("\r", "\n"))
             return
-        await self._chat_app.paste_image()  # type: ignore[union-attr]
+        chat = self._chat_app
+        assert chat is not None
+        await chat.paste_image()
 
-    def _flush_paste(self) -> None:
-        """Insert the paste pieces gathered so far — run by the quiet timer, or
-        early when a keypress needs the input to hold the paste already."""
-        if self._paste_timer is not None:
-            self._paste_timer.cancel()
-            self._paste_timer = None
-        parts, self._paste_parts = self._paste_parts, []
-        if not parts:
-            return
-        data = "".join(parts)
-        self._input_buffer.insert_text(self._pastes.offer(data))
+    def _insert_clipboard_text(self, text: str) -> None:
+        """Where the Ctrl+V was pressed, whatever was typed after it: the text lands
+        there, behind earlier pastes of the same chain."""
+        buf = self._input_buffer
+        shown = self._pastes.offer(text)
+        value, cursor = buf.text, buf.cursor_position
+        at = min(self._paste_slot if self._paste_slot is not None else cursor, len(value))
+        if at == cursor:
+            buf.insert_text(shown)
+        else:
+            buf.save_to_undo_stack()
+            after = cursor + len(shown) if cursor >= at else cursor
+            buf.set_document(Document(value[:at] + shown + value[at:], after), bypass_readonly=True)
+        self._paste_slot = at + len(shown)
         self.invalidate()
+
+    def _insert_paste(self, raw: str) -> None:
+        """A bracketed paste, at once and at the cursor, so what is typed around it
+        stays in order. A CR LF pair cut between two pastes is still one line end."""
+        buf = self._input_buffer
+        now = time.monotonic()
+        if raw.startswith("\n") and self._cr_at is not None:
+            at, when = self._cr_at
+            if at == buf.cursor_position and now - when < 0.5:
+                raw = raw[1:]
+        if raw:
+            buf.insert_text(self._pastes.offer(raw.replace("\r\n", "\n").replace("\r", "\n")))
+            self.invalidate()
+        self._cr_at = (buf.cursor_position, now) if raw.endswith("\r") else None
 
     # -- key bindings ------------------------------------------------------------------
 
@@ -1563,6 +1730,7 @@ class FullScreenTui:
             empty = not buf.text
             buf.cancel_completion()
             buf.reset()
+            self._end_draft()
             exc = _PromptInterrupt(empty=empty)
             if self._read_future is not None and not self._read_future.done():
                 self._read_future.set_exception(exc)
@@ -1594,27 +1762,19 @@ class FullScreenTui:
         @keys.add("escape", "v", filter=in_prompt & ~is_searching)
         def _alt_v(event: KeyPressEvent) -> None:
             del event
-            if self._chat_app is not None and self._paste_task is None:
-                # Reading the clipboard must not block typing.
-                task = asyncio.ensure_future(self._chat_app.paste_image())
-                self._paste_task = task
-                task.add_done_callback(self._paste_done)
+            self._attach_clipboard_image()  # reading the clipboard must not block typing
 
         @keys.add(Keys.BracketedPaste, filter=in_input & ~is_searching)
         def _bracketed_paste(event: KeyPressEvent) -> None:
-            data = (event.data or "").replace("\r\n", "\n").replace("\r", "\n")
-            if not data:
-                # The Windows Terminal sends an empty bracketed paste when the
-                # clipboard holds a picture only: Ctrl+V then means "attach it".
-                self._paste_from_clipboard()
+            if not event.data:
+                # The Windows Terminal sends an empty bracketed paste when the clipboard
+                # holds a picture only: Ctrl+V then means "attach it". Another terminal's
+                # empty paste is just empty (and must not read a clipboard behind its
+                # back, say the one of a remote session's display).
+                if _windows_terminal():
+                    self._paste_from_clipboard()
                 return
-            # A console without bracketed paste delivers a paste as several
-            # bursts: gather the pieces briefly and insert them as one.
-            self._paste_parts.append(data)
-            if self._paste_timer is not None:
-                self._paste_timer.cancel()
-            with contextlib.suppress(RuntimeError):  # a loop might not run in a test
-                self._paste_timer = asyncio.get_running_loop().call_later(0.1, self._flush_paste)
+            self._insert_paste(event.data)
 
         @keys.add("c-v", filter=in_input & ~is_searching)
         def _ctrl_v(event: KeyPressEvent) -> None:
@@ -1624,7 +1784,6 @@ class FullScreenTui:
         @keys.add("c-j", filter=in_input & ~is_searching)
         def _ctrl_j(event: KeyPressEvent) -> None:
             del event
-            self._flush_paste()
             self._input_buffer.insert_text("\n")
 
         @keys.add("tab", filter=in_prompt & ~is_searching)
@@ -1645,43 +1804,51 @@ class FullScreenTui:
 
         @keys.add("enter", filter=in_input & ~is_searching)
         def _enter(event: KeyPressEvent) -> None:
-            self._flush_paste()  # an Enter lands after the paste it follows
-            buf = self._input_buffer
-            doc = buf.document
-            if doc.text_before_cursor.endswith("\\") and not doc.text_after_cursor:
-                buf.delete_before_cursor(1)
-                buf.insert_text("\n")
+            if self._paste_tasks:
+                # A clipboard read is still running: the message goes out once its
+                # text (or picture) is in, not without it.
+                self._enter_waiting = True
                 return
-            if pasted_line_end(event):
-                buf.insert_text("\n")
-                return
-            state = buf.complete_state
-            if state is not None and state.current_completion is not None:
-                buf.apply_completion(state.current_completion)
-                return
-            shown = buf.text
-            text = self._pastes.expand(shown)  # placeholders become their payloads
-            size = len(text.encode("utf-8"))
-            if size > WARN_BYTES and shown != self._large_ok:
-                self._large_ok = shown
-                self.write(
-                    f"  ! this message is {size / (1024 * 1024):.1f} MB — "
-                    "a model sees every byte. Enter again sends it.\n"
-                )
-                return
-            if text != shown:
-                buf.set_document(Document(text, len(text)), bypass_readonly=True)
-            if text.strip():
-                buf.append_to_history()
-            buf.cancel_completion()
-            buf.reset()
-            self._pastes.clear()
-            self._large_ok = None
-            if self._read_future is not None and not self._read_future.done():
-                self._echo_user_message(shown)
-                self._read_future.set_result(text)
-            elif text.strip():
-                self._queued_inputs.append(text)
-                self.invalidate()  # the status bar counts what is waiting
+            self._submit(event)
 
         return keys
+
+    def _submit(self, event: KeyPressEvent | None) -> None:
+        """Enter: a line end inside a paste, a completion, or the message itself. The
+        ``event`` is None when the Enter was waiting for a clipboard read."""
+        buf = self._input_buffer
+        doc = buf.document
+        if doc.text_before_cursor.endswith("\\") and not doc.text_after_cursor:
+            buf.delete_before_cursor(1)
+            buf.insert_text("\n")
+            return
+        if event is not None and pasted_line_end(event):
+            buf.insert_text("\n")
+            return
+        state = buf.complete_state
+        if state is not None and state.current_completion is not None:
+            buf.apply_completion(state.current_completion)
+            return
+        shown = buf.text
+        text = self._pastes.expand(shown)  # placeholders become their payloads
+        size = len(text.encode("utf-8"))
+        if size > WARN_BYTES and shown != self._large_ok:
+            self._large_ok = shown
+            self.write(
+                f"  ! this message is {size / (1024 * 1024):.1f} MB — "
+                "a model sees every byte. Enter again sends it.\n"
+            )
+            return
+        if text != shown:
+            buf.set_document(Document(text, len(text)), bypass_readonly=True)
+        if text.strip():
+            buf.append_to_history()
+        buf.cancel_completion()
+        buf.reset()
+        self._end_draft()
+        if self._read_future is not None and not self._read_future.done():
+            self._echo_user_message(shown)
+            self._read_future.set_result(text)
+        elif text.strip():
+            self._queued_inputs.append(text)
+            self.invalidate()  # the status bar counts what is waiting

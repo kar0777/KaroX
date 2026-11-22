@@ -124,7 +124,7 @@ class Markdown:
             role = "heading" if len(marks) <= 2 else "bold"
             return p("subtle", marks + " ") + self._inline(heading.group(2), role) + end
         if _RULE.match(line):
-            return p("subtle", "─" * max(min(self.columns() - 1, 72), 3)) + end
+            return p.frame("─" * max(min(self.columns() - 1, 72), 3)) + end
         bullet = _BULLET.match(line)
         if bullet:
             indent, _mark, task, text = bullet.groups()
@@ -140,7 +140,7 @@ class Markdown:
             return f"{indent}{p('accent', number)} {self._inline(text)}{end}"
         quote = _QUOTE.match(line)
         if quote:
-            bar = p("subtle", self.glyph.get("pipe", "| "))
+            bar = p.frame(self.glyph.get("pipe", "| "))
             return bar + self._inline(quote.group(1), "muted+italic") + end
         return self._inline(line) + end
 
@@ -208,7 +208,7 @@ class Markdown:
                 parts.append(p("bold", shown) if n == 0 else shown)
             out.append(sep.join(parts).rstrip() + "\n")
             if n == 0:
-                out.append(p("subtle", "─┼─".join("─" * w for w in widths)) + "\n")
+                out.append(p.frame("─┼─".join("─" * w for w in widths)) + "\n")
         return "".join(out)
 
 
