@@ -1859,3 +1859,12 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   bot, and the estimates in this file redone if it is 1,500.
 - 01:55 UTC, the night's runs are over. `DEVIN_REPORT.md` is final (tables of every run,
   bugs 13-20, where KaroX is worse, what to do next, check outputs).
+- 02:00 UTC, end state. KaroX `devin/big`: code at 573ded0 (6.0.0.dev37), docs after it.
+  Bench `devin/bench` a81e191: wheels dev36 and dev37, the codex arm that works, the
+  audit fix, `scripts/analysis/{thirds,requests,karox_ends,compactions}.py` (what the
+  report's figures were read from) and `probes/codex_local` (Codex through the gateway
+  to a mock upstream). Run data: `karox6-bench-data/runs/{devt1,devt2,devt2b,devc0..3,
+  devab1}`, each with its `trio_report.md` where there is one; the 18-task table is
+  `runs/devt2b/trio_report_all18.md`. Scratch left on this PC, safe to delete:
+  `%TEMP%\devin-night` and, in WSL, `~/devin-k6` (a copy of the tree, its venv, ripgrep).
+  Nothing was merged, tagged or published; `D:\проекты\KaroX-6` was not touched.
