@@ -2252,3 +2252,8 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   Rule: keep dev44 if it solves >= dev43 on valid tasks AND input tokens are >= 15% lower;
   a solve loss of 2+ reverts it; otherwise (cheaper by < 15%) keep it only if a second
   mini-run on 6 more held-out tasks confirms.
+- mab3 result (run 45032397280, 6/6 valid): dev42 1, dev43 2 (cyclopts-1030 only by dev43).
+  Output 113k vs 138k, reasoning 61k vs 94k: the no-drafting line made GLM write MORE, not
+  less; input 11.1M vs 9.6M (-14%), calls 303 vs 255. Pre-registered rule (solves >= AND
+  output+reasoning >= 15% lower) fails -> line reverted (prompt cap back to 600 words).
+  The old line's output saving likely came from DeepSeek-specific behaviour or other parts.
