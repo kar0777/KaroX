@@ -2257,3 +2257,12 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   less; input 11.1M vs 9.6M (-14%), calls 303 vs 255. Pre-registered rule (solves >= AND
   output+reasoning >= 15% lower) fails -> line reverted (prompt cap back to 600 words).
   The old line's output saving likely came from DeepSeek-specific behaviour or other parts.
+- mab4 result (run 45036987665, 6/6 valid): dev43 2, dev44 2; input 9.9M vs 12.1M (+22%),
+  calls 284 vs 293. NOT adopted (rule needed >= 15% lower). But the mechanisms never ran:
+  the test-output condenser fired in 0 sessions (no test output over 4,000 chars) and the
+  wire elision needs >= 96k input tokens, reached only once (markdown-1696 dev44, late).
+  Max per-step input was 20k-112k. So mab4's differences (-51% on the first 4 tasks, +22%
+  overall) are trajectory noise: per task, single attempts differ by up to 2x in steps.
+  Lessons: (1) a 6-task single-attempt mini-run cannot detect a 15% effect; (2) on these
+  tasks KaroX's cost is the NUMBER OF STEPS (17-110), not context size; levers that cut
+  steps matter more than context trimming. dev44 stays on devin/big, not merged.
