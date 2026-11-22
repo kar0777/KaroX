@@ -1815,3 +1815,18 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   for these two tasks with two KaroX arms; 1,100 with a margin, about 1,750 are left.
   Time: koota-pair runs to its 3,550 s limit, so about 95 minutes; it starts when devc3
   ends and is not started after 02:00 UTC.
+- devc3 result (run 44971059267, 01:21-01:30 UTC; codex alone, ReformBoss, disc task 2,
+  bench 6a4201d; data in `karox6-bench-data/runs/devc3`): PASS by the registered rule.
+  Codex CLI 0.171.0 installed, its 19 requests reached deepseek-v4.1-flash-1017 through
+  the gateway (19 successful audit rows of harness `codex`, the enforced profile on each:
+  temperature 1.0, top_p 0.95, reasoning_effort max, max_tokens 32768), it ran 43 shell
+  commands and one file change (47 tool results in its last request), and the run ended
+  on its own after 4.8 min. Audit usage: input 737.6k (673.3k cached), output 28.3k
+  (reasoning 16.3k), cost-equivalent $0.028. So: Codex CLI works through this gateway
+  since bench 6a4201d; before it the upstream refused the bridged request (devc2) and
+  the audit lost the arm's rows. Its score is not read (one task, and the arm was
+  changed three times tonight to get here); a codex arm may join a later same-model
+  comparison, registered separately. One thing to know before that: Codex sends its own
+  `reasoning.effort`, which the gateway replaces with the profile's, as for every arm.
+- 01:31 UTC, devab1 dispatched: run 44971868428 (bench 6a4201d, both arms on the dev36
+  wheel, karox6b with `--compact-at 170000`), one job, disc 18 then 19.
