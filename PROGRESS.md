@@ -1868,3 +1868,108 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   `runs/devt2b/trio_report_all18.md`. Scratch left on this PC, safe to delete:
   `%TEMP%\devin-night` and, in WSL, `~/devin-k6` (a copy of the tree, its venv, ripgrep).
   Nothing was merged, tagged or published; `D:\проекты\KaroX-6` was not touched.
+- Short shift, 2026-11-22, started 04:20 UTC (`date -u`: Sun Nov 22 04:20:33 UTC 2026).
+  ReformBoss is closed until 21:00 UTC and nothing below uses it. Why DSH solves more and
+  costs less, from the saved trio runs only (devs1, devt1, devt2, devt2b: 17 valid tasks,
+  one model and lane; bench `scripts/analysis/dshcmp.py` and `scopewords.py`; no model
+  call). A run is cut at its first and its last edit of a source file: explore, work,
+  tail. Tokens are the gateway audit's. Sizes are not read from the logs: DSH's log cuts
+  every tool result at 8k characters (the first version of the script did read them and
+  showed KaroX "reading 1.3x more before the first edit", which the audit does not
+  confirm). Mean per task, KaroX / DSH:
+  * The start is the same: first source edit at step 22.6 / 21.6, the request at that
+    step 61k / 56k tokens, explore output 17.1k / 15.3k tokens (+12%). Tool limits are the
+    same (2000-line reads in both). KaroX's first request is the smaller one (3.9k / 6.9k
+    tokens), so the size of the prompt is not the cost.
+  * The cost comes after the first edit: work 21.4 / 15.3 steps and 17.3k / 11.4k output
+    tokens (+52%), tail 13.3 / 9.1 steps and 9.5k / 5.8k (+64%). Of KaroX's extra calls
+    per task (56.3 / 45.9) one is explore, 6.1 work, 4.2 tail (DSH's count includes its
+    one session-title request). After the first edit KaroX runs 8.7 test commands and 9.0
+    inline probes, DSH 4.7 and 3.9. Reasoning 31.1k / 22.0k tokens (1.41x; 547 / 487 per
+    call), output 1.35x, input 1.36x.
+  * KaroX writes test files the task told it to leave alone. The bench instruction says
+    "Do not modify benchmark tests unless the task explicitly requires test changes";
+    KaroX edited a test file in 13 of 17 trials (DSH in 6), 2.1 / 1.0 edits per task, 52 /
+    15 test lines per diff (the 14 tasks that keep a diff), following BASE_PROMPT's "Add a
+    few focused tests". On the ten short tasks (both arms <= 60 calls) this is most of the
+    gap: work 12.9 / 8.3 steps, 9.7k / 5.2k output tokens, test-file edits 1.5 / 0.3.
+  * The scope of the fix is set by two prompt sentences, and the model says so. Its
+    reasoning quotes "smallest (general) change" in 17 of 17 trials (49 times) and
+    "broaden" in 9 of 17 (18 times); DSH's reasoning has them in 0 and 1 of 18. 11.5% of
+    KaroX's reasoning steps argue about scope (104 of 904; DSH 3.0%, 24 of 792). On the
+    four tasks only DSH solved, KaroX edited 1.2 source files against 2.2 (diff: 16 / 29
+    source lines) and missed 1, 2, 3 and 5 hidden tests. In two of the four its reasoning
+    names the case the hidden tests check and drops it with the rule ("The task
+    instruction says don't broaden contract. So only ..."; "could violate 'Do not broaden
+    a contract because nearby code supports more'"), where DSH's reasoning names the same
+    case and takes it ("adding ... is safe if not breaking other tests"). On the one task
+    where KaroX weighed the rule and still fixed the sibling path, it solved the task and
+    DSH did not.
+  * DSH gives the model no method: two identity sentences and twelve short paragraphs on
+    tool use (read from a saved session of 0.2.2-rc.5 and from the npm package; its first
+    request is larger only for its tool schemas). Its loop adds one notice, on a tool call
+    repeated with the same arguments 3, 5 and 8 times; no finish check, no verification
+    push. The difference is what KaroX's 520 words of method make the same model do:
+    take the narrow reading, then check that reading twice as hard.
+  * Not causes: reading before the first edit, context size, tool limits, the ending
+    (final message 1.16k / 1.01k characters), tool errors, provider retries.
+- 6.0.0.dev38 (commit bc7fb40): BASE_PROMPT, three bullets; 599 words; no tool, loop or
+  limit change.
+  1. "Treat the task statement as an exact contract ... Do not broaden a contract because
+     nearby code supports more" -> what the task states stays exact (names, signatures,
+     return shapes, accepted and rejected types, what is preserved or excluded), and "Its
+     examples are samples: other forms of the same input and other paths to the same
+     behaviour belong to the task unless it rules them out."
+  2. "Make the smallest general change that fully solves the task ..." -> "Fix the cause,
+     not only the reported example, where every affected input passes through ... Leave
+     behaviour the task does not concern as it is" (the list of what not to add is kept).
+  3. "Add a few focused tests ..." -> first "Passing the task's example proves only that
+     example. Then try a few inputs the task did not spell out (another form of the same
+     input, a boundary, an input that must be rejected, another path to the same code) in
+     one throwaway command, and fix what fails for the same cause", then "Unless the task
+     says to leave tests alone, add a few focused tests covering those inputs".
+  Why it is general: it names no task, repository, library or tool (a test holds the
+  prompt to that); it comes from counts over 17 trials and from the rival's prompt, not
+  from a task's content; it is one rule for every task. It is not S1 again (2026-11-16,
+  rejected for two P2P regressions): S1 sent the agent looking for sibling
+  implementations to fix; this names no search, keeps "behaviour the task does not
+  concern", and adds a check that finds a neighbouring case by running it. It is not the
+  spec-audit sentence or the finish check either (both rejected): those acted at the end
+  of a run, this acts where the scope is chosen. `tests/test_prompt.py`: 9 tests, 6 of
+  them fail on the dev37 prompt; one sends a scripted model its first request and reads
+  the rules in it. Whether it helps is not known until the A/B below.
+- Pre-registered before any run of dev38 (2026-11-22 04:50 UTC). A/B `devp`: karox6 = the
+  dev37 wheel against karox6b = the dev38 wheel, side by side in one job (two requests in
+  flight, same runner and minute), ReformBoss DSV4.1F, 1 attempt, parallel 1.
+  Tasks: the held-out night tasks that any arm had reached before (or1's 30, fixed on
+  2026-11-16 before its results) minus every task whose trajectory has been read since:
+  21, 35, 48, 60, 65 (disc set, read in this iteration) and 47, 54, 58, 62, 70, 73 (read
+  for time sinks on 2026-11-16). 19 tasks: 18, 19, 20, 22, 23, 24, 31, 34, 36, 41, 44, 45,
+  49, 50, 51, 56, 61, 66, 69. No trajectory of these has been read; DECISIONS D-020 now
+  lists the eleven read ones as burned. The 20 never-reached held-out tasks stay out, as
+  in or1 (no arm has solved one; they are the longest).
+  Hypothesis: without the two quoted sentences KaroX stops leaving out neighbouring cases
+  and solves more tasks; without test files written against the task's instruction it
+  makes fewer calls. Expected: solved +2 to +4 of 19, calls per task -5% to -15%.
+  Rule (S1's, with a tighter cost bound): the dev38 prompt stays if, on the tasks valid
+  for both arms (`trio_report.py`), solved(dev38) >= solved(dev37) + 2, trials with a P2P
+  regression (`HARD12_RESULTS.md`) <= dev37's + 1, and model calls per task <= 110% of
+  dev37's. It also stays if solved is equal or +1 and the cost-equivalent is <= 90% of
+  dev37's (cheaper at no loss). Otherwise bc7fb40 is reverted (the v2 prompt comes back,
+  the version goes on). One attempt on 19 tasks resolves about three tasks: a result
+  between -1 and +1 with cost within 10% is "no effect", not "harmless" (D-021: a rule
+  without a measured gain is removed).
+  Mechanism, computed by script without reading a trajectory (`scopewords.py`,
+  `dshcmp.py` take the run directory): trials whose reasoning has "smallest ... change"
+  or "broaden" (dev37 here: 17 of 17 and 9 of 17; expected for dev38: at most 3 of 19),
+  trials that edit a test file (13 of 17; expected: at most half of dev37's), test
+  commands after the first edit.
+  Requests: KaroX needed 56 per task and arm on the night's 14 valid h12 tasks (28-125,
+  refused ones included), so 19 tasks x 2 arms = about 2,130, 2,550 with a 20% margin.
+  The daily allowance is 1,500 or 5,000 (the night's refusal named 1,500 after 3,350
+  requests had gone through). Order: devp0 = tasks 18, 19 (about 225 requests), to see
+  that the lane answers; devp1 = the next nine (about 1,010; with devp0 1,235, inside
+  1,500); devp2 = the last eight (about 900), the same evening if no refusal has named a
+  daily limit, the next evening otherwise. A trial ended by the daily limit is void by
+  the validity rule and its task is run again. The commands are in DEVIN_REPORT.md; none
+  is run in this shift.
