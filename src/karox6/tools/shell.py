@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from karox6.context.spill import limit_output
+from karox6.context.testout import condense_test_output, condensed_notice
 from karox6.tools.base import ApprovalRequest, ToolContext, ToolResult
 from karox6.tools.danger import check_command
 from karox6.tools.proc import ProcessRun
@@ -269,15 +270,23 @@ class ShellTool:
                 "Use job_output to read more output or wait for it, job_kill to stop it.]"
             )
             meta = {"job_id": job.id, "timed_out": True}
-        inline, spill = limit_output(
-            text,
-            spill_dir=ctx.spill_dir,
-            name=self.name,
-            max_chars=INLINE_CHARS,
-            full_path=log_path,
-        )
-        if spill is not None:
-            meta["spill_path"] = str(spill)
+        condensed = condense_test_output(text) if finished else None
+        if condensed is not None:
+            # The log file already holds the whole raw output: it is the spill.
+            kept = len(condensed.text)
+            inline = f"{condensed.text}\n\n{condensed_notice(len(text), kept, log_path)}"
+            meta["spill_path"] = str(log_path)
+            meta["condensed"] = True
+        else:
+            inline, spill = limit_output(
+                text,
+                spill_dir=ctx.spill_dir,
+                name=self.name,
+                max_chars=INLINE_CHARS,
+                full_path=log_path,
+            )
+            if spill is not None:
+                meta["spill_path"] = str(spill)
         body = inline if inline.endswith("\n") or not inline else inline + "\n"
         return ToolResult(f"{body}{marker}", meta=meta)
 

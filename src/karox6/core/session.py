@@ -28,6 +28,7 @@ from karox6.context.compaction import (
     prune_tool_results,
     split_for_summary,
 )
+from karox6.context.elide import WireElider
 from karox6.context.spill import limit_output
 from karox6.core import events as ev
 from karox6.core.config import SessionConfig as SessionConfig  # noqa: PLC0414
@@ -180,6 +181,7 @@ class Session:
         self.system_prompt = build_system_prompt(
             self.workspace, self.shell, base=config.system_prompt, append=append
         )
+        self._elider = WireElider(self.workspace)
         self._last_input_tokens = 0
         self._last_cached_tokens = 0  # of the last request that measured the context
         self._chars_since_measure = 0
@@ -496,7 +498,7 @@ class Session:
         )
 
     def _request(self) -> ModelRequest:
-        messages = self._replay_view(self.messages)
+        messages = self._replay_view(self._elider.build(self.messages, self._last_input_tokens))
         return ModelRequest(
             model=self.config.model,
             system=self.system_prompt,
@@ -1172,7 +1174,8 @@ class Session:
         # conversation plus one message (as a "turn" it dropped all reasoning, the prefix
         # changed and the whole head was billed at the full price).
         ask = Message("user", COMPACTION_INSTRUCTION, meta={"kind": "compaction_request"})
-        request.messages = self._replay_view([*head, ask])
+        wire = dict(zip(map(id, self.messages), self._elider.view(self.messages), strict=True))
+        request.messages = self._replay_view([*(wire.get(id(m), m) for m in head), ask])
         # Tool schemas stay in the first try so the cached prefix is reused; a model that
         # answers with a tool call instead of text gets one retry without tools.
         summary = await self._summary_call(request, emit)
