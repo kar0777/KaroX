@@ -1430,3 +1430,813 @@ git diff --check
   write rule, no forced tests, pytest log condenser + superseded write/read elision,
   DSML/<tool_call> text salvage (current session.py treats a leaked call as the final
   answer), multi-hunk edits, tighter loop guard. Do not port web/3D/game recipes.
+
+## Devin iteration (branch `devin/big`, bench branch `devin/bench`) - started 2026-11-21
+
+Report by stage: `DEVIN_REPORT.md`. Work happens only in the worktrees
+`D:\проекты\karox6-wt-devin` (devin/big from karox6/main ee24034) and
+`D:\проекты\bench-wt-devin` (devin/bench from karox6-adapter 9a2aac5); bench runs use
+`--ref devin/bench`. Own venv (uv, Python 3.12) with pyte, pywinpty and build as dev
+dependencies; the lock was stale since prompt_toolkit became a core dependency
+(`uv sync --locked` failed). Baseline: full suite green.
+
+- 18:30 UTC, where KaroX spends more: saved runs only, no new runs (scripts:
+  bench repo `scripts/analysis/`, one question each, README there).
+  * "KaroX reasons 1.6x OpenCode per call" is a Dahl effect, not a general one. On Dahl
+    (replies capped at 8192 tokens) 51% of KaroX's reasoning characters sit in steps with
+    no tool call, i.e. replies cut while thinking (`stepcmp.py` gtrio2: 63 such steps,
+    mean 19.7k chars; OpenCode 54 steps, 35%). 96% of KaroX's cuts there are thinking-only
+    (`cuts.py`: 76 of 79) and 16% of them are followed by another cut. On DSV4.1F the
+    ratio is 1.16 (or1: 2132 vs 1837 chars per step) to 1.25 (tbd3), and on OpenRouter GLM
+    (gduel2) KaroX reasons less (1611 vs 2475).
+  * Same step, same thinking. By size of the tool arguments (`buckets.py`, or1) a shell
+    step costs the same reasoning in both CLIs (<150 chars: 1706 vs 1764; 150-400: 1951 vs
+    1751). KaroX's mix is heavier: 35% of its shell steps carry >= 400 characters of
+    arguments against OpenCode's 24% (compound commands, the "fewer, fuller steps" rule),
+    without fewer steps on or1 (1481 vs 1412). Reasoning per call does not grow with
+    context size (`rbyctx.py`). All three CLIs send reasoning back (`replay.py`: input
+    growth = 0.94-1.0 x reasoning tokens), so replay is not the difference.
+  * Long tasks: context. OpenCode compacts at ~171k tokens and restarts from ~7k
+    (`traj.py` tbd3: 9 of 10 runs, peaks 171-188k); KaroX runs to 320k (400k limit x 0.8),
+    DSH does not compact (peaks up to 335k). Mean input per call on tbd3: 147k / 85k /
+    133k. On the disc set 53% of KaroX's input tokens on tasks 13-24 are spent above 150k
+    of context (`peaks.py` ab2), 1% on tasks 1-12. Replaying recorded runs with a 170k
+    threshold (`simcompact.py`, cached-equivalent tokens, no behaviour change assumed):
+    input -11% (or1), -13% (ab2), -20% (tbd3); with 120k: -20% / -27% / -31%.
+  * What a compaction costs today. In all 16 recorded KaroX compactions the first step
+    was a prune of old tool output; the call after it had 0-6k of 250-300k tokens cached
+    (a full re-read at the uncached price), and in 11 of 16 the summary followed a few
+    steps later anyway. The summary request itself was uncached too (131k in, 3k cached):
+    the instruction counted as a new user turn, so all reasoning was dropped from the
+    request and its prefix no longer matched the conversation.
+  * The two named losses. In gtrio2 claude-code-by-agents and fastapi-deprecation ended
+    after 18 and 16 steps on `empty_response` (Dahl's cache of identical requests; fixed
+    in dev33), not on the task. On ReformBoss dev31 solved fastapi-deprecation (ab2);
+    claude-code-by-agents was void there (daily cap).
+  * Tools are not the cost on the disc set: 48 runs (ab1 + ab2), 3248 bash calls, 78 min
+    of tool time in total, 7 tool errors (`errs.py`). Time is model calls.
+- 6.0.0.dev35 (core and providers; no prompt, tool or default-limit change). Each item is
+  an error path or a cost path measured above, with tests:
+  * Compaction with a live prompt cache: the checkpoint comes first and pruning is the
+    fallback (a session whose last request was at least half cached; without a cache,
+    e.g. local models, the free prune stays first). The summary request is now the
+    previous request plus one message: the instruction is a harness message, not a user
+    turn, so reasoning is replayed as before and the prefix matches the cache. Same order
+    for `/compact`.
+  * A reply cut while thinking (no text, no tool call) gets its own notice (what
+    happened; use the analysis, do not restart it; take the next action) instead of
+    "write shorter", and, when an effort is configured, one step less reasoning effort
+    until a reply comes through (max -> high -> medium -> low). The bench gateway pins the
+    effort, so only the notice can show there.
+  * Retry-After is a floor: parsed from seconds, HTTP dates, `retry-after-ms`, OpenAI's
+    `x-ratelimit-reset-*` durations, a generic `x-ratelimit-reset` (delta or epoch) and
+    the error body ("try again in 1.2s", Gemini's `retryDelay`); never shortened (it was
+    ignored above 60 s and replaced by a shorter backoff); followed for rate limits and
+    outages while the waiting budget lasts, and a wait longer than the budget left ends
+    the retries at once; a little jitter on top so agents sharing a key do not return
+    together.
+  * Quota or rate limit: a per-day allowance ("daily limit", "per day", ReformBoss's
+    "дневной лимит", OpenRouter's "free-models-per-day") is `quota` (ab2 burned ~1,200
+    refused requests waiting on it); quota wording with a short wait named (Gemini's free
+    tier, <= 120 s) is a rate limit and is waited out.
+  * An empty reply is resent once, not five times, before the session's notice changes
+    the request (each resend is billed for the whole conversation and a provider that
+    caches identical requests answers the same).
+  * A stream that goes silent for 300 s after answer tokens started is a timeout (retried)
+    instead of hanging for the 900 s request timeout; silence while the model is still
+    thinking is left alone; a stall after the reply finished keeps the reply.
+- Bench branch `devin/bench` (60fd856): dev35 wheel; `scripts/trio_report.py` now also
+  reports agent time (Harbor's agent_execution phase) and a cost-equivalent (audit tokens
+  at one price list for every arm; default the W&B list used so far: input 0.13, cached
+  0.002, output 0.65 USD per 1M), usage on valid tasks next to all tasks, pooled run
+  directories and a Markdown table. One scoring fix, made before any run of this branch:
+  the rule's second clause ("refused > 50% of calls AND hit the time limit") never fired
+  for KaroX, because the script looked for a reason starting with "time" while KaroX's is
+  "limit:time limit 3550s". gtrio2 rescored with the fix: 18/24 valid (was 19), solved on
+  valid tasks karox6 7, opencode_v2 5, deepseek_harness 4.
+- ReformBoss limits read from the gateway audit (ab1, ab2): 4 requests in flight per key,
+  40 requests per minute per key, 3 client IPs per 10 minutes, 5000 requests per day per
+  account (reset 21:00 UTC). Requests per task and arm on this lane (ab1/ab2, dev30/31):
+  ~49 on disc 1-12, 58-161 on disc 13-20 except koota-pair (~290, runs to the time limit).
+  A trio on disc 1-24 therefore needs ~5,400 requests, more than a day's allowance: the
+  comparison below is sized to fit one day with a margin.
+- Pre-registered before any run of this branch (2026-11-21 18:50 UTC):
+  * devd1, mechanism and plumbing check on the free Dahl lane (not a comparison): karox6
+    only, dev35, disc tasks 11, 15, 18 (pyqasm-468, sqllineage-866, koota-pair: the runs
+    with the most cut replies in gtrio2/gtrio3), 1 attempt, dahl2, parallel 3. Read: the
+    wheel installs and runs in the bench; after a thinking-only cut the next reply is cut
+    again less often than the 16% baseline (12 of 74 in gtrio2/gtrio3/gduel3/rivals1); no
+    run ends on "output repeatedly cut off". If Dahl's free capacity is saturated again
+    the run only proves the plumbing. No decision rides on it.
+  * devs1, smoke on ReformBoss after the reset: trio (karox6 dev35, opencode_v2 2.3.2,
+    deepseek_harness 0.2.2-rc.5), disc tasks 2 and 7 (isort-2750, plopp-614: solved by
+    KaroX in ab1, so solvable on this model), 1 attempt, chunk 2, parallel 1 (one runner,
+    one IP, 3 requests in flight). Pass = all six trials end without a provider or infra
+    error and `trio_report.py` scores them. Only then the main run starts.
+  * devt1, main comparison: the same trio and lane, disc tasks 1, 3-6, 8-12 (the rest of
+    the fastest twelve), chunk 5, parallel 1; then devt2: disc 17, 20 (the two tasks
+    named as KaroX losses: fastapi-deprecation, claude-code-by-agents), then 13, 14, 15,
+    16, chunk 2, parallel 1, as far as the day's requests reach. Tasks 18 and 19 are left
+    out for their cost (~870 and ~480 requests per trio by ab2), fixed here before any
+    result. devs1 counts as part of the sample (same wheel, arms and lane): 18 tasks.
+  * Reading (as before): solved per arm on valid tasks (`trio_report.py` rule); with one
+    attempt per task a gap under 4 solved tasks is a tie. Cost-equivalent, audit tokens,
+    model time and agent time are compared on valid tasks only. No KaroX change during
+    the runs; trajectories are read afterwards for general causes only. Whatever the
+    result, it is recorded here.
+  * Not run today (requests): the compaction-threshold A/B. Prepared as karox6 (default,
+    compaction at 320k) vs karox6b `--compact-at 170000` side by side on disc 18 and 19,
+    the two tasks whose context passes 200k; read: audit input tokens and cost, solved,
+    agent time. The default stays 400k (the user's decision of 2026-11-17) until then.
+- devd1 result (run 44936691031, 18:39-19:52 UTC; karox6 dev35 only, Dahl GLM, disc 11, 15,
+  18; data in `karox6-bench-data/runs/devd1`): as pre-registered, a plumbing and mechanism
+  check, not a comparison, and Dahl's free model was saturated again (87% of 1,376 calls
+  refused), so it proves only the plumbing. The dev35 wheel installs and runs in the bench
+  images (Harbor reports "karox 6.0.0.dev35"); 0 of 3 solved (pyqasm ended by its own
+  choice after 87 steps, unsolved as in gtrio3; sqllineage-866 and koota-pair hit the
+  3,550 s limit after 53 and 42 steps with most of the hour spent waiting: void by the
+  rule, waited+timeout). Mechanism: 3 replies were cut while thinking, each got the new
+  notice and each next reply came through (0 of 3 cut again; baseline 12 of 74); no run
+  ended on "output repeatedly cut off". Three events are too few to call it an effect.
+  No empty_response endings. The comparison stays on ReformBoss (devs1 after 21:00 UTC).
+- 20:58 UTC, before devs1: the comparison runs keep the registered wheel, 6.0.0.dev35 (it
+  already ran in the bench images in devd1). 6.0.0.dev36 (chat UI, /undo, pictures, /mcp,
+  provider dialects) differs on the headless path only in code that does not fire there:
+  an OpenAI-compatible 400 that names a refused request field is now retried without it
+  (the gateway sets those fields itself), `edit` reports the line of its change in its
+  metadata (not in the text the model reads), and a user message may carry pictures.
+  No prompt, tool description or loop change since dev35.
+- devs1 result (run 44949328098, 21:01-21:21 UTC; trio, ReformBoss DSV4.1F, disc 2 and 7,
+  1 attempt, one runner; data and `trio_report.md` in `karox6-bench-data/runs/devs1`):
+  PASS by the pre-registered rule: all six trials ended without a provider or infra error
+  (0% refused calls for every arm), versions karox 6.0.0.dev35 / opencode v2.3.2 / DSH
+  0.2.2-rc.5, both tasks valid. Solved: karox6 2, deepseek_harness 2, opencode_v2 1
+  (OpenCode missed plopp-614). Audit usage on the two tasks, karox6 / opencode_v2 / DSH:
+  calls 70 / 73 / 60, input 3.0M / 3.7M / 2.5M (95% / 95% / 93% cached), output 49k / 40k /
+  35k (reasoning 36k / 28k / 22k), agent time 8.8 / 8.7 / 8.3 min, cost-equivalent $0.059 /
+  $0.055 / $0.049, median time to first token 2.6 s for all three. Two tasks say nothing
+  about a difference; they join the sample. devt1 starts now as registered (trio, disc
+  1, 3-6, 8-12, chunk 5, parallel 1, dev35 wheel).
+- 21:22 UTC, devt1 dispatched: run 44951155404 (bench commit bcfd3bb, dev35 wheel), two
+  chunks of five tasks on one runner each, one after the other.
+- Bench: opt-in arm `codex` (Codex CLI 0.171.0, bench commit 3116d6b): Codex speaks the
+  Responses API, the gateway bridges it to the lane's model under its own alias with the
+  same enforced profile and audit. Additive: the trio's agents, aliases and profile are
+  unchanged, so devt2 may run on this commit.
+- Pre-registered devc0 (plumbing only, not a comparison): arm `codex` alone, lane
+  freeinference (GLM-5.3-Flash; ReformBoss stays free for devt1/devt2, so the trio never
+  competes with it for the key's four slots), disc task 2 (isort-2750), 1 attempt,
+  parallel 1. Pass = Codex CLI installs in the task image, its requests reach the model
+  through the gateway (audit rows of harness `codex` with successful calls and tool use)
+  and the run ends on its own. If it passes, a codex arm may join a later same-model
+  comparison, registered separately; if it fails, the report says that Codex CLI could
+  not be measured on this gateway, and why. Its score is not read.
+- Night session, 21:47 UTC (same branches). Checks at 18cc218 before anything else: ruff
+  check, ruff format --check, mypy (68 files), git diff --check clean; full suite 1118
+  passed, 5 skipped (Windows). 6.0.0.dev36 wheel built from 18cc218 (`python -m build
+  --wheel`), in the bench as `wheels/karox6-6.0.0.dev36-py3-none-any.whl` (bench aa40c03).
+  devt1 was dispatched at bcfd3bb and its jobs check out that commit: it stays on dev35.
+- 22:00 UTC, the suite on Linux for the first time (WSL Ubuntu, Python 3.12.14, own venv
+  from uv.lock; nothing but unit tests runs on this PC). Everything outside the terminal
+  tests passed at once: 1092 passed, the headless path of dev36 has no Linux-only fault.
+  10 of the 15 terminal flows failed, one cause, a real bug: the start-up frame is on
+  screen ~250 ms before the app reads keys, and a POSIX terminal spends that time in its
+  line mode, echoing what is typed and passing Enter on as Ctrl+J (a new line in the
+  input box), so a message typed at once was never sent. The frame now switches echo,
+  line editing and the CR/LF translation off when it is painted and the shell's mode
+  comes back on every exit path (commit 5d88789, 6.0.0.dev37; chat only, the headless
+  run does not paint the frame). Two test-only faults next to it: a 13-byte `hello.py`
+  expected where files get CRLF (now the file's real size), and `Ctrl+R` sent in the same
+  instant as the turn's end, before prompt_toolkit had reloaded the input line's history
+  (failed whenever that test ran alone on Linux; the test now waits for the history).
+  Linux after the fixes: 1108 passed, 22 skipped (16 need ripgrep, 6 are Windows-only);
+  Windows: unchanged.
+- devc0 result (run 44951463333, 21:25-22:12 UTC): FAIL as a plumbing check, and it does
+  not answer the question. The trial ran 44 min and scored 0, then Harbor stopped with
+  PermissionError on `agent/codex-home/tmp/arg0-linux/.../apply_patch` (Codex keeps
+  root-only files in CODEX_HOME, which the arm had put under the collected /logs) and the
+  artifact upload failed on the same path: no audit and no trajectory came back, so
+  whether Codex's requests reached the model is unknown. Bench fix (devin/bench):
+  CODEX_HOME moved to /tmp inside the container, its session files and logs are copied
+  to /logs afterwards with read permission, and the workflow makes the collected
+  directory readable before the upload. The trio's agents, aliases and profile are
+  untouched.
+- Pre-registered devc1 (plumbing only, not a comparison; same rule as devc0): arm `codex`
+  alone, lane freeinference, disc task 2, 1 attempt, parallel 1, bench commit b9696e8.
+  Pass = Codex CLI installs, the audit has successful rows of harness `codex` with tool
+  use, and the run ends on its own. No ReformBoss request is used (other key and lane).
+  If the audit shows that every request failed, the answer is "no" with the gateway's
+  error; if the trial again leaves no audit, the answer stays "not measurable" and the
+  codex arm is not used.
+- 22:17 UTC, devc1 dispatched: run 44955966673 (bench b9696e8).
+- 22:30 UTC, work between the runs (KaroX devin/big; none of it is in the dev36 wheel the
+  comparison uses, and none of it touches the prompt, the tools or the loop):
+  * Providers, errors inside a stream (commit fc34711). The three native adapters mapped
+    such errors through a short table of Anthropic names. The Responses API's own `error`
+    event (code and message at the top level) became "server: None" and was retried; its
+    string codes (`rate_limit_exceeded`, `insufficient_quota`) were retried as server
+    faults; Gemini's in-stream 400s and Anthropic's `permission_error` and
+    `not_found_error` were retried as server faults too. Numeric codes and the providers'
+    own names now give the HTTP status of the same refusal, and the names stay in the
+    message. A reply the provider stopped (`refusal` on Anthropic, `content_filter` on the
+    Responses API) is no longer taken for the model's final answer;
+    `model_context_window_exceeded` asks for a smaller conversation.
+  * Providers, context overflow in other servers' words: only a recognised refusal leads
+    to a smaller conversation instead of the end of the run. Added Anthropic's "input
+    length and `max_tokens` exceed context limit" (the form an agent meets first; it was a
+    plain bad request) and "prompt is too long" on OpenAI-compatible routes, Gemini's
+    "exceeds the maximum number of tokens", xAI's "maximum prompt length", llama.cpp's
+    "exceeds the available context size" and Bedrock's "Input is too long". 27 new test
+    cases; 21 of them failed before the change. Checked against scripted servers only
+    (no keys on this PC); the xAI and llama.cpp wordings were read from their issue
+    trackers.
+  * tests/term.py on POSIX (commit ccf8412): the program was started with `pty.fork()`
+    while the scripted model's server thread runs (Python 3.12 warns that such a child can
+    deadlock); it is now started by subprocess on an opened pty, with a one-line launcher
+    that makes the pty the controlling terminal. Output is decoded incrementally (a
+    character split between two reads became U+FFFD) and an empty read ends the reader
+    (macOS and BSD report end of file that way; the loop would have spun).
+  * Linux numbers for the chat UI (docs/perf.md, `scripts/tui_perf.py` under WSL2 on the
+    same PC): first frame 44 ms, ready for input 148 ms (Windows: 170 and 414 ms), 6,000
+    lines shown in 0.26 s, key echo while streaming 25 ms median.
+- devt1 result (run 44951155404, 21:22-22:50 UTC; trio, ReformBoss DSV4.1F, disc 1, 3-6,
+  8-12, 1 attempt, one runner per chunk, karox 6.0.0.dev35 / opencode v2.3.2 / DSH
+  0.2.2-rc.5; data, `trio_report.md` and the pooled `trio_report_devs1_devt1.md` in
+  `karox6-bench-data/runs/devt1`). All 10 tasks valid (no trial ended on a provider
+  error; 3-5% of the requests were refused for the key's 4-in-flight limit and went
+  through on the gateway's retry). Solved: karox6 4, opencode_v2 7, deepseek_harness 6.
+  Pooled with devs1 (same wheel, arms and lane; 12 tasks, 12 valid):
+  | arm | solved | ok calls | input M (cached) | output k | reasoning k | agent min | cost-eq $ |
+  |---|---|---|---|---|---|---|---|
+  | karox6 (dev35) | 6 | 596 | 36.7 (97%) | 408 | 284 | 76.3 | 0.503 |
+  | opencode_v2 | 8 | 503 | 30.6 (96%) | 308 | 214 | 64.4 | 0.419 |
+  | deepseek_harness | 8 | 414 | 22.3 (95%) | 265 | 176 | 51.3 | 0.356 |
+  By the registered reading a gap under 4 solved tasks at one attempt is a tie, so the
+  count does not separate the three; KaroX is not ahead on it, and it is the most
+  expensive: +20% cost-equivalent and +18% agent time against OpenCode, +41% and +49%
+  against DSH, from more calls (49.7 / 41.9 / 34.5 per task) and more output per task
+  (34.0k / 25.7k / 22.1k tokens). Median time to first token is the same (2.8-3.0 s).
+  KaroX alone failed sqllineage-872 and linopy-1083 (both others solved them), failed
+  haystack-13633 with OpenCode (DSH solved it) and linopy-1088 with DSH (OpenCode solved
+  it); it alone beat OpenCode on plopp-614 and DSH on faststream-3281. Every KaroX trial
+  ended by its own choice (status completed, no tool errors, at most one retried 429 per
+  trial). First reading of the losses, general causes only: haystack-13633 and
+  sqllineage-872 are answers that pass the agent's own tests and miss cases of the
+  hidden ones (camelCase and kebab-case names that the issue listed as "not checked";
+  `COPY INTO <location>`), i.e. the scope of the fix, not a harness fault. Where the
+  extra cost sits (audit, by thirds of each run): KaroX's first third of the calls holds
+  twice the output of the others (reasoning 42.5k vs 24.1k DSH and 20.1k OpenCode on the
+  first seven tasks; visible output 19.6k vs 10.2k and 10.5k), the later thirds are close
+  to OpenCode's. That is the prompt's "exact contract" and "read callers, tests, build
+  configuration" start; whether it buys solved tasks is not shown by this sample.
+- Requests used since the 21:00 UTC reset (audit rows, refused ones included): devs1 +
+  devt1 = 1,575 for 12 trio tasks (131 per task; 74-225).
+- Before devt2 (registered 18:50 UTC; unchanged: trio, ReformBoss, 1 attempt, parallel 1,
+  chunk 2; first disc 17 and 20, then 13-16). Wheel: devt2 runs karox 6.0.0.dev36
+  (`karox6_wheel=karox6-6.0.0.dev36-py3-none-any.whl`, bench b9696e8), devt1 and devs1
+  ran 6.0.0.dev35. dev36 is what `devin/big` shipped at 18cc218; on the headless path it
+  differs from dev35 only in code that does not fire in the bench (see the 20:58 entry),
+  but it is a different build: devt2's rows are reported under their own wheel, and a
+  pooled 18-task figure, if shown, carries that note. Two dispatches, one after the other
+  (the workflow orders tasks by the set's file, and 17 and 20 come first by the
+  registration): `devt2` = disc 17, 20; `devt2b` = disc 13-16. Request estimate from ab2
+  (KaroX arms on the same lane: 59-206 requests per task on 13-17, 171-179 on 20 before
+  the daily cap) and devt1's arm ratios: 250-360 per trio task, 1,500-2,200 for the six,
+  3,600 at the very worst (every arm at 200 per task). 1,575 + 2,200 = 3,775 of 5,000.
+  The compaction A/B (disc 18, 19; two KaroX arms; ab2: 547 and 329 requests, ~900
+  together, 1,100 with a margin) starts only if devt2 and devt2b leave at least 1,100
+  requests and it can end before 03:40 UTC; otherwise it is not run today.
+- 22:53 UTC, devt2 dispatched: run 44958999941 (bench b9696e8, dev36 wheel named
+  explicitly), one job, disc 17 then 20.
+- devc1 result (run 44955966673, 22:17-23:05 UTC; data in `karox6-bench-data/runs/devc1`):
+  FAIL, and again no answer about the model path, this time for a reason outside the
+  bench: FreeInference refused all 30 requests with 503 "FreeInference is temporarily
+  paused due to a security incident" (the gateway retried each 12 times; devc0's 44
+  minutes were most likely the same outage). What the run does show: the artifact comes
+  back now (audit, `codex.jsonl`, the session file); Codex CLI 0.171.0 installs in the
+  task image and starts; its requests reach the gateway as `POST /v1/responses` under the
+  alias `hard12-codex` and are logged with harness `codex`. Two faults of the arm, fixed
+  in bench be12460: Codex refuses to create its helper binaries (the `apply_patch` alias)
+  under /tmp, so CODEX_HOME is now `$HOME/.codex-hard12`; and the alias is not a model
+  Codex knows ("Model metadata for `hard12-codex` not found"), so the 1M window is set
+  in its config.
+- Pre-registered devc2 (plumbing only, not a comparison, same pass rule as devc0): arm
+  `codex` alone on the lane that works tonight, ReformBoss (the alias exists there since
+  3116d6b), disc task 2, 1 attempt, parallel 1, bench be12460. It runs between devt2 and
+  devt2b, never beside them (one ReformBoss run at a time; one request in flight).
+  Estimate: 30-80 requests (the other CLIs needed 24-42 on this task). Its score is not
+  read and it is not part of any comparison; a refused or failed upstream again means
+  "not measurable tonight", not "no".
+- devt2 result (run 44958999941, 22:53-23:32 UTC; trio, ReformBoss, disc 17 and 20, one
+  runner, karox 6.0.0.dev36 / opencode v2.3.2 / DSH 0.2.2-rc.5; data and `trio_report.md`
+  in `karox6-bench-data/runs/devt2`). Both tasks valid (4-11% of the requests refused for
+  the 4-in-flight limit, none ended a trial). Solved: karox6 1 (fastapi-deprecation),
+  opencode_v2 1 (the same), deepseek_harness 2. On the two tasks named as KaroX losses
+  KaroX now solves the one it lost to an empty-reply ending on Dahl and still misses
+  claude-code-by-agents, as OpenCode does. Usage, karox6 / opencode_v2 / DSH: calls 148 /
+  180 / 190, input 13.9M / 16.8M / 16.0M (97-98% cached), output 149k / 127k / 146k
+  (reasoning 106k / 80k / 102k), agent time 24.0 / 28.2 / 31.9 min, cost-equivalent
+  $0.171 / $0.167 / $0.171. On these longer tasks KaroX is the quickest and makes the
+  fewest calls, at the same cost; the surplus seen on disc 1-12 is not there. Requests:
+  565 (2,140 since the reset).
+- 23:34 UTC, devc2 dispatched: run 44962415993 (bench be12460, codex alone, ReformBoss,
+  disc 2). devt2b waits for it to end.
+- devc2 result (run 44962415993, 23:34-23:39 UTC; data in `karox6-bench-data/runs/devc2`):
+  FAIL, and this time the answer is about the path itself. Codex CLI 0.171.0 installed,
+  started and sent one request; the gateway bridged it to chat completions and ReformBoss
+  refused it with HTTP 400 `invalid_parameter_error` ("неверный формат или параметры",
+  `outcome: not_executed`); Codex ended its turn after 7 s. So today: Codex CLI does not
+  work through this gateway on ReformBoss, because the bridged request is not one the
+  upstream accepts. Which field it refuses the audit could not say: the audit callback
+  itself failed on that row (`litellm_params["metadata"]` is None for bridged calls), a
+  bench bug that would have dropped every row of the codex arm, successful ones included.
+  Bench 8fe67be: that bug fixed; failure rows carry the names (never the content) of the
+  final request's fields, message roles and tool types; and for the alias `hard12-codex`
+  only, the two things in a Codex request that a chat-completions upstream cannot take
+  are adapted: the `developer` role becomes `system`, tools that are not functions are
+  left out. The trio's requests are not read or changed (checked offline: identical
+  request and audit row before and after).
+- 23:40 UTC, devt2b dispatched: run 44962894203 (bench be12460, dev36 wheel named), two
+  jobs, disc 13-14 then 15-16.
+- Pre-registered devc3 (plumbing only, last attempt today; same pass rule): codex alone,
+  ReformBoss, disc task 2, bench 8fe67be, after devt2b ends and before the compaction
+  A/B. Pass = successful audit rows of harness `codex` with tool use and a run that ends
+  on its own. If the upstream refuses again, the audit now names the refused shape and
+  the report says "no: <what is refused>"; no further codex run today either way.
+- 00:00 UTC, what the gateway sends for Codex, found without a model or a key (WSL on this
+  PC: Codex CLI 0.171.0 -> the bench gateway, litellm 1.91.0 + `race_audit.py` with the
+  ReformBoss config -> a mock chat upstream that logs the request; no benchmark task, no
+  upstream call). LiteLLM's Responses bridge forwards Responses-only fields to the chat
+  upstream (`client_metadata`, `parallel_tool_calls`, `prompt_cache_key`), gives every
+  content as a list of text parts, sends two system messages, and splits one reply into
+  an assistant message with the tool calls and a second one with the (empty) text, which
+  then sits between a call and its result. A mock that refuses unknown fields, roles and
+  tool types answers that request with 400, as ReformBoss did in devc2; which of these
+  ReformBoss minds is not known. Bench 81f5a37, for the alias `hard12-codex` only: those
+  fields are dropped, text parts become a string, system messages become one, the pieces
+  of one reply become one assistant message, empty assistant messages go. The same local
+  chain then runs a tool call and its result through the strict mock, and the audit
+  writes its rows (two successes of harness `codex`). The trio's requests leave as they
+  came (offline check: equal to the profile-only result). devc3 runs on 81f5a37, rule
+  unchanged.
+- 00:40 UTC, from devt2b's first job (disc 13, 14; the full result follows when the run
+  ends). sentry-python-8185 is void by the rule: KaroX's trial ended on a provider error
+  after two steps. Its third request (nine messages, 106k characters of tool output, two
+  wide greps of the test tree among them) was answered with HTTP 500 "Провайдер вернул
+  внутреннюю ошибку" thirty times in 150 s (six rounds of the gateway's five tries),
+  while every other request on the key went through, the other two CLIs' included; in
+  all saved ReformBoss runs (ab1, ab2, tbd3, rev1/2, devs1, devt1, devt2) this error
+  appears nowhere else. So the server failed on that request, not in general, and
+  sending it again could not help. What in it the server minds is not known (nothing
+  odd in the text: no control characters, no long lines; OpenCode's run on the same task
+  read some of the same test lines and went on).
+  KaroX change, general (commit 573ded0, not in the dev36 wheel under test): a plain 5xx
+  that survives the ordinary retries is answered once with a smaller request, the middle
+  cut out of every big tool result, the newest included (spill files keep the text); at
+  most twice per run; 502/503/529 are waited out as before; if the smaller request fails
+  too the run ends with the provider's error. Whether it would have saved this trial
+  cannot be shown here (the request cannot be replayed without the key). 4 tests, 2
+  failed before the change.
+  Also bench 6a4201d: the codex arm's bridged tools lose the `"strict": false` the bridge
+  adds (devc3 runs on that commit).
+- devt2b result (run 44962894203, 23:40-01:20 UTC; trio, ReformBoss, disc 13-16, two
+  jobs, karox 6.0.0.dev36 / opencode v2.3.2 / DSH 0.2.2-rc.5; data and `trio_report.md` in
+  `karox6-bench-data/runs/devt2b`). 3 of 4 tasks valid (sentry-python-8185 void, see
+  above). Solved on the valid three: karox6 3, deepseek_harness 2, opencode_v2 1 (on all
+  four: 3 / 3 / 2). Usage on the valid three, karox6 / opencode_v2 / DSH: calls 213 / 397
+  / 176, input 19.6M / 39.4M / 13.5M, output 190k / 332k / 141k (reasoning 138k / 228k /
+  96k), agent time 38.7 / 66.1 / 28.5 min, cost-equivalent $0.234 / $0.414 / $0.172.
+  Requests: 1,048.
+- The registered devt2 as a whole (devt2 + devt2b: disc 13-17 and 20, dev36; 5 of 6
+  valid): solved karox6 4, deepseek_harness 4, opencode_v2 2; calls 361 / 577 / 366
+  (karox6 / opencode_v2 / DSH), output 339k / 460k / 288k, agent time 62.7 / 94.4 / 60.4
+  min, cost-equivalent $0.405 / $0.581 / $0.342.
+- All 18 registered tasks, with the note that goes with it: disc 1-12 ran karox
+  6.0.0.dev35, disc 13-17 and 20 ran 6.0.0.dev36 (same headless behaviour by the 20:58
+  entry, a different build); the other two CLIs are the same throughout. 17 of 18 valid.
+  | arm | solved (17 valid) | ok calls | input M | output k | reasoning k | agent min | cost-eq $ |
+  |---|---|---|---|---|---|---|---|
+  | karox6 | 10 | 957 | 70.2 | 748 | 528 | 139.0 | 0.907 |
+  | opencode_v2 | 10 | 1080 | 86.8 | 768 | 522 | 158.7 | 1.000 |
+  | deepseek_harness | 12 | 780 | 51.7 | 553 | 374 | 111.7 | 0.698 |
+  Reading by the registered rule (one attempt per task; a gap under 4 solved tasks is a
+  tie): the three are not separated on solved tasks; KaroX is not ahead of either. Against
+  OpenCode it solves the same number 9% cheaper and 12% quicker; against DSH it solves two
+  fewer, costs 30% more and takes 24% longer. The picture differs by task length: on the
+  short tasks (disc 1-12) KaroX is the most expensive of the three, on the longer ones
+  (13-17, 20) it makes the fewest calls after DSH and is 30% cheaper than OpenCode, whose
+  cost grows with its long runs (267 calls on sqllineage-866, 149 on sentry-python).
+  "KaroX beats OpenCode and DSH" is not shown; "KaroX is level with OpenCode and behind
+  DSH on cost" is what the 17 tasks say.
+- Requests since the reset: 1,575 + 565 + 1,048 + 1 (devc2) = 3,189, plus devc3 (running
+  since 01:21 UTC, run 44971059267, bench 6a4201d).
+- Before the compaction A/B (registered 18:50 UTC; hypothesis and rule fixed here, before
+  the run). Tag `devab1`: arms karox6 and karox6b side by side in one job (two requests
+  in flight), both on the dev36 wheel, karox6b with `--compact-at 170000`, disc 18
+  (koota-pair) then 19 (fastapi-implicit-head-options), ReformBoss, 1 attempt, chunk 2,
+  parallel 1. Hypothesis (from replaying saved runs with a 170k threshold, 18:30 entry:
+  11-20% less input in cached-equivalent tokens): the lower threshold costs less on tasks
+  whose context passes 170k and loses no solved task. Rule: the 170k threshold is a
+  candidate for the default only if, on the tasks where both trials are valid, karox6b
+  solves at least as many as karox6 and its cost-equivalent is at most 0.9 of karox6's;
+  otherwise it is not. Also read: compactions per arm, the cached share of the request
+  after each one, peak context, agent time. Two tasks and one attempt give a direction,
+  not a proof: the default (400k limit, compaction at 320k, the user's decision of
+  2026-11-17) is not changed tonight whatever comes out. Requests: ab2 needed 547 and 329
+  for these two tasks with two KaroX arms; 1,100 with a margin, about 1,750 are left.
+  Time: koota-pair runs to its 3,550 s limit, so about 95 minutes; it starts when devc3
+  ends and is not started after 02:00 UTC.
+- devc3 result (run 44971059267, 01:21-01:30 UTC; codex alone, ReformBoss, disc task 2,
+  bench 6a4201d; data in `karox6-bench-data/runs/devc3`): PASS by the registered rule.
+  Codex CLI 0.171.0 installed, its 19 requests reached deepseek-v4.1-flash-1017 through
+  the gateway (19 successful audit rows of harness `codex`, the enforced profile on each:
+  temperature 1.0, top_p 0.95, reasoning_effort max, max_tokens 32768), it ran 43 shell
+  commands and one file change (47 tool results in its last request), and the run ended
+  on its own after 4.8 min. Audit usage: input 737.6k (673.3k cached), output 28.3k
+  (reasoning 16.3k), cost-equivalent $0.028. So: Codex CLI works through this gateway
+  since bench 6a4201d; before it the upstream refused the bridged request (devc2) and
+  the audit lost the arm's rows. Its score is not read (one task, and the arm was
+  changed three times tonight to get here); a codex arm may join a later same-model
+  comparison, registered separately. One thing to know before that: Codex sends its own
+  `reasoning.effort`, which the gateway replaces with the profile's, as for every arm.
+- 01:31 UTC, devab1 dispatched: run 44971868428 (bench 6a4201d, both arms on the dev36
+  wheel, karox6b with `--compact-at 170000`), one job, disc 18 then 19.
+- 01:36 UTC, checks at 768b4d1 (code unchanged since 573ded0) and the dev37 wheel.
+  Windows: ruff check and format clean, mypy clean (68 files), 1166 passed, 7 skipped,
+  `git diff --check` clean, `scripts/perf_check.py` start 136.5 ms, idle RSS 31.3 MiB.
+  Linux (WSL Ubuntu, Python 3.12.14, ripgrep on PATH): 1168 passed, 6 skipped (the six
+  are Windows-only: job objects, GDI capture), ruff and mypy clean. Every test file also
+  passes when run alone, on both systems (46 files). `karox6-6.0.0.dev37-py3-none-any.whl`
+  built from 768b4d1 and installed into a fresh Linux venv: `karox run --json` with the
+  bench adapter's flags against a scripted model ran one shell call and ended
+  "completed". The wheel is in the bench (01872b1) and has not run in the bench images;
+  tonight's runs name dev35 or dev36. A dispatch that names no wheel takes dev37 from now.
+- devab1 result (run 44971868428, 01:31-01:50 UTC; data in
+  `karox6-bench-data/runs/devab1`): no result, by the rule (0 valid tasks). At 01:45 UTC,
+  14 minutes in, ReformBoss began to refuse every request with "Исчерпан дневной лимит
+  1500 запросов твоего ранга (общий на все ключи аккаунта). Сброс в 00:00 МСК" and both
+  arms ended on it (KaroX reports it as `quota`, without retrying, as dev35 intended):
+  koota-pair at step 70 in both arms, contexts at 169k (karox6) and 162k (karox6b), below
+  either threshold, so neither arm had compacted; fastapi-implicit-head-options never got
+  a reply. (karox6b's unfinished koota-pair work happens to pass the task's tests; with
+  the other arm void it counts for nothing.) The hypothesis is neither supported nor
+  refuted; the default stays, as registered.
+  The limit: the message names 1,500 requests a day, where the audits of ab1/ab2 showed
+  5,000 and this night's plan was sized to that. 3,348 requests had been answered since
+  the 21:00 UTC reset before the first refusal, so the limit that applied until 01:45 was
+  not 1,500: the account's rank or allowance changed during the night. Requests since the
+  reset: 3,372 audit rows, the last 24 of them these refusals. The lane is closed until
+  21:00 UTC; before the next run the real allowance has to be read from the provider's
+  bot, and the estimates in this file redone if it is 1,500.
+- 01:55 UTC, the night's runs are over. `DEVIN_REPORT.md` is final (tables of every run,
+  bugs 13-20, where KaroX is worse, what to do next, check outputs).
+- 02:00 UTC, end state. KaroX `devin/big`: code at 573ded0 (6.0.0.dev37), docs after it.
+  Bench `devin/bench` a81e191: wheels dev36 and dev37, the codex arm that works, the
+  audit fix, `scripts/analysis/{thirds,requests,karox_ends,compactions}.py` (what the
+  report's figures were read from) and `probes/codex_local` (Codex through the gateway
+  to a mock upstream). Run data: `karox6-bench-data/runs/{devt1,devt2,devt2b,devc0..3,
+  devab1}`, each with its `trio_report.md` where there is one; the 18-task table is
+  `runs/devt2b/trio_report_all18.md`. Scratch left on this PC, safe to delete:
+  `%TEMP%\devin-night` and, in WSL, `~/devin-k6` (a copy of the tree, its venv, ripgrep).
+  Nothing was merged, tagged or published; `D:\проекты\KaroX-6` was not touched.
+- Short shift, 2026-11-22, started 04:20 UTC (`date -u`: Sun Nov 22 04:20:33 UTC 2026).
+  ReformBoss is closed until 21:00 UTC and nothing below uses it. Why DSH solves more and
+  costs less, from the saved trio runs only (devs1, devt1, devt2, devt2b: 17 valid tasks,
+  one model and lane; bench `scripts/analysis/dshcmp.py` and `scopewords.py`; no model
+  call). A run is cut at its first and its last edit of a source file: explore, work,
+  tail. Tokens are the gateway audit's. Sizes are not read from the logs: DSH's log cuts
+  every tool result at 8k characters (the first version of the script did read them and
+  showed KaroX "reading 1.3x more before the first edit", which the audit does not
+  confirm). Mean per task, KaroX / DSH:
+  * The start is the same: first source edit at step 22.6 / 21.6, the request at that
+    step 61k / 56k tokens, explore output 17.1k / 15.3k tokens (+12%). Tool limits are the
+    same (2000-line reads in both). KaroX's first request is the smaller one (3.9k / 6.9k
+    tokens), so the size of the prompt is not the cost.
+  * The cost comes after the first edit: work 21.4 / 15.3 steps and 17.3k / 11.4k output
+    tokens (+52%), tail 13.3 / 9.1 steps and 9.5k / 5.8k (+64%). Of KaroX's extra calls
+    per task (56.3 / 45.9) one is explore, 6.1 work, 4.2 tail (DSH's count includes its
+    one session-title request). After the first edit KaroX runs 8.7 test commands and 9.0
+    inline probes, DSH 4.7 and 3.9. Reasoning 31.1k / 22.0k tokens (1.41x; 547 / 487 per
+    call), output 1.35x, input 1.36x.
+  * KaroX writes test files the task told it to leave alone. The bench instruction says
+    "Do not modify benchmark tests unless the task explicitly requires test changes";
+    KaroX edited a test file in 13 of 17 trials (DSH in 6), 2.1 / 1.0 edits per task, 52 /
+    15 test lines per diff (the 14 tasks that keep a diff), following BASE_PROMPT's "Add a
+    few focused tests". On the ten short tasks (both arms <= 60 calls) this is most of the
+    gap: work 12.9 / 8.3 steps, 9.7k / 5.2k output tokens, test-file edits 1.5 / 0.3.
+  * The scope of the fix is set by two prompt sentences, and the model says so. Its
+    reasoning quotes "smallest (general) change" in 17 of 17 trials (49 times) and
+    "broaden" in 9 of 17 (18 times); DSH's reasoning has them in 0 and 1 of 18. 11.5% of
+    KaroX's reasoning steps argue about scope (104 of 904; DSH 3.0%, 24 of 792). On the
+    four tasks only DSH solved, KaroX edited 1.2 source files against 2.2 (diff: 16 / 29
+    source lines) and missed 1, 2, 3 and 5 hidden tests. In two of the four its reasoning
+    names the case the hidden tests check and drops it with the rule ("The task
+    instruction says don't broaden contract. So only ..."; "could violate 'Do not broaden
+    a contract because nearby code supports more'"), where DSH's reasoning names the same
+    case and takes it ("adding ... is safe if not breaking other tests"). On the one task
+    where KaroX weighed the rule and still fixed the sibling path, it solved the task and
+    DSH did not.
+  * DSH gives the model no method: two identity sentences and twelve short paragraphs on
+    tool use (read from a saved session of 0.2.2-rc.5 and from the npm package; its first
+    request is larger only for its tool schemas). Its loop adds one notice, on a tool call
+    repeated with the same arguments 3, 5 and 8 times; no finish check, no verification
+    push. The difference is what KaroX's 520 words of method make the same model do:
+    take the narrow reading, then check that reading twice as hard.
+  * Not causes: reading before the first edit, context size, tool limits, the ending
+    (final message 1.16k / 1.01k characters), tool errors, provider retries.
+- 6.0.0.dev38 (commit bc7fb40): BASE_PROMPT, three bullets; 599 words; no tool, loop or
+  limit change.
+  1. "Treat the task statement as an exact contract ... Do not broaden a contract because
+     nearby code supports more" -> what the task states stays exact (names, signatures,
+     return shapes, accepted and rejected types, what is preserved or excluded), and "Its
+     examples are samples: other forms of the same input and other paths to the same
+     behaviour belong to the task unless it rules them out."
+  2. "Make the smallest general change that fully solves the task ..." -> "Fix the cause,
+     not only the reported example, where every affected input passes through ... Leave
+     behaviour the task does not concern as it is" (the list of what not to add is kept).
+  3. "Add a few focused tests ..." -> first "Passing the task's example proves only that
+     example. Then try a few inputs the task did not spell out (another form of the same
+     input, a boundary, an input that must be rejected, another path to the same code) in
+     one throwaway command, and fix what fails for the same cause", then "Unless the task
+     says to leave tests alone, add a few focused tests covering those inputs".
+  Why it is general: it names no task, repository, library or tool (a test holds the
+  prompt to that); it comes from counts over 17 trials and from the rival's prompt, not
+  from a task's content; it is one rule for every task. It is not S1 again (2026-11-16,
+  rejected for two P2P regressions): S1 sent the agent looking for sibling
+  implementations to fix; this names no search, keeps "behaviour the task does not
+  concern", and adds a check that finds a neighbouring case by running it. It is not the
+  spec-audit sentence or the finish check either (both rejected): those acted at the end
+  of a run, this acts where the scope is chosen. `tests/test_prompt.py`: 9 tests, 6 of
+  them fail on the dev37 prompt; one sends a scripted model its first request and reads
+  the rules in it. Whether it helps is not known until the A/B below.
+- Pre-registered before any run of dev38 (2026-11-22 04:50 UTC). A/B `devp`: karox6 = the
+  dev37 wheel against karox6b = the dev38 wheel, side by side in one job (two requests in
+  flight, same runner and minute), ReformBoss DSV4.1F, 1 attempt, parallel 1.
+  Tasks: the held-out night tasks that any arm had reached before (or1's 30, fixed on
+  2026-11-16 before its results) minus every task whose trajectory has been read since:
+  21, 35, 48, 60, 65 (disc set, read in this iteration) and 47, 54, 58, 62, 70, 73 (read
+  for time sinks on 2026-11-16). 19 tasks: 18, 19, 20, 22, 23, 24, 31, 34, 36, 41, 44, 45,
+  49, 50, 51, 56, 61, 66, 69. No trajectory of these has been read; DECISIONS D-020 now
+  lists the eleven read ones as burned. The 20 never-reached held-out tasks stay out, as
+  in or1 (no arm has solved one; they are the longest).
+  Hypothesis: without the two quoted sentences KaroX stops leaving out neighbouring cases
+  and solves more tasks; without test files written against the task's instruction it
+  makes fewer calls. Expected: solved +2 to +4 of 19, calls per task -5% to -15%.
+  Rule (S1's, with a tighter cost bound): the dev38 prompt stays if, on the tasks valid
+  for both arms (`trio_report.py`), solved(dev38) >= solved(dev37) + 2, trials with a P2P
+  regression (`HARD12_RESULTS.md`) <= dev37's + 1, and model calls per task <= 110% of
+  dev37's. It also stays if solved is equal or +1 and the cost-equivalent is <= 90% of
+  dev37's (cheaper at no loss). Otherwise bc7fb40 is reverted (the v2 prompt comes back,
+  the version goes on). One attempt on 19 tasks resolves about three tasks: a result
+  between -1 and +1 with cost within 10% is "no effect", not "harmless" (D-021: a rule
+  without a measured gain is removed).
+  Mechanism, computed by script without reading a trajectory (`scopewords.py`,
+  `dshcmp.py` take the run directory): trials whose reasoning has "smallest ... change"
+  or "broaden" (dev37 here: 17 of 17 and 9 of 17; expected for dev38: at most 3 of 19),
+  trials that edit a test file (13 of 17; expected: at most half of dev37's), test
+  commands after the first edit.
+  Requests: KaroX needed 56 per task and arm on the night's 14 valid h12 tasks (28-125,
+  refused ones included), so 19 tasks x 2 arms = about 2,130, 2,550 with a 20% margin.
+  The daily allowance is 1,500 or 5,000 (the night's refusal named 1,500 after 3,350
+  requests had gone through). Order: devp0 = tasks 18, 19 (about 225 requests), to see
+  that the lane answers; devp1 = the next nine (about 1,010; with devp0 1,235, inside
+  1,500); devp2 = the last eight (about 900), the same evening if no refusal has named a
+  daily limit, the next evening otherwise. A trial ended by the daily limit is void by
+  the validity rule and its task is run again. The commands are in DEVIN_REPORT.md; none
+  is run in this shift.
+- 04:47 UTC, bench `devin/bench` 182359d: the dev38 wheel (built from bc7fb40 with `python
+  -m build --wheel`; the wheel's prompt was read back from the file: the new rules are in
+  it, "smallest" and "broaden" are not), `scripts/analysis/dshcmp.py` and `scopewords.py`,
+  and the replay's check now prints which prompt the model received: the word count and
+  the sha256 of the system message up to its environment block (`replay/check_replay.py`;
+  dev38's is 599 words, e73cceec60d8; dev37's 522 words, dad10eb48ba6).
+- Registered before any output of the two runs below was read (neither is a comparison;
+  no decision rides on either; neither uses ReformBoss).
+  * Replay (`replay.yml`, no model, no key; run 44986591414, dispatched 04:47 UTC, still
+    running as this is written): the dev38 wheel in five bench images of three
+    Python versions (3.11: sympy-30914; 3.12: a2a-python-1366, pyfakefs-1364; 3.13:
+    pypsa-2051, scrapy-8433), scenario `karox6_basics`, task directory /testbed. Pass =
+    every job prints REPLAY PASSED, the installed version is 6.0.0.dev38, the prompt's
+    digest is e73cceec60d8 and the run ends "completed" with its snapshot. These are tasks
+    of the A/B: the replay installs the wheel and runs a scripted conversation in the
+    image, it solves nothing and no trajectory of the task exists afterwards.
+  * Live check `devl1`: karox6 alone, the dev38 wheel named, disc tasks 2 and 7
+    (isort-2750, plopp-614: dev-pool tasks KaroX solved in ab1 and devs1), 1 attempt, one
+    task on FreeInference (GLM-5.3-Flash, parallel 1) and one on Dahl (`dahl2`, parallel
+    1), so that one lane's outage does not leave the check without an answer. Pass = the
+    job reports karox 6.0.0.dev38, the audit has successful calls and the run ends by the
+    agent's own choice ("completed"). Also noted, as an observation on one trial of another
+    model and not as evidence: whether the reasoning still argues with the words
+    "smallest" or "broaden" and whether a test file is edited. A lane that refuses or is
+    saturated is recorded and not tried again.
+- Replay result (run 44986591414, 04:47-04:49 UTC, bench 182359d; artifacts in
+  `karox6-bench-data/runs/devr38`): PASS by the registered rule in 5 of 5 images. Each
+  job: `karox 6.0.0.dev38` installed in 3-6 s (the 3.11 image through uv's Python 3.12),
+  16 of 16 scripted turns ok, 10 tools advertised, one finish attempt, `run_finished`
+  "completed" after 17 steps with the snapshot of the changed file, and the prompt the
+  model received is dev38's: 599 words, sha256 e73cceec60d8, with the three new bullets in
+  the logged request and neither "smallest" nor "broaden" in the base prompt. One thing
+  the logged requests show for the A/B's reading: the scrapy repository (night tasks 51
+  and 61) ships an AGENTS.md whose own rule is "Make the smallest change that solves the
+  issue"; KaroX passes project instructions to the model, so "smallest" in a reasoning
+  on those two tasks is the project's rule and is not counted against dev38.
+- Bench d9130d9, prepared and not run: probe `scope1` (`probes/scope1`, built by
+  `scripts/build_scope_cases.py`, read by `scripts/analysis/scope_probe_read.py`). Twelve
+  dev-pool KaroX trials of the night are cut just before the first step that quoted
+  "smallest ... change" or "broaden" (steps 5 to 28; later quotes are about tidying a
+  diff), and each request exists twice: with the dev37 base prompt and with dev38's.
+  `replay_probe.py` samples the model's next step for each (it now keeps the reasoning).
+  Registered reading, before any run: a mechanism check, no decision rides on it. Per
+  prompt: samples that quote the removed rules (dev38: expected 0), samples that use the
+  new ones, samples that decide by "not asked / out of scope"; and, read by eye in the
+  five cases whose trial failed, whether the sampled step takes the neighbouring case
+  the recorded step dropped. 24 cases x 2 samples = 48 requests, about 1M input tokens
+  per sample round; it tells in a quarter of an hour whether the wording moves the
+  decision at all, before the A/B spends 2,100 requests. If dev38's samples decide as
+  dev37's do, the A/B is expected to show nothing and can be skipped.
+- Checks at bc7fb40 (code unchanged after it). Windows (Python 3.12.10): ruff check and
+  format clean (119 files), mypy clean (68 files), 1175 passed, 7 skipped in 176.00s,
+  `git diff --check` clean, wheel built. Linux (WSL Ubuntu, Python 3.12.14, ripgrep on
+  PATH): 1177 passed, 6 skipped in 71.19s; ruff and mypy clean.
+- Merge readiness: `origin/karox6/main` is still ee24034 (fetched 04:50 UTC) and is an
+  ancestor of `devin/big`, so the merge is a fast-forward with no conflict (`git
+  merge-tree --write-tree origin/karox6/main devin/big` exits 0 and prints the tree of
+  `devin/big`); nothing to resolve, nothing was pushed to `karox6/main`.
+- Live check on Dahl, result (`devl1d`, run 44986701735, 04:49-05:12 UTC, karox6 alone,
+  the dev38 wheel, disc task 7 plopp-614, GLM-5.3-Flash; data in
+  `karox6-bench-data/runs/devl1d`): PASS by the registered rule. `karox 6.0.0.dev38`, 48
+  successful calls of 48 (no refusal, no retry, no notice: the lane was not saturated this
+  time), the run ended by the agent's own choice ("completed") after 48 steps and 992 s;
+  input 1.05M tokens, output 14.0k (reasoning 8.0k). The task was solved (reward 1.0),
+  which was not the question. Observed on this one trial of another model, as registered,
+  not evidence: the reasoning has neither "smallest" nor "broaden"; a test file was edited
+  all the same (two edits of the project's test file), and the reasoning never weighs
+  the task's sentence about tests against the prompt.
+- What that observation pointed to, checked on the saved runs of the bench model (no
+  model call): DSV4.1F does see the conflict between the task's "Do not modify benchmark
+  tests unless the task explicitly requires test changes" and the prompt's order, and the
+  prompt's order settles it. KaroX: "adding tests is allowed/encouraged by instructions
+  'Add a few focused tests'", "The instructions say add focused tests. But task says
+  don't modify benchmark tests ... We can add tests to ..."; DSH, with no order: "adding
+  new tests not necessary; we can avoid. We can use temporary script under /tmp". dev38's
+  wording ("Unless the task says to leave tests alone, add a few focused tests ...")
+  keeps an order to add tests and leaves the model to decide whether a new test "modifies
+  benchmark tests", which the same reasoning answers both ways.
+- 6.0.0.dev39 (commit f328136; the second change, made before any ReformBoss run and
+  before its own replay): the bullet becomes "Whether to add tests is the task's and the
+  project's call; if you do, give new test functions distinctive names so they cannot
+  collide with other test suites. Delete temporary scripts before finishing." KaroX gives
+  no standing order
+  about tests, as DSH gives none; the task, the project's instructions (AGENTS.md is
+  passed on as before) and the model decide. The check of inputs the task did not spell
+  out stays. General for the same reasons as dev38, and it removes a rule that never had
+  an A/B (D-021). 600 words, sha256 dc5dea2fdcb3. `tests/test_prompt.py`: the test of
+  this bullet fails on dev38's prompt.
+- The registered A/B (04:50 UTC entry) stands with one change of arm, fixed here before
+  any of its runs: karox6b = the dev39 wheel (dev37 against dev39; tags, tasks, order,
+  rule and estimates as registered). The mechanism reading gains its reason: trials that
+  edit a test file are expected to fall to DSH's share (6 of 17) or below. dev38 stays in
+  the bench; dev38 against dev39 would isolate the order to add tests, dev37 against
+  dev38 the scope sentences, if a split is wanted later. The probe `scope1` is rebuilt
+  with dev39's prompt as its `new` variant (the scope sentences are the same in both).
+- Registered before the dev39 replay: the same five images and scenario as for dev38;
+  pass = REPLAY PASSED in each, `karox 6.0.0.dev39`, prompt digest dc5dea2fdcb3, run
+  "completed" with its snapshot. No second live check: the two tasks allowed for it are
+  used, and dev39 differs from the checked wheel by one sentence of the prompt.
+- dev39 replay result (run 44988919342, 05:19-05:22 UTC, bench a257fec; artifacts in
+  `karox6-bench-data/runs/devr39`): PASS by the registered rule in 5 of 5 images: `karox
+  6.0.0.dev39` installed in 3-7 s, 16 of 16 scripted turns ok, "completed" after 17 steps
+  with its snapshot, prompt 600 words, sha256 dc5dea2fdcb3 in every image.
+- Live check on FreeInference, result (`devl1f`, run 44986695557, 04:49-05:26 UTC, karox6
+  alone, the dev38 wheel, disc task 2 isort-2750; data in
+  `karox6-bench-data/runs/devl1f`): the lane refused. All 238 requests were answered
+  with 503 "FreeInference is temporarily paused due to a security incident", the outage
+  devc1 met last night. KaroX reported 6.0.0.dev38, retried its first request 16 times
+  and ended "error" with the provider's message after 2,027 s; no step ran. By the
+  registered rule the lane is recorded and not tried again; the live check's answer is
+  Dahl's (PASS). One thing this shows: an outage took 34 minutes of the trial before
+  KaroX gave up, although its budget for an outage is 600 s. The budget counts KaroX's own
+  waits (576 s here); each of its 17 tries then spent 85-145 s inside the gateway, which
+  retries a refused request 14 times itself. Not changed in this shift.
+- Checks at f328136 (dev39; docs only after it). Windows (Python 3.12.10): ruff check and
+  format clean (119 files), mypy clean (68 files), 1175 passed, 7 skipped in 191.88s,
+  `git diff --check` clean, wheel built, `scripts/perf_check.py` start 141.4 ms, idle RSS
+  31.4 MiB. Linux (WSL, Python 3.12.14): ruff, format and mypy clean; three full runs:
+  1 failed, 1176 passed; then 1177 passed, 6 skipped in 71.01s; then 1177 passed, 6
+  skipped in 71.83s.
+- The one Linux failure is a real defect of last night's work, not of this shift's (the
+  prompt text is all dev38 and dev39 change): `tests/test_terminal.py::
+  test_ctrl_c_under_the_first_frame_leaves_a_clean_terminal` (2d81a0b) timed out with the
+  chat fully drawn. Measured with the same pty harness, Ctrl+C sent the moment the
+  start-up frame appears, 420 starts twice: 408 and 409 ended cleanly with exit 0; 10 and
+  10 ended by the signal itself (exit -2: KeyboardInterrupt raised before `_chat`'s
+  handler is in place); 2 and 0 lost the key (Python printed "Exception ignored ...
+  KeyboardInterrupt": it was raised inside a callback, the chat stayed up and nothing was
+  armed, which is the test's timeout); 0 and 1 printed a traceback and exit 1
+  (KeyboardInterrupt inside `import ssl` surfaced as "TypeError: expected a message
+  argument"). Sent 80 ms or more after the frame the key always arms the exit; up to 60
+  ms it always ends the start. So about 3% of interrupts in the first 70 ms of a start on
+  Linux end with a wrong exit code or a traceback and 0.5% are lost, and the test fails
+  at about that last rate. Also seen: started with SIGINT ignored (a background job of a
+  non-interactive shell), Ctrl+C under the frame does nothing and the test fails every
+  time. Not fixed here (40 minutes left, chat start-up code, POSIX only): the fix is one
+  SIGINT handler set before the imports that ends the start through the same path as the
+  key, replaced when the app takes the keyboard.
+- Correction to the entry above: the key was lost in 2 of 840 starts (0.2%, not 0.5%); 20
+  ended with exit -2 and 1 with a traceback (2.5%). The sixty failures of the test when
+  it was repeated as a shell background job are the other case named there (SIGINT
+  ignored at start), not this race.
+- 06:25 UTC, end of the shift (started 04:20:33 UTC). `DEVIN_REPORT.md` rewritten for it
+  (170 lines): KaroX against DSH with figures, dev38 and dev39, replay and live check,
+  the commands for the probe, the A/B and the 3-attempt comparison with request counts,
+  merge status, checks. KaroX `devin/big`: code at f328136 (6.0.0.dev39), docs after it.
+  Bench `devin/bench` a257fec: wheels dev38 and dev39, `scripts/analysis/{dshcmp,
+  scopewords,scope_probe_read}.py`, `scripts/build_scope_cases.py`, `probes/scope1`, the
+  replay's prompt digest. Run data: `karox6-bench-data/runs/{devr38,devr39,devl1d,devl1f}`.
+  Scratch, safe to delete: `%TEMP%\devin-shift`, `/tmp/dsh-src` (DSH's npm packages, read
+  only), in WSL `~/devin-k6`. Nothing was merged, tagged or published; ReformBoss was not
+  called; `D:\проекты\KaroX-6` was not touched.
+- 06:30 UTC, the Ctrl+C measurement a third time, and the cause of "exit -2" (this
+  replaces the guess in the 06:14 entry, "raised before `_chat`'s handler is in place",
+  which was wrong). Over 1,260 starts with Ctrl+C sent as the frame appears: 1,229 ended
+  with exit 0, 25 with exit -2, 5 lost the key, 1 printed a traceback. In the 25 the
+  handler did run: the terminal was put back, `_chat` caught KeyboardInterrupt and
+  returned 0 (the output ends with "coroutine '_chat_async' was never awaited ... return
+  0"), and the process was then killed by SIGINT all the same. CPython marks an interrupt
+  that passes through an `exec` of a string as unhandled and re-raises the signal when
+  the interpreter exits, caught or not; the standard library builds namedtuples and
+  dataclasses with such an `exec`, and the start-up imports are full of them. Shown apart
+  from KaroX (`python -m` of a five-line module, Python 3.12.14): interrupt inside
+  `exec("<source>")`, caught, `SystemExit(0)` -> the process ends with -2; the same with
+  `exec(compile(...))` -> 0. So three faults share one cause, a KeyboardInterrupt raised
+  wherever the imports happen to be: inside such an `exec` (exit -2 and a warning on the
+  user's screen, 2.0%), inside a callback that swallows it (the key is lost, 0.4%), inside
+  an extension module's import (a traceback, 0.1%). The fix for all three is not to raise
+  there: a SIGINT handler for the time between the frame and the app's first read that
+  puts the terminal back and ends the start itself, and gives the signal back to asyncio
+  when the app takes the keyboard. Not done in this shift: it is start-up signal handling
+  on POSIX, it needs both systems' suites and this stress run again, and 35 minutes were
+  left. The test stays as it is and fails about once in thirty Linux runs until then.
+- 06:31 UTC, last correction and close: 31 failures of 1,260 interrupted starts is one in
+  forty, not thirty. Report closed; both branches pushed; the working trees are clean.
+- 07:05-07:30 UTC, the Ctrl+C race at chat start, fixed (01126de). Found at the start of the shift:
+  uncommitted edits in `cli.py`, `tests/term.py`, `tests/test_terminal.py` made 06:57-07:04
+  UTC (an interrupted attempt at this task); reviewed, kept, and one test helper they broke
+  fixed (`_install_cli_timeout` in `test_tui_fullscreen.py` wrapped `run_async` with one
+  argument). Cause as in the 06:30 entry. Fix: `cli._Interrupts`, a SIGINT handler set in
+  `_chat` before the first frame; until the event loop runs it only counts the interrupt
+  (nothing is raised inside the imports), the loop's first step ends the start, and after
+  that it cancels the main task as asyncio's own handler does (second Ctrl+C:
+  KeyboardInterrupt). Test: `term.ctrl_c_hook` makes the chat interrupt itself as it first
+  imports a given module, plainly, inside an `exec` of source text or inside a finalizer;
+  `test_an_interrupt_at_any_point_of_the_start_ends_it_cleanly` (12 cases) fails 9 of 12
+  on 2ba559b on Linux (plus the old race test with its new "nothing printed" check) and
+  passes on both systems. The hook also turns Ctrl+C back on under pywinpty, so the race
+  test now runs on Windows too. Stress (scratch `ctrlc_stress.py`, Ctrl+C 0-80 ms after
+  the frame, OK = exit 0/130 + screen and input mode back + nothing printed, or the key
+  reaches the app): before, Windows 217 of 320 bad (216 "coroutine '_chat_async' was never
+  awaited" on screen, 1 STATUS_CONTROL_C_EXIT); Linux 0 of 720 bad in this harness (last
+  night's harness: 31 of 1,260). After: Windows 0 of 320, Linux 0 of 720 (320 at 0-80 ms,
+  25 reached the app; 400 at 0 ms). Left as it is: Ctrl+C before `_chat` (interpreter start,
+  argument parsing, nothing on screen yet) still gets Python's default, and a second Ctrl+C
+  once the loop runs raises KeyboardInterrupt as with asyncio's handler.
+- Shift of 2026-11-22 from 07:45 UTC (`date -u`), version 6.0.0.dev40: (1) `karox6 update`
+  and `/update`, a once-a-day background check, `scripts/install_latest.ps1|.sh`; (2) the
+  chat UI redesign. No model call so far, ReformBoss not used, BASE_PROMPT untouched.
+- 08:00 UTC, part 1 in: `karox6/update.py` (temporary clone of `karox6/main`, compare by
+  commit and PEP 440 version, changes = commit titles since the installed build, wheel built
+  with the venv's pip, checked by `--version` from a scratch `--target` before install, deps
+  first then `--force-reinstall --no-deps`; Windows: running `karox6.exe` renamed to
+  `*.exe.<pid>-<t>.old`, put back on failure, deleted on a later run). `karox6 update
+  --check` against GitHub: 1.8 s, "6.0.0.dev39 is newer than the branch (6.0.0.dev34
+  (ee24034))". Tests on a temporary repo with an in-tree build backend and a temporary venv
+  (PIP_NO_INDEX=1): install, up to date, two new commits listed, a build that does not start
+  refused with the old install kept, missing branch, the running launcher replaced (Windows),
+  both install scripts run twice (second: "up to date"). Bug found by the Linux run: a venv's
+  python is a symlink to the base interpreter, `resolve()` made them equal; paths now
+  compared as given.
+- 08:45 UTC, part 2 in (the chat's look). Read first: Codex `codex-rs/tui/styles.md`
+  (roles, ANSI colours, newline-gated markdown), OpenCode's theme system (dark/light,
+  "system" from the terminal palette, OSC 11), Claude Code's screens (input box, status
+  line, tool blocks with "+N lines (ctrl+o)"). Fifteen points taken, listed in
+  `docs/tui.md`. New: `tui_theme.py` (roles x themes dark/light/mid/ansi x depth 24/8/4/0),
+  `tui_markdown.py` (line-at-a-time rendering, live open line, tables), `tui_highlight.py`
+  (regex per language family, lazy), glyph sets rich / classic console (WGL4) / ASCII,
+  layout: activity line, framed input box with mode hints, status bar (model, project
+  (branch), context gauge, cost, turn time, approvals), Ctrl+O folds tool output in place,
+  `/` menu ranks prefix > name > description, `@` adds letters-in-order. Start-up frame
+  repainted to match. Frame tests in the ConPTY/pty harness: activity line and hints,
+  markdown cells (bold, colours), fold/unfold, update notice, five colour depths/themes,
+  classic-console glyphs (Windows). First frame 175 ms (median of 7; 170 before).
+  Windows 1231 passed, 6 skipped (before the last two test fixes); Linux 1232 passed,
+  8 skipped. A test failed only on Linux: a scripted turn takes 0.0 s, and the turn time
+  was hidden when it was zero; now it is hidden only before the first turn.
+- 08:48 UTC, registered before the run (a check that KaroX dev40 works, not a comparison;
+  no decision rides on it; ReformBoss not used). Live check `devl40` in GitHub Actions:
+  karox6 alone, wheel 6.0.0.dev40 (built from 66a0741, added to bench `devin/bench`), disc
+  tasks 2 and 7 (isort-2750, plopp-614), 1 attempt, upstream `dahl2` (free GLM-5.3-Flash),
+  parallel 1, chunk 2 (one runner). About 120 requests (56 per task last time). Pass = the
+  job reports karox 6.0.0.dev40, the audit has successful calls and each trial ends by the
+  agent's own choice ("completed"). An overloaded or slow lane is recorded, not a failure
+  of KaroX. Locally: the configured provider in `~/.karox6/config.toml` is ReformBoss, so
+  no local chat with a live model (the user can run `karox6` -> `/setup` for another).

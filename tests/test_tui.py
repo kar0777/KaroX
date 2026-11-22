@@ -12,6 +12,7 @@ from karox6.core.session import CANCELLED_RESULT, SessionConfig
 from karox6.providers.scripted import ScriptedProvider, Turn
 from karox6.tools.base import ApprovalRequest, ToolResult
 from karox6.tui import ChatApp, Palette, _glyphs, brief
+from karox6.tui_text import short_path
 
 
 class FakeTerm:
@@ -93,7 +94,7 @@ def test_turns_share_history(tmp_path):
     assert asyncio.run(app.run()) == 0
     assert "first answer" in term.text
     assert "second" in term.text
-    assert term.text.count("[completed]") == 2
+    assert term.text.count("✓ completed") == 2
     seen = [m.content for m in provider.requests[1].messages]
     assert seen == ["hello", "first answer", "and again"]
 
@@ -106,7 +107,7 @@ def test_welcome_card_shows_model_project_branch_and_keys(tmp_path):
     (git / "HEAD").write_text("ref: refs/heads/feature-x\n", encoding="utf-8")
     asyncio.run(app.run())
     card = term.text.split("Type a task to start.")[0]
-    for part in ("KaroX ", "test", "openai-chat", str(tmp_path / "ws"), "feature-x", "ask"):
+    for part in ("KaroX ", "test", "openai-chat", short_path(str(tmp_path / "ws")), "feature-x"):
         assert part in card
     for key in ("/ commands", "@ attach a file", "Alt+Enter", "Esc"):
         assert key in card
@@ -174,7 +175,7 @@ def test_cancel_stops_only_the_turn(tmp_path):
         assert await app.turn("next") == "completed"
 
     asyncio.run(go())
-    assert "[stopped]" in term.text
+    assert "! stopped" in term.text
     assert tool_results(app.session) == [CANCELLED_RESULT]
     roles = [m.role for m in provider.requests[1].messages]
     assert roles == ["user", "assistant", "tool", "user"]
@@ -204,7 +205,7 @@ def test_sigint_under_asyncio_run_stops_only_the_turn(tmp_path):
 
     before = signal.getsignal(signal.SIGINT)
     assert asyncio.run(main()) == ["cancelled", "cancelled", "completed"]
-    assert term.text.count("[stopped]") == 2
+    assert term.text.count("! stopped") == 2
     assert signal.getsignal(signal.SIGINT) is before
 
 
@@ -282,8 +283,8 @@ def test_render_stream_and_events(tmp_path):
     app.render(ev.ErrorEvent(code="x", message="bad"))
     text = term.text
     assert "thinking: hmm\n" in text
-    assert "● bash ls -la  ✗ boom (1.5s)\n" in text
-    assert "    ● agent-1/read x  ✓ 2 lines (0.0s)\n" in text
+    assert "● bash ls -la  ✗ boom · 1.5s\n" in text
+    assert "    ● agent-1/read x  ✓ 2 lines · 0.0s\n" in text
     assert "retry 2 in 4s: 429" in text
     assert "✗ error: bad" in text
 
@@ -517,3 +518,51 @@ def test_legacy_console_output_and_no_color(monkeypatch):
     assert not color_enabled()
     stdout_write("Кириллица🙂")
     assert stream.buffer.getvalue().decode("cp1251") == "Кириллица?"
+
+
+def test_update_rejects_a_typo_instead_of_installing(tmp_path, monkeypatch):
+    """`/update chek` used to mean force=False check_only=False — a full network install."""
+    from karox6 import update
+
+    ran = []
+    monkeypatch.setattr(update, "run_update", lambda *a, **k: ran.append((a, k)))
+    term = FakeTerm(["/update chek", "/quit"])
+    app, _ = make_app(tmp_path, [], term)
+    asyncio.run(app.run())
+    assert ran == []
+    assert "unknown /update argument 'chek'" in term.text
+    assert "/update check or /update force" in term.text
+
+
+def test_update_paints_no_terminal_controls(tmp_path, monkeypatch):
+    """Updater output is remote bytes (commit subjects, pip/git stderr, versions): the
+    progress callback and the error line must not let CSI/OSC reach the terminal."""
+    from karox6 import update
+
+    def hostile(source, out, **_kwargs):
+        out("fetching \x1b]8;;https://evil.test\x1b\\repo\x1b[2J")
+        raise update.UpdateError("git said:\n  \x1b[31mfatal\x1b[0m\n  \x1b]0;pwned\x07 boom")
+
+    monkeypatch.setattr(update, "run_update", hostile)
+    term = FakeTerm(["/update", "/quit"])
+    app, _ = make_app(tmp_path, [], term)
+    asyncio.run(app.run())
+    body = term.text.split("Type a task to start.", 1)[-1]
+    assert "\x1b" not in body
+    assert "\x07" not in body
+    assert "  fetching repo\n" in body
+    assert "update failed: git said:\n  fatal\n   boom" in body
+
+
+def test_quit_aborts_a_running_update(tmp_path, monkeypatch):
+    """The updater's child processes (a 600s clone, a 900s pip) used to keep the process
+    hung after a quit: close() must call update.abort() while an update is in flight."""
+    from karox6 import update
+
+    aborted = []
+    monkeypatch.setattr(update, "abort", lambda: aborted.append(True))
+    term = FakeTerm()
+    app, _ = make_app(tmp_path, [], term)
+    app._updating = True  # /update is running in its executor thread
+    asyncio.run(app.close())
+    assert aborted == [True]

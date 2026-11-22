@@ -1,0 +1,56 @@
+╭─ KaroX 6.0.0.dev40 ────────────────────────────────────────────────╮
+│ model      demo-model · openai-chat                                │
+│ project    ~\AppData\Local\Temp\tmp3wnn9bdk\ws · main              │
+│ approvals  ask  (/approve to change)                               │
+│                                                                    │
+│            / commands · @ attach a file · Alt+Enter new line       │
+│            Esc stops the agent · Ctrl+O tool output · Ctrl+D quits │
+╰────────────────────────────────────────────────────────────────────╯
+Type a task to start.
+
+› fix the greeting in hello.py
+● read hello.py  ✓ 1 lines · 0.0s
+● bash python hello.py  ✓ exit 0 · hi · 0.2s
+● edit hello.py  ✓ +2 -1 · 0.0s
+      1 - print('hi')
+      1 + print('hello')
+      2 + print('bye')
+
+## Done: the greeting is fixed
+
+hello.py now prints hello and then bye:
+
+• the old print('hi') is gone
+• a second line says goodbye
+  • nested item for the layout
+
+1. run it: python hello.py
+2. commit when happy
+
+```python
+def greet(name: str) -> str:
+    # say hello
+    return f"hello, {name}"  # 2 lines
+```
+
+file      │ change   │ lines
+──────────┼──────────┼──────
+hello.py  │ greeting │ +2 -1
+README.md │ none     │     0
+
+│ Tip: /diff shows the whole change, /undo takes it back.
+✓ completed · 4 steps · 1s · 6.4k in / 204 out · 1 file changed (/diff)
+
+
+
+
+
+
+
+
+
+
+╭─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ›                                                                                               │
+╰─────────────────── enter send · alt+enter new line · / commands · @ files · ctrl+o tool output ─╯
+ demo-model · ws (main)                                        ctx ▱▱▱▱▱ 1% · 0.7s · approvals ask

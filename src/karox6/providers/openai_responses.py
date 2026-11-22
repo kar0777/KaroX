@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from karox6.core.messages import Message, ToolCall, Usage
+from karox6.core.messages import Message, ToolCall, Usage, image_note, image_payload
 from karox6.providers._stream import StreamProvider, stream_error
 from karox6.providers.base import (
     Delta,
@@ -46,6 +46,18 @@ class OpenAIResponsesProvider(StreamProvider):
                             "arguments": c.arguments,
                         }
                     )
+            elif m.images:
+                content: list[dict[str, Any]] = (
+                    [{"type": "input_text", "text": m.content}] if m.content else []
+                )
+                for image in m.images:
+                    payload = image_payload(image)
+                    if payload is None:
+                        content.append({"type": "input_text", "text": image_note(image)})
+                    else:
+                        url = f"data:{payload[0]};base64,{payload[1]}"
+                        content.append({"type": "input_image", "image_url": url})
+                items.append({"role": "user", "content": content})
             else:
                 items.append({"role": "user", "content": m.content})
         body: dict[str, Any] = {
@@ -91,7 +103,11 @@ class OpenAIResponsesProvider(StreamProvider):
             nonlocal finish, model
             typ = event.get("type")
             if typ in ("error", "response.failed"):
-                raise stream_error(event.get("error") or (event.get("response") or {}).get("error"))
+                nested = event.get("error") or (event.get("response") or {}).get("error")
+                # The `error` event itself has its code and message at the top level.
+                raise stream_error(
+                    nested or {"code": event.get("code"), "message": event.get("message")}
+                )
             if typ in ("response.output_text.delta", "response.reasoning_summary_text.delta"):
                 value = event.get("delta", "")
                 thought = typ == "response.reasoning_summary_text.delta"
@@ -117,21 +133,26 @@ class OpenAIResponsesProvider(StreamProvider):
                 usage.reasoning_tokens = int(
                     (u.get("output_tokens_details") or {}).get("reasoning_tokens") or 0
                 )
+                # Cut by the output limit, stopped by a filter (not the model's answer,
+                # so not a normal end), or whole.
+                reason = (response.get("incomplete_details") or {}).get("reason")
                 finish = (
-                    "length"
-                    if typ == "response.incomplete"
-                    and (response.get("incomplete_details") or {}).get("reason")
-                    == "max_output_tokens"
-                    else "other"
-                    if typ == "response.incomplete"
-                    else "stop"
+                    "stop"
+                    if typ == "response.completed"
+                    else {"max_output_tokens": "length", "content_filter": "content_filter"}.get(
+                        str(reason), "other"
+                    )
                 )
 
         headers = {"content-type": "application/json", **self.headers}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         await self._stream(
-            self.base_url.rstrip("/") + "/responses", self.build_body(request), headers, feed
+            self.base_url.rstrip("/") + "/responses",
+            self.build_body(request),
+            headers,
+            feed,
+            flowing=lambda: bool(text) or bool(fragments),
         )
         if finish is None:
             raise ProviderError("transport", "stream ended before the response finished")

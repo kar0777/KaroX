@@ -104,7 +104,7 @@ def test_parallel_tools_finish_once_in_scrollback_with_live_status(tmp_path):
                 assert not scrollback
                 second.release.set()
                 await eventually(lambda: len(scrollback) == 1)
-                assert scrollback[0].startswith("● slow_b {}  ✓ done (")
+                assert scrollback[0].startswith("● slow_b {}  ✓ done · ")
                 assert "Running slow_a" in app._progress()
                 first.release.set()
                 assert await asyncio.wait_for(task, 2) == "completed"
@@ -113,7 +113,7 @@ def test_parallel_tools_finish_once_in_scrollback_with_live_status(tmp_path):
                     task.cancel()
                     await task
         lines = "".join(scrollback).splitlines()
-        assert lines[1].startswith("● slow_a {}  ✓ done (")
+        assert lines[1].startswith("● slow_a {}  ✓ done · ")
         assert lines[2:4] == ["", "Answer."]
         assert sum(line.startswith("● ") for line in lines) == 2
         assert not any("Running slow_" in line for line in lines)
@@ -183,7 +183,7 @@ def test_run_keys_stop_and_wait_for_tool_cleanup(tmp_path, key):
                     await running
             assert await app.turn("again") == "completed"
         assert app.session.session_id == session_id
-        assert "".join(out).count("[stopped]") == 1
+        assert "".join(out).count("! stopped") == 1
         assert "after" in "".join(out)
 
     asyncio.run(go())
@@ -293,4 +293,4 @@ def test_escape_during_approval_cancels_parallel_tool_and_reopens_prompt(tmp_pat
         assert prompts == 2
 
     asyncio.run(go())
-    assert "".join(out).count("[stopped]") == 1
+    assert "".join(out).count("! stopped") == 1

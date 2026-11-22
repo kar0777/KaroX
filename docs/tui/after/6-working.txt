@@ -1,0 +1,32 @@
+╭─ KaroX 6.0.0.dev40 ────────────────────────────────────────────────╮
+│ model      demo-model · openai-chat                                │
+│ project    ~\AppData\Local\Temp\tmpkwt2n5b5\ws · main              │
+│ approvals  ask  (/approve to change)                               │
+│                                                                    │
+│            / commands · @ attach a file · Alt+Enter new line       │
+│            Esc stops the agent · Ctrl+O tool output · Ctrl+D quits │
+╰────────────────────────────────────────────────────────────────────╯
+Type a task to start.
+
+› run the tests
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ⠸ Running bash python -c "import time; time.sleep(30)"  2.3s · esc stop
+╭─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ›                                                                                               │
+╰───────────────────────────────────────── esc stop · enter queue a message · ctrl+o tool output ─╯
+ demo-model · ws (main)                                        ctx ▱▱▱▱▱ 0% · 2.3s · approvals ask

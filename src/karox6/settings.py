@@ -47,6 +47,10 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "code_mode": (bool,),
     "copy_notes": (bool,),
     "command_wait_cap": (int,),
+    "update_check": (bool,),
+    "update_repo": (str,),
+    "update_branch": (str,),
+    "theme": (str,),
 }
 ENV = {"model": "KAROX_MODEL", "provider": "KAROX_PROVIDER", "base_url": "KAROX_BASE_URL"}
 

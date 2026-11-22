@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="856" height="592" font-family="Cascadia Mono, Consolas, monospace" font-size="14"><rect width="100%" height="100%" fill="#0c0c0c"/>
+<text x="8.0" y="22" fill="#cccccc" xml:space="preserve">╭─ </text>
+<text x="33.2" y="22" fill="#cccccc" font-weight="bold" xml:space="preserve">KaroX 6.0.0.dev39</text>
+<text x="176.0" y="22" fill="#cccccc" xml:space="preserve"> ────────────────────────────────────────────────╮                              </text>
+<text x="8.0" y="40" fill="#cccccc" xml:space="preserve">│ model      demo-model · openai-chat                                │                              </text>
+<text x="8.0" y="58" fill="#cccccc" xml:space="preserve">│ project    C:\Users\ekono\AppData\Local\Temp\tmp46rluk0g\ws · main │                              </text>
+<text x="8.0" y="76" fill="#cccccc" xml:space="preserve">│ approvals  ask  (/approve to change)                               │                              </text>
+<text x="8.0" y="94" fill="#cccccc" xml:space="preserve">│                                                                    │                              </text>
+<text x="8.0" y="112" fill="#cccccc" xml:space="preserve">│            / commands · @ attach a file · Alt+Enter new line       │                              </text>
+<text x="8.0" y="130" fill="#cccccc" xml:space="preserve">│            Esc stops the agent · /help · Ctrl+D quits              │                              </text>
+<text x="8.0" y="148" fill="#cccccc" xml:space="preserve">╰────────────────────────────────────────────────────────────────────╯                              </text>
+<text x="8.0" y="166" fill="#cccccc" xml:space="preserve">Type a task to start.                                                                               </text>
+<rect x="33.2" y="422" width="100.8" height="18" fill="#262626"/>
+<text x="33.2" y="436" fill="#d0d0d0" xml:space="preserve"> /new       </text>
+<rect x="134.0" y="422" width="554.4" height="18" fill="#262626"/>
+<text x="134.0" y="436" fill="#9e9e9e" xml:space="preserve"> start a fresh session                                            </text>
+<text x="688.4" y="436" fill="#cccccc" font-weight="bold" xml:space="preserve">^</text>
+<rect x="33.2" y="440" width="100.8" height="18" fill="#262626"/>
+<text x="33.2" y="454" fill="#d0d0d0" xml:space="preserve"> /clear     </text>
+<rect x="134.0" y="440" width="554.4" height="18" fill="#262626"/>
+<text x="134.0" y="454" fill="#9e9e9e" xml:space="preserve"> clear the screen (keeps current session)                         </text>
+<rect x="688.4" y="440" width="8.4" height="18" fill="#585858"/>
+<rect x="33.2" y="458" width="100.8" height="18" fill="#262626"/>
+<text x="33.2" y="472" fill="#d0d0d0" xml:space="preserve"> /sessions  </text>
+<rect x="134.0" y="458" width="554.4" height="18" fill="#262626"/>
+<text x="134.0" y="472" fill="#9e9e9e" xml:space="preserve"> list recent sessions for this workspace                          </text>
+<rect x="688.4" y="458" width="8.4" height="18" fill="#585858"/>
+<rect x="33.2" y="476" width="100.8" height="18" fill="#262626"/>
+<text x="33.2" y="490" fill="#d0d0d0" xml:space="preserve"> /resume    </text>
+<rect x="134.0" y="476" width="554.4" height="18" fill="#262626"/>
+<text x="134.0" y="490" fill="#9e9e9e" xml:space="preserve"> continue a saved session                                         </text>
+<rect x="688.4" y="476" width="8.4" height="18" fill="#585858"/>
+<rect x="33.2" y="494" width="100.8" height="18" fill="#262626"/>
+<text x="33.2" y="508" fill="#d0d0d0" xml:space="preserve"> /fork      </text>
+<rect x="134.0" y="494" width="554.4" height="18" fill="#262626"/>
+<text x="134.0" y="508" fill="#9e9e9e" xml:space="preserve"> branch off: a copy of this conversation to try another way       </text>
+<rect x="688.4" y="494" width="8.4" height="18" fill="#1c1c1c"/>
+<rect x="33.2" y="512" width="100.8" height="18" fill="#262626"/>
+<text x="33.2" y="526" fill="#d0d0d0" xml:space="preserve"> /undo      </text>
+<rect x="134.0" y="512" width="554.4" height="18" fill="#262626"/>
+<text x="134.0" y="526" fill="#9e9e9e" xml:space="preserve"> take back the last turn: its file changes and messages           </text>
+<rect x="688.4" y="512" width="8.4" height="18" fill="#1c1c1c"/>
+<rect x="33.2" y="530" width="100.8" height="18" fill="#262626"/>
+<text x="33.2" y="544" fill="#d0d0d0" xml:space="preserve"> /redo      </text>
+<rect x="134.0" y="530" width="554.4" height="18" fill="#262626"/>
+<text x="134.0" y="544" fill="#9e9e9e" xml:space="preserve"> put back the turn that /undo took away                           </text>
+<rect x="688.4" y="530" width="8.4" height="18" fill="#1c1c1c"/>
+<rect x="8.0" y="548" width="8.4" height="18" fill="#262626"/>
+<rect x="16.4" y="548" width="16.8" height="18" fill="#262626"/>
+<text x="16.4" y="562" fill="#87d7ff" font-weight="bold" xml:space="preserve">de</text>
+<rect x="33.2" y="548" width="100.8" height="18" fill="#262626"/>
+<text x="33.2" y="562" fill="#d0d0d0" xml:space="preserve"> /quit      </text>
+<rect x="134.0" y="548" width="554.4" height="18" fill="#262626"/>
+<text x="134.0" y="562" fill="#9e9e9e" xml:space="preserve"> leave the chat (/exit, /q, Ctrl+D)                               </text>
+<text x="688.4" y="562" fill="#cccccc" font-weight="bold" xml:space="preserve">v</text>
+<rect x="696.8" y="548" width="134.4" height="18" fill="#262626"/>
+<text x="696.8" y="562" fill="#9e9e9e" xml:space="preserve">%) · approve:ask</text>
+<rect x="831.2" y="548" width="8.4" height="18" fill="#262626"/>
+<text x="8.0" y="580" fill="#3a96dd" font-weight="bold" xml:space="preserve">› </text>
+<text x="24.8" y="580" fill="#cccccc" xml:space="preserve">/                                                                                                 </text>
+</svg>

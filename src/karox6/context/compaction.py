@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from karox6.core.messages import Message
+from karox6.core.messages import IMAGE_TOKENS, Message
 
 PRUNE_THRESHOLD = 8192
 PRUNE_HEAD = 4096
@@ -64,6 +64,7 @@ def estimate_tokens(messages: list[Message], system: str = "") -> int:
     chars = len(system)
     for m in messages:
         chars += len(m.content) + len(m.reasoning or "") + 16
+        chars += int(IMAGE_TOKENS * 3.5) * len(m.images)
         for call in m.tool_calls:
             chars += len(call.arguments) + len(call.name) + 16
     return int(chars / 3.5)

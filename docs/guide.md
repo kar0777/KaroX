@@ -20,6 +20,25 @@ karox --version
 Until the first release is on PyPI, install the wheel instead:
 `uv tool install "dist/karox6-<version>-py3-none-any.whl[tui]"` (build it with `uv build --wheel`).
 
+### Staying up to date
+
+`karox6 update` installs the newest build of the `karox6/main` branch into the environment
+KaroX runs from: it clones the branch into a temporary folder, says what changes
+(`6.0.0.dev34 -> 6.0.0.dev40` and the commit titles in between), builds the wheel, checks
+that it starts, and only then replaces the installed one. If anything fails, the installed
+KaroX stays as it was. `karox6 update --check` only looks; `--force` reinstalls.
+`/update` in the chat does the same (restart KaroX afterwards). On Windows the running
+`karox6.exe` is renamed out of the way, so the update works from inside the chat too.
+
+The chat looks for a newer version at most once a day, in the background, and says so in
+one line (`version X is available: /update`); it never installs anything by itself.
+`update_check = false` in `config.toml` (or `KAROX_UPDATE_CHECK=0`) turns that off;
+`update_repo` / `update_branch` point it elsewhere.
+
+Without a working KaroX, `scripts/install_latest.ps1` (Windows) or `scripts/install_latest.sh`
+creates the venv if needed and installs or updates KaroX in it; run again, it says
+"up to date". `-Venv` / `--venv` chooses the folder (default `~/karox6-venv`).
+
 ## Connect a model
 
 KaroX talks to any OpenAI-compatible endpoint (`openai-chat`, the default), the OpenAI
@@ -58,21 +77,53 @@ still works in 400k unless you raise the limit.
 
 ## Chat
 
-`karox chat` (or plain `karox` in a terminal) opens a chat in the normal scrollback: the
-answer streams in, each tool call is one line, and a destructive command asks before it
-runs (`y` / `N` / `a` = allow for the rest of the session).
+`karox chat` (or plain `karox` in a terminal) opens a full-screen chat: the conversation
+scrolls above; below it a line says what the running turn does and for how long (`esc`
+stops it); the input box shows the keys that matter right now in its lower edge; the
+status bar shows the model, the project and branch, the context fill, the cost (when
+prices are set), the last turn's time and the approval mode. The answer streams in as
+formatted text (headings, lists, `code`, code blocks with colours, aligned tables), each
+tool call is one line (an edit also shows the lines it changed, a command how many lines
+it printed) and **Ctrl+O** unfolds or folds the full output of every call. A destructive
+command asks before it runs (`y` / `N` / `a` = allow for the rest of the session).
+`--inline` keeps the chat in the terminal's normal scrollback instead.
+
+Colours follow the terminal: true colour in Windows Terminal, VS Code, iTerm2, kitty and
+WezTerm, 256 or 16 colours elsewhere, none with `NO_COLOR` or `--no-color`. `theme` in
+`config.toml` (or `--theme`, `KAROX_THEME`) picks `dark` or `light` (tuned, with tinted
+diff lines), `mid` (readable on any background; the default when the terminal does not say
+which it has) or `ansi` (the terminal's own 16 colours). In the classic Windows console
+window the symbols are limited to what its fonts draw.
 
 | Command | Does |
 |---|---|
 | `/diff` | workspace changes: `git diff` plus untracked files |
-| `/status` | session, model, tokens and cost |
-| `/new` | start a fresh session |
+| `/undo`, `/redo` | take the last turn back (its messages and the files it changed), or put it back |
+| `/fork` | continue in a copy of this conversation; the original stays as it is |
+| `/init [FOCUS]` | have the model write `AGENTS.md` for this project |
+| `/paste` (Alt+V) | attach the picture in the clipboard to the next message |
+| `/mcp [SERVER]` | MCP servers: state, tools, how to add one |
+| `/status`, `/cost` | session, model, tokens, context fill and cost |
+| `/compact` | shrink the conversation to free context |
+| `/new`, `/clear` | start a fresh session; clear the screen |
 | `/sessions`, `/resume [ID\|last]` | list and continue saved sessions |
+| `/model [NAME]`, `/setup`, `/key` | change the model, the provider, the API key |
 | `/approve ask\|allow\|deny` | how destructive commands are handled |
 | `/reasoning` | show or hide the model's reasoning |
+| `/update [check\|force]` | install the newest KaroX (see "Staying up to date") |
 | `/help`, `/quit` | help; leave (Ctrl+D works too) |
 
-Ctrl+C stops the running turn and keeps the session; end a line with `\` to type more lines.
+Esc or Ctrl+C stops the running turn and keeps the session. Enter sends; Alt+Enter, Ctrl+J
+or a trailing `\` start a new line. `@path` attaches a file, `@shot.png` (or a dragged
+picture's path) attaches a picture. Tab completes commands and paths, Ctrl+R searches the
+input history, PgUp/PgDn and the mouse wheel scroll. A message sent while the agent works
+waits its turn.
+
+`/undo` records the project around each turn in a private git store under
+`<home>/snapshots`; your own repository, index and stash are never touched, ignored files
+are not recorded, and a file you changed after the turn is left alone. `--no-undo` switches
+the recording off. `karox chat -c` continues the project's last session, `--fork ID|last`
+starts a new one from a copy of it.
 
 ## Headless runs
 

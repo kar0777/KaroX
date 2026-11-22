@@ -10,29 +10,42 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import re
 import sys
+import time
+from bisect import bisect_right
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, ThreadedCompleter
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition, has_completions, is_searching
-from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples, fragment_list_width
+from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples
 from prompt_toolkit.history import History
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
-from prompt_toolkit.layout import Dimension, Float, FloatContainer, HSplit, Layout, Window
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import (
+    Dimension,
+    Float,
+    FloatContainer,
+    HSplit,
+    Layout,
+    VSplit,
+    Window,
+)
 from prompt_toolkit.layout.containers import ConditionalContainer
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import PasswordProcessor
-from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import ColorDepth, Output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
@@ -41,89 +54,289 @@ from prompt_toolkit.widgets import SearchToolbar
 from karox6.tui import (
     _CLEAR_SCREEN,
     ChatApp,
-    StatusSnapshot,
-    _git_branch,
-    _glyphs,
-    _k,
-    _plain_text,
     _PromptInterrupt,
     build_completer,
     build_history,
+    pasted_line_end,
 )
+from karox6.tui_input import coalescing_input
+from karox6.tui_paste import WARN_BYTES, PasteChunks
+from karox6.tui_text import (
+    StatusSnapshot,
+    _git_branch,
+    _glyphs,
+    _plain_text,
+    box_bottom,
+    box_sides,
+    box_top,
+    cell_width,
+    clip_cells,
+    key_hints,
+    narrow,
+    status_bar_fragments,
+)
+from karox6.tui_theme import Theme, xterm_hex
 
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding.key_bindings import NotImplementedOrNone
+    from prompt_toolkit.layout.containers import WindowRenderInfo
+
+    from karox6.splash import Splash
 
 MAX_LOGICAL_LINES = 20_000
 _TRIM_BATCH = 2_000
 _WHEEL_LINES = 3
+_TAB = 4
+
+Run = tuple[str, str]  # (prompt_toolkit style, text without control characters)
+
+_SGR = re.compile("\x1b\\[([0-9;]*)m")
+_FG = {
+    30: "ansiblack",
+    31: "ansired",
+    32: "ansigreen",
+    33: "ansiyellow",
+    34: "ansiblue",
+    35: "ansimagenta",
+    36: "ansicyan",
+    37: "ansigray",
+    90: "ansibrightblack",
+    91: "ansibrightred",
+    92: "ansibrightgreen",
+    93: "ansibrightyellow",
+    94: "ansibrightblue",
+    95: "ansibrightmagenta",
+    96: "ansibrightcyan",
+    97: "ansiwhite",
+}
+_FLAGS = {1: "bold", 2: "dim", 3: "italic", 4: "underline", 7: "reverse"}
+_FLAG_OFF = {22: ("bold", "dim"), 23: ("italic",), 24: ("underline",), 27: ("reverse",)}
 
 
-def _parse_ansi_line(raw: str) -> StyleAndTextTuples:
-    expanded = raw.expandtabs(4)
-    if "\x1b" not in expanded:
-        return [("", expanded)] if expanded else []
-    return list(ANSI(expanded).__pt_formatted_text__())
+_ERASE_LINE = "\x1b[K"
+_FILL_MARK = "\ue000"
+FILL = "class:fill"
+
+
+def _runs(text: str) -> list[Run]:
+    """``text`` (plain, or with SGR colour codes) as styled runs. "Erase to the end of the
+    line" (``ESC [ K``) after coloured text, which a terminal answers by painting the rest
+    of the line in the current background, marks that run ``class:fill``: the pane pads it
+    to the edge at whatever width it is drawn (tinted diff lines)."""
+    if _ERASE_LINE not in text:
+        return _sgr_runs(text)
+    out: list[Run] = []
+    for style, chunk in _sgr_runs(text.replace(_ERASE_LINE, _FILL_MARK)):
+        if _FILL_MARK in chunk:
+            head = chunk.replace(_FILL_MARK, "")
+            if head:
+                out.append((f"{style} {FILL}".strip(), head))
+        else:
+            out.append((style, chunk))
+    return out
+
+
+def _sgr_runs(text: str) -> list[Run]:
+    """``text`` (plain, or with SGR colour codes) as styled runs. The codes the chat itself
+    writes are read here directly (a run per colour change, not a fragment per character);
+    anything richer goes through prompt_toolkit's ANSI parser."""
+    if "\x1b" not in text:
+        return [("", text)] if text else []
+    out: list[Run] = []
+    color = ""
+    background = ""
+    flags: list[str] = []
+    pos = 0
+    for match in _SGR.finditer(text):
+        if match.start() > pos:
+            style = " ".join(x for x in (color, background, *flags) if x)
+            out.append((style, text[pos : match.start()]))
+        pos = match.end()
+        codes = [int(raw or 0) for raw in (match.group(1) or "0").split(";")]
+        i = 0
+        while i < len(codes):
+            code = codes[i]
+            if code in (38, 48) and i + 1 < len(codes):
+                # 256 colours (5;n) and true colour (2;r;g;b), as the theme writes them
+                if codes[i + 1] == 5 and i + 2 < len(codes):
+                    value = _xterm_hex(codes[i + 2])
+                    i += 3
+                elif codes[i + 1] == 2 and i + 4 < len(codes):
+                    value = "#{:02x}{:02x}{:02x}".format(*codes[i + 2 : i + 5])
+                    i += 5
+                else:
+                    return _merge(list(ANSI(text).__pt_formatted_text__()))
+                if code == 38:
+                    color = value
+                else:
+                    background = f"bg:{value}"
+                continue
+            if code == 0:
+                color, background, flags = "", "", []
+            elif code in _FG:
+                color = _FG[code]
+            elif code == 39:
+                color = ""
+            elif code == 49:
+                background = ""
+            elif code in _FLAGS:
+                if _FLAGS[code] not in flags:
+                    flags.append(_FLAGS[code])
+            elif code in _FLAG_OFF:
+                flags = [f for f in flags if f not in _FLAG_OFF[code]]
+            else:  # other backgrounds and rarer codes: the full parser knows them
+                return _merge(list(ANSI(text).__pt_formatted_text__()))
+            i += 1
+    if "\x1b" in text[pos:]:  # some other escape sequence
+        return _merge(list(ANSI(text).__pt_formatted_text__()))
+    if pos < len(text):
+        out.append((" ".join(x for x in (color, background, *flags) if x), text[pos:]))
+    return out
+
+
+def _xterm_hex(index: int) -> str:
+    """An xterm-256 palette entry as a prompt_toolkit colour."""
+    if index < 16:
+        return _FG[30 + index] if index < 8 else _FG[82 + index]
+    return f"#{xterm_hex(index)}"
+
+
+def _merge(fragments: StyleAndTextTuples) -> list[Run]:
+    """Neighbouring fragments of one style as one run (the ANSI parser yields a fragment
+    per character)."""
+    out: list[Run] = []
+    style = ""
+    chars: list[str] = []
+    for item in fragments:
+        if item[0] != style and chars:
+            out.append((style, "".join(chars)))
+            chars = []
+        style = item[0]
+        chars.append(item[1])
+    if chars:
+        out.append((style, "".join(chars)))
+    return out
+
+
+def _extend(line: StyleAndTextTuples, style: str, text: str) -> None:
+    if not text:
+        return
+    if line and line[-1][0] == style:
+        line[-1] = (style, line[-1][1] + text)
+    else:
+        line.append((style, text))
+
+
+def _wrap_into(lines: list[StyleAndTextTuples], col: int, runs: list[Run], width: int) -> int:
+    """Append ``runs`` to the visual lines ``lines`` (the last one is open at cell ``col``),
+    breaking at ``width`` cells; returns the new column. Text whose characters all take one
+    cell is cut by slicing; other text goes character by character with its real widths."""
+    for style, text in runs:
+        if narrow(text):
+            pos = 0
+            while pos < len(text):
+                room = width - col
+                if room <= 0:
+                    lines.append([])
+                    col, room = 0, width
+                piece = text[pos : pos + room]
+                _extend(lines[-1], style, piece)
+                col += len(piece)
+                pos += len(piece)
+            continue
+        chars: list[str] = []
+        for ch in text:
+            cells = max(get_cwidth(ch), 0)
+            if col > 0 and col + cells > width:
+                _extend(lines[-1], style, "".join(chars))
+                chars = []
+                lines.append([])
+                col = 0
+            chars.append(ch)
+            col += cells
+        _extend(lines[-1], style, "".join(chars))
+    return col
 
 
 def _wrap_fragments(fragments: StyleAndTextTuples, width: int) -> list[StyleAndTextTuples]:
     """Wrap formatted fragments to terminal cell ``width``, respecting wide Unicode chars."""
     if width <= 0:
         return [fragments]
-    if not fragments:
-        return [[]]
-    lines: list[StyleAndTextTuples] = []
-    cur: StyleAndTextTuples = []
-    cur_style = ""
-    cur_chars: list[str] = []
-    col = 0
+    lines: list[StyleAndTextTuples] = [[]]
+    _wrap_into(lines, 0, [(item[0], item[1]) for item in fragments], width)
+    return lines
 
-    def flush_run() -> None:
-        nonlocal cur_chars
-        if cur_chars:
-            cur.append((cur_style, "".join(cur_chars)))
-            cur_chars = []
 
-    def finish_line() -> None:
-        nonlocal cur, col
-        flush_run()
-        lines.append(cur)
-        cur = []
-        col = 0
+def _parse_lines(text: str) -> list[list[Run]]:
+    """``text`` (ending in a newline) as logical lines of styled runs."""
+    lines: list[list[Run]] = [[]]
+    chars = 0
+    for style, chunk in _runs(text.replace("\r\n", "\n").replace("\r", "")):
+        for n, raw in enumerate(chunk.split("\n")):
+            if n:
+                lines.append([])
+                chars = 0
+            if raw:
+                part = _expand_tabs(raw, chars) if "\t" in raw else raw
+                lines[-1].append((style, part))
+                chars += cell_width(part)
+    if not lines[-1]:
+        lines.pop()
+    return lines
 
-    for item in fragments:
-        style = item[0]
-        text = item[1]
-        for ch in text:
-            cw = max(get_cwidth(ch), 0)
-            if col > 0 and col + cw > width:
-                finish_line()
-            if style != cur_style:
-                flush_run()
-                cur_style = style
-            cur_chars.append(ch)
-            col += cw
-    finish_line()
-    return lines or [[]]
+
+def _expand_tabs(text: str, start: int) -> str:
+    """Tabs as spaces up to the next multiple of four cells; ``start`` is how many
+    cells the line already holds."""
+    out: list[str] = []
+    col = start
+    for ch in text:
+        if ch == "\t":
+            pad = _TAB - col % _TAB
+            out.append(" " * pad)
+            col += pad
+        else:
+            out.append(ch)
+            col += 1 if ch.isascii() else max(get_cwidth(ch), 0)
+    return "".join(out)
 
 
 class _TranscriptControl(UIControl):
-    """Scrollable, incrementally wrapped ANSI conversation pane."""
+    """Scrollable, incrementally wrapped conversation pane.
+
+    A logical line is a list of styled runs. Text that streams into the last line is
+    wrapped where the previous piece ended, so a long paragraph costs its new characters
+    per frame, not its whole length (a 30,000-character paragraph took 11 s of CPU before).
+    """
 
     def __init__(self) -> None:
-        self._raw_lines: list[str] = [""]
-        self._parsed_lines: list[StyleAndTextTuples] = [[]]
+        self._lines: list[list[Run]] = [[]]
+        self._chars: int = 0  # cells in the open (last) line, for tab stops
         self._wrap_width: int = 0
         self._wrapped_cache: list[list[StyleAndTextTuples]] = []
         self._visual_offsets: list[int] = []
         self._visual_lines: list[StyleAndTextTuples] = [[]]
         self._dirty_from: int = 0
+        # The open line as far as it is wrapped: (its index, runs wrapped, column reached).
+        self._tail: tuple[int, int, int] | None = None
+
+        # Tool output that Ctrl+O shows or folds: [first line, line count, folded, full].
+        self._blocks: list[list[Any]] = []
+        self.expanded: bool = False
+        self._live: list[Run] = []  # the answer's line still being streamed
+        self._live_lines: list[StyleAndTextTuples] = []
 
         self.follow: bool = True
         self.scroll_top: int = 0
         self.last_width: int = 80
         self.last_height: int = 20
         self.total_visual_lines: int = 1
+
+        # Mouse drag selection: anchor and current point as (visual row, character
+        # column) of the content on screen. ``on_copy`` gets the selected plain text.
+        self._sel_anchor: tuple[int, int] | None = None
+        self._sel_point: tuple[int, int] | None = None
+        self.on_copy: Callable[[str], None] | None = None
 
     @property
     def max_scroll(self) -> int:
@@ -136,20 +349,55 @@ class _TranscriptControl(UIControl):
     @property
     def plain_text(self) -> str:
         """All currently stored logical text (without ANSI escapes), for diagnostics/tests."""
-        from karox6.tui import _ANSI
-
-        return _ANSI.sub("", "\n".join(self._raw_lines))
+        return "\n".join("".join(text for _, text in line) for line in self._lines)
 
     def clear(self) -> None:
-        self._raw_lines = [""]
-        self._parsed_lines = [[]]
+        self._lines = [[]]
+        self._chars = 0
         self._wrapped_cache = []
         self._visual_offsets = []
         self._visual_lines = [[]]
         self._dirty_from = 0
+        self._tail = None
+        self._blocks = []
+        self._live = []
         self.follow = True
         self.scroll_top = 0
         self.total_visual_lines = 1
+        self._sel_anchor = self._sel_point = None
+
+    def set_live(self, text: str) -> None:
+        """Show ``text`` (one line, may hold colours) after the last line until replaced."""
+        self._live = _runs(text.replace("\n", " ")) if text else []
+
+    def append_block(self, folded: str, full: str) -> None:
+        """Lines that Ctrl+O switches between ``folded`` and ``full`` (each ends in a
+        newline)."""
+        if self._lines[-1]:
+            self.append("\n")
+        start = len(self._lines) - 1
+        self.append(full if self.expanded else folded)
+        if self._lines[-1]:
+            self.append("\n")
+        self._blocks.append([start, len(self._lines) - 1 - start, folded, full])
+
+    def toggle_blocks(self) -> bool:
+        """Show every block's other form; True when anything on screen changed."""
+        self.expanded = not self.expanded
+        if not self._blocks:
+            return False
+        shift = 0
+        for block in self._blocks:
+            block[0] += shift
+            start, count, folded, full = block
+            lines = _parse_lines(full if self.expanded else folded)
+            self._lines[start : start + count] = lines
+            shift += len(lines) - count
+            block[1] = len(lines)
+        self._dirty_from = min(self._dirty_from, self._blocks[0][0])
+        self._tail = None
+        self._sel_anchor = self._sel_point = None  # line numbers moved
+        return True
 
     def append(self, text: str) -> None:
         if not text:
@@ -160,29 +408,36 @@ class _TranscriptControl(UIControl):
             if not text:
                 return
         text = text.replace("\r\n", "\n").replace("\r", "")
-        parts = text.split("\n")
-        first_idx = len(self._raw_lines) - 1
-        self._raw_lines[-1] += parts[0]
-        self._parsed_lines[-1] = _parse_ansi_line(self._raw_lines[-1])
-        self._dirty_from = min(self._dirty_from, first_idx)
-        for part in parts[1:]:
-            self._raw_lines.append(part)
-            self._parsed_lines.append(_parse_ansi_line(part))
-        if len(self._raw_lines) > MAX_LOGICAL_LINES:
+        open_index = len(self._lines) - 1
+        for style, chunk in _runs(text):
+            for n, raw in enumerate(chunk.split("\n")):
+                if n:
+                    self._lines.append([])
+                    self._chars = 0
+                if raw:
+                    part = _expand_tabs(raw, self._chars) if "\t" in raw else raw
+                    self._lines[-1].append((style, part))
+                    self._chars += cell_width(part)
+        self._dirty_from = min(self._dirty_from, open_index)
+        if len(self._lines) > MAX_LOGICAL_LINES:
             drop = _TRIM_BATCH
-            del self._raw_lines[:drop]
-            del self._parsed_lines[:drop]
+            del self._lines[:drop]
             self._wrapped_cache = []
             self._visual_offsets = []
             self._visual_lines = []
             self._dirty_from = 0
+            self._tail = None
+            for block in self._blocks:
+                block[0] -= drop
+            self._blocks = [block for block in self._blocks if block[0] >= 0]
+            self._sel_anchor = self._sel_point = None  # line numbers moved
             if not self.follow:
                 self.scroll_top = max(0, self.scroll_top - drop)
 
     def _displayed_logical_count(self) -> int:
-        if len(self._raw_lines) > 1 and self._raw_lines[-1] == "":
-            return len(self._raw_lines) - 1
-        return len(self._raw_lines)
+        if len(self._lines) > 1 and not self._lines[-1]:
+            return len(self._lines) - 1
+        return len(self._lines)
 
     def _sync_wrap(self, width: int) -> None:
         width = max(1, width)
@@ -193,9 +448,25 @@ class _TranscriptControl(UIControl):
             self._visual_offsets = []
             self._visual_lines = []
             self._dirty_from = 0
+            self._tail = None
 
         dirty = min(self._dirty_from, len(self._wrapped_cache), count)
-        if dirty < len(self._wrapped_cache):
+        tail = self._tail
+        if (
+            tail is not None
+            and dirty == tail[0] == len(self._wrapped_cache) - 1
+            and tail[0] < count
+            and self._visual_lines
+        ):
+            # Only the open line grew: wrap its new runs where the last frame stopped.
+            index, done, col = tail
+            line = self._lines[index]
+            before = len(self._visual_lines)
+            col = _wrap_into(self._visual_lines, col, line[done:], width)
+            self._wrapped_cache[index].extend(self._visual_lines[before:])
+            self._tail = (index, len(line), col)
+            dirty = index + 1
+        elif dirty < len(self._wrapped_cache):
             cut = self._visual_offsets[dirty]
             del self._visual_lines[cut:]
             del self._wrapped_cache[dirty:]
@@ -207,14 +478,17 @@ class _TranscriptControl(UIControl):
 
         for i in range(dirty, count):
             self._visual_offsets.append(len(self._visual_lines))
-            wrapped = _wrap_fragments(self._parsed_lines[i], width)
+            wrapped: list[StyleAndTextTuples] = [[]]
+            col = _wrap_into(wrapped, 0, self._lines[i], width)
             self._wrapped_cache.append(wrapped)
             self._visual_lines.extend(wrapped)
+            self._tail = (i, len(self._lines[i]), col) if i == len(self._lines) - 1 else None
 
         if not self._visual_lines:
             self._visual_lines = [[]]
         self._dirty_from = count
-        self.total_visual_lines = len(self._visual_lines)
+        self._live_lines = _wrap_fragments(list(self._live), width) if self._live else []
+        self.total_visual_lines = len(self._visual_lines) + len(self._live_lines)
 
     def scroll_by(self, delta: int) -> bool:
         max_top = self.max_scroll
@@ -264,24 +538,140 @@ class _TranscriptControl(UIControl):
         else:
             self.scroll_top = max(0, min(self.scroll_top, max_top))
         visual = self._visual_lines
-        total = len(visual)
+        live = self._live_lines
+        known = len(visual)
+        total = known + len(live)
         cursor_y = min(self.scroll_top, total - 1)
+        width = self.last_width
+        sel = self._normalized_selection()
+
+        def get_line(i: int) -> StyleAndTextTuples:
+            line = visual[i] if i < known else live[i - known]
+            if sel is not None and sel[0] <= i <= sel[2]:
+                return _mark_selection(line, i, sel)
+            if line and FILL in line[-1][0]:  # a tinted line runs to the edge
+                used = sum(cell_width(fragment[1]) for fragment in line)
+                if used < width:
+                    return [*line, (line[-1][0], " " * (width - used))]
+            return line
+
         return UIContent(
-            get_line=lambda i: visual[i],
+            get_line=get_line,
             line_count=total,
             cursor_position=Point(x=0, y=cursor_y),
             show_cursor=False,
         )
 
+    # -- mouse drag selection ----------------------------------------------------------
+
+    def _row_content(self, visual_row: int) -> tuple[int, str]:
+        """A visual row as (its logical line, plain text). Rows of a wrapped logical
+        line share its index; the still-streaming line counts as one logical line."""
+        known = len(self._visual_lines)
+        if visual_row < known:
+            logical = bisect_right(self._visual_offsets, visual_row) - 1
+            plain = "".join(frag[1] for frag in self._visual_lines[visual_row])
+            return max(logical, 0), plain
+        row = min(visual_row - known, len(self._live_lines) - 1)
+        plain = "".join(frag[1] for frag in self._live_lines[row]) if row >= 0 else ""
+        return len(self._lines), plain
+
+    def _normalized_selection(self) -> tuple[int, int, int, int] | None:
+        """The selection as (first row, first col, last row, last col), None when
+        there is none or it is empty."""
+        if self._sel_anchor is None or self._sel_point is None:
+            return None
+        a, b = sorted((self._sel_anchor, self._sel_point))
+        if a == b:
+            return None
+        return a[0], a[1], b[0], b[1]
+
+    def selection_text(self) -> str:
+        """The selected text, plain: no colours, no box frame. Visual rows of one
+        wrapped logical line join without a newline; separate logical lines with one."""
+        sel = self._normalized_selection()
+        if sel is None:
+            return ""
+        r1, c1, r2, c2 = sel
+        rows: list[str] = []
+        prev_logical = -1
+        for r in range(r1, r2 + 1):
+            logical, plain = self._row_content(r)
+            if r > r1 and logical != prev_logical:
+                rows.append("\n")
+            prev_logical = logical
+            lo = min(c1, len(plain)) if r == r1 else 0
+            hi = min(c2, len(plain)) if r == r2 else len(plain)
+            rows.append(plain[lo:hi])
+        return "".join(rows).translate(_NO_FRAME).rstrip()
+
     @override
     def mouse_handler(self, mouse_event: MouseEvent) -> NotImplementedOrNone:
-        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+        kind = mouse_event.event_type
+        if kind == MouseEventType.SCROLL_UP:
             self.scroll_by(-_WHEEL_LINES)
             return None
-        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+        if kind == MouseEventType.SCROLL_DOWN:
             self.scroll_by(_WHEEL_LINES)
             return None
+        pos = (mouse_event.position.y, mouse_event.position.x)
+        if kind == MouseEventType.MOUSE_DOWN:
+            if mouse_event.button in (MouseButton.LEFT, MouseButton.UNKNOWN):
+                self._sel_anchor = self._sel_point = pos
+                return None
+            return NotImplemented
+        if kind == MouseEventType.MOUSE_MOVE:
+            if mouse_event.button == MouseButton.LEFT and self._sel_anchor is not None:
+                self._sel_point = pos
+                return None  # repaint with the highlight
+            return NotImplemented
+        if kind == MouseEventType.MOUSE_UP:
+            if self._sel_anchor is None:
+                return NotImplemented
+            text = self.selection_text()
+            if text and self.on_copy is not None:
+                self.on_copy(text)
+            return None
         return NotImplemented
+
+
+_NO_FRAME = str.maketrans("", "", "╭╮╰╯─│")  # box frame chars are not text to copy
+
+
+def _mark_selection(
+    line: StyleAndTextTuples, row: int, sel: tuple[int, int, int, int]
+) -> StyleAndTextTuples:
+    """The fragments of ``line`` with the selected character range styled
+    ``class:selected`` — the highlight the drag paints."""
+    start = sel[1] if row == sel[0] else 0
+    end = sel[3] if row == sel[2] else 1 << 30
+    out: StyleAndTextTuples = []
+    pos = 0
+    for style, text, *_rest in line:
+        s = max(start - pos, 0)
+        e = min(end - pos, len(text))
+        if s > 0:
+            _extend(out, style, text[:s])
+        if e > s:
+            _extend(out, f"{style} class:selected".strip(), text[s:e])
+        if e < len(text):
+            _extend(out, style, text[e:])
+        pos += len(text)
+    return out
+
+
+class _QuietScrollbar(ScrollbarMargin):
+    """The scrollbar only when there is something to scroll: a full-height bar beside a
+    conversation that fits its window says nothing. Its column stays reserved, so the
+    text does not re-wrap when the bar appears."""
+
+    @override
+    def create_margin(
+        self, window_render_info: WindowRenderInfo, width: int, height: int
+    ) -> StyleAndTextTuples:
+        if window_render_info.content_height <= window_render_info.window_height:
+            return []
+        return super().create_margin(window_render_info, width, height)
 
 
 class _FullScreenTurnView:
@@ -331,38 +721,51 @@ class _FullScreenTurnView:
         yield
 
 
-def _build_style(color: bool) -> Style:
+_MENUS = {
+    # theme: (menu, current item, description, current description)
+    "dark": ("bg:#1f2335 fg:#c0caf5", "bold bg:#3d59a1 fg:#ffffff", "fg:#7c829c", "fg:#e0e6ff"),
+    "light": ("bg:#eef1f5 fg:#24292f", "bold bg:#2563c9 fg:#ffffff", "fg:#6e7781", "fg:#ffffff"),
+    "mid": ("bg:#303030 fg:#d0d0d0", "bold bg:#005f87 fg:#ffffff", "fg:#949494", "fg:#e4e4e4"),
+    "ansi": (
+        "bg:ansibrightblack fg:ansiwhite",
+        "bold bg:ansicyan fg:ansiblack",
+        "fg:ansigray",
+        "fg:ansiblack",
+    ),
+}
+
+
+def _build_style(color: bool, theme: Theme | None = None) -> Style:
     if not color:
         return Style.from_dict(
             {
-                "status-bar": "reverse",
-                "question-bar": "reverse",
-                "secret-bar": "reverse",
                 "completion-menu.completion.current": "reverse",
+                "question-bar": "bold",
+                "secret-bar": "bold",
+                "selected": "reverse",
             }
         )
+    theme = theme or Theme("ansi", 4)
+    t = theme.pt
+    menu, current, meta, meta_current = _MENUS.get(theme.name, _MENUS["mid"])
+    subtle = t("subtle").replace("fg:", "bg:") if "#" in t("subtle") else "bg:ansibrightblack"
     return Style.from_dict(
         {
-            "status-bar": "bg:#262626 fg:#e4e4e4",
-            "status-bar.model": "bold fg:#87d7ff",
-            "status-bar.dim": "fg:#9e9e9e",
-            "status-bar.activity": "bold fg:#ffd75f",
-            "status-bar.scroll": "bold fg:#ffaf5f",
-            "status-bar.allow": "bold fg:#ffd75f",
-            "status-bar.deny": "bold fg:#ff5f5f",
-            "prompt": "bold ansicyan",
-            "prompt.more": "fg:#8a8a8a",
-            "running-hint": "italic fg:#8a8a8a",
-            "question-bar": "bold bg:#5f4b00 fg:#ffffff",
-            "question-prompt": "bold fg:#ffd75f",
-            "secret-bar": "bold bg:#1c3d5a fg:#ffffff",
-            "secret-prompt": "bold fg:#87d7ff",
-            "completion-menu": "bg:#262626 fg:#d0d0d0",
-            "completion-menu.completion.current": "bold bg:#005f87 fg:#ffffff",
-            "completion-menu.meta.completion": "bg:#262626 fg:#9e9e9e",
-            "completion-menu.meta.completion.current": "bg:#005f87 fg:#e4e4e4",
-            "scrollbar.background": "bg:#1c1c1c",
-            "scrollbar.button": "bg:#585858",
+            "prompt": f"bold {t('accent')}",
+            "prompt.more": t("muted"),
+            "frame": t("subtle"),
+            "question-bar": f"bold {t('warning')}",
+            "question-prompt": f"bold {t('warning')}",
+            "secret-bar": f"bold {t('accent')}",
+            "secret-prompt": f"bold {t('accent')}",
+            "completion-menu": menu,
+            "completion-menu.completion": menu,
+            "completion-menu.completion.current": current,
+            "completion-menu.meta.completion": f"{menu} {meta}",
+            "completion-menu.meta.completion.current": f"{current} {meta_current}",
+            "scrollbar.background": "",
+            "scrollbar.button": subtle,
+            "selected": "reverse",
         }
     )
 
@@ -372,9 +775,12 @@ class FullScreenTui:
 
     Layout (top to bottom):
     1. Scrollable conversation pane (fills available height).
-    2. One-line status bar (model, project/branch, live activity, context/tokens, approval mode).
-    3. Input area pinned to the bottom (multiline prompt, inline question/approval, hidden secret,
-       or running hint), with floating ``CompletionsMenu`` and ``Ctrl+R`` ``SearchToolbar``.
+    2. The activity line: what the running turn does and for how long (blank between
+       turns), queued messages and how far the view is scrolled up.
+    3. The input box (multiline prompt, inline question/approval or hidden secret) with
+       the keys worth knowing set into its lower edge; a floating ``CompletionsMenu`` and
+       the ``Ctrl+R`` ``SearchToolbar``.
+    4. The status bar (model, project/branch, context fill, cost, turn time, approvals).
     """
 
     def __init__(
@@ -392,11 +798,16 @@ class FullScreenTui:
         model: str = "",
         provider: str = "",
         approval_mode: str = "ask",
+        splash: Splash | None = None,
+        theme: Theme | None = None,
+        legacy_glyphs: bool = False,
+        copy_to_clipboard: Callable[[str], str] | None = None,
     ) -> None:
         self._workspace = (workspace or Path.cwd()).resolve()
         self._home = home
         self._color = color
-        self._glyph = _glyphs(encoding or getattr(sys.stdout, "encoding", None))
+        self._theme = theme if theme is not None else Theme("ansi", 4 if color else 0)
+        self._glyph = _glyphs(encoding or getattr(sys.stdout, "encoding", None), legacy_glyphs)
         self._fallback_model = model
         self._fallback_provider = provider
         self._fallback_approval = approval_mode
@@ -414,9 +825,21 @@ class FullScreenTui:
 
         self._read_future: asyncio.Future[str] | None = None
         self._question_future: asyncio.Future[str] | None = None
+        self._paste_task: asyncio.Future[None] | None = None
+        self._closed = False  # _stop ran: reads after it get EOF, never a dead future
         self._queued_inputs: deque[str | BaseException] = deque()
+        self._copy_fn = copy_to_clipboard
+        self._pastes = PasteChunks()
+        self._paste_parts: list[str] = []  # a paste's pieces, joined on flush
+        self._paste_timer: asyncio.TimerHandle | None = None
+        self._large_ok: str | None = None  # the draft whose size the user confirmed
+        self._notice: tuple[str, float] | None = None  # (text, until) on the activity line
+        self._notice_timer: asyncio.TimerHandle | None = None
+        self._pending_osc52: list[str] = []  # sequences a copy queued for the terminal
+        self._copy_tasks: set[asyncio.Task[None]] = set()  # a selection copy in flight
 
         self._transcript = _TranscriptControl()
+        self._transcript.on_copy = self._copy_selection
 
         resolved_home = home or (history.parent if isinstance(history, Path) else None)
         base_completer = completer or build_completer(workspace=self._workspace, home=resolved_home)
@@ -438,16 +861,23 @@ class FullScreenTui:
             content=self._transcript,
             wrap_lines=False,
             get_vertical_scroll=lambda _w: self._transcript.scroll_top,
-            right_margins=[ScrollbarMargin(display_arrows=False)],
+            right_margins=[_QuietScrollbar(display_arrows=False)],
             always_hide_cursor=True,
         )
-        self._status_window = Window(
-            content=FormattedTextControl(self._status_bar_text, show_cursor=False),
-            height=1,
-            style="class:status-bar",
-            wrap_lines=False,
-            always_hide_cursor=True,
-        )
+
+        def line(text: Callable[[], StyleAndTextTuples]) -> Window:
+            return Window(
+                content=FormattedTextControl(text, show_cursor=False),
+                height=1,
+                wrap_lines=False,
+                always_hide_cursor=True,
+            )
+
+        self._activity_window = line(self._activity_text)
+        self._status_window = line(self._status_bar_text)
+        self._box_top = line(lambda: self._roles(box_top(self._width(), self._glyph)))
+        self._box_bottom = line(self._box_bottom_text)
+        left, right = box_sides(self._glyph)
         self._input_window = Window(
             content=BufferControl(
                 buffer=self._input_buffer,
@@ -474,35 +904,57 @@ class FullScreenTui:
             wrap_lines=False,
             get_line_prefix=lambda _ln, _wc: [("class:secret-prompt", self._secret_prompt)],
         )
-        self._question_banner = Window(
-            content=FormattedTextControl(self._question_banner_text, show_cursor=False),
-            height=1,
-            style="class:question-bar",
-            always_hide_cursor=True,
-        )
-        self._secret_banner = Window(
-            content=FormattedTextControl(self._secret_banner_text, show_cursor=False),
-            height=1,
-            style="class:secret-bar",
-            always_hide_cursor=True,
-        )
+        self._question_banner = line(self._question_banner_text)
+        self._secret_banner = line(self._secret_banner_text)
+        self._attach_window = line(self._attach_text)
 
         in_prompt = Condition(lambda: self._mode == "prompt")
         in_running = Condition(lambda: self._mode == "running")
         in_input = in_prompt | in_running
         in_question = Condition(lambda: self._mode == "question")
         in_secret = Condition(lambda: self._mode == "secret")
+        has_attach = Condition(
+            lambda: self._chat_app is not None and bool(self._chat_app.pending_images)
+        )
 
-        body = HSplit(
+        inside = HSplit(
             [
-                self._transcript_window,
-                self._status_window,
-                ConditionalContainer(self._search_toolbar, filter=is_searching),
-                ConditionalContainer(self._question_banner, filter=in_question),
-                ConditionalContainer(self._secret_banner, filter=in_secret),
                 ConditionalContainer(self._input_window, filter=in_input),
                 ConditionalContainer(self._answer_window, filter=in_question),
                 ConditionalContainer(self._secret_window, filter=in_secret),
+                ConditionalContainer(self._attach_window, filter=in_input & has_attach),
+            ]
+        )
+        box = HSplit(
+            [
+                self._box_top,
+                VSplit(
+                    [
+                        Window(
+                            FormattedTextControl([("class:frame", left)]),
+                            width=cell_width(left),
+                            dont_extend_width=True,
+                        ),
+                        inside,
+                        Window(
+                            FormattedTextControl([("class:frame", right)]),
+                            width=cell_width(right),
+                            dont_extend_width=True,
+                        ),
+                    ]
+                ),
+                self._box_bottom,
+            ]
+        )
+        body = HSplit(
+            [
+                self._transcript_window,
+                self._activity_window,
+                ConditionalContainer(self._search_toolbar, filter=is_searching),
+                ConditionalContainer(self._question_banner, filter=in_question),
+                ConditionalContainer(self._secret_banner, filter=in_secret),
+                box,
+                self._status_window,
             ]
         )
         root = FloatContainer(
@@ -522,10 +974,13 @@ class FullScreenTui:
             ],
         )
 
+        depth = {0: ColorDepth.DEPTH_1_BIT, 4: ColorDepth.DEPTH_4_BIT, 8: ColorDepth.DEPTH_8_BIT}
         self._app: Application[None] = Application(
             layout=Layout(root, focused_element=self._input_window),
-            style=_build_style(color),
-            color_depth=None if color else ColorDepth.DEPTH_1_BIT,
+            style=_build_style(color, self._theme),
+            color_depth=depth.get(self._theme.depth, ColorDepth.DEPTH_24_BIT)
+            if color
+            else ColorDepth.DEPTH_1_BIT,
             key_bindings=self._build_key_bindings(),
             full_screen=True,
             mouse_support=True,
@@ -534,10 +989,30 @@ class FullScreenTui:
             input=input,
             output=output,
         )
+        self._app.input = coalescing_input(self._app.input)
         self._app.ttimeoutlen = 0.12
+        if splash is not None:
+            self._adopt(splash)
 
         self._app_task: asyncio.Task[None] | None = None
         self._active: bool = False
+
+    def _adopt(self, splash: Splash) -> None:
+        """The start-up frame (karox6.splash) has already put the terminal into the
+        alternate screen and painted what the first frame shows. Entering again would
+        make some terminals save the cursor a second time (and put it back in the wrong
+        place on exit), so the app's own "enter" only moves the cursor home; the first
+        frame then redraws the same cells."""
+        output = self._app.output
+        enter = output.enter_alternate_screen
+
+        def enter_once() -> None:
+            if splash.take_over():
+                output.cursor_goto(0, 0)
+            else:
+                enter()
+
+        output.enter_alternate_screen = enter_once  # type: ignore[method-assign]
 
     # -- public properties & wiring ----------------------------------------------------
 
@@ -569,7 +1044,38 @@ class FullScreenTui:
         self._chat_app = chat_app
         self.invalidate()
 
+    def columns(self) -> int:
+        """Cells a line of the conversation can take (the scrollbar column left out)."""
+        return max(self._app.output.get_size().columns - 1, 20)
+
+    def _paste_done(self, task: asyncio.Future[None]) -> None:
+        self._paste_task = None
+        if not task.cancelled() and task.exception() is not None:
+            self.write(f"  cannot read the clipboard: {task.exception()}\n")
+
+    def prefill(self, text: str) -> None:
+        """Put ``text`` into the input line, cursor at its end (an undone message comes
+        back for editing); text the user has already typed is not replaced."""
+        if not self._input_buffer.text:
+            self._input_buffer.set_document(Document(text, len(text)), bypass_readonly=True)
+            self.invalidate()
+
+    def copy_to_clipboard(self, text: str) -> str:
+        """How the selection and ``/copy`` copy: the injected writer, or the real
+        system clipboard (OSC 52 goes out on the next repaint, not into the screen
+        layout, so it is queued for ``invalidate`` to write raw)."""
+        if self._copy_fn is not None:
+            return self._copy_fn(text)
+        from karox6.clipboard import copy_text
+
+        return copy_text(text, emit_osc52=self._pending_osc52.append)
+
     def invalidate(self) -> None:
+        if self._pending_osc52:
+            seqs, self._pending_osc52 = self._pending_osc52, []
+            for seq in seqs:
+                self._app.output.write_raw(seq)
+            self._app.output.flush()
         if self._app.is_running and not self._app.is_done:
             self._app.invalidate()
 
@@ -612,6 +1118,11 @@ class FullScreenTui:
         await self._stop()
 
     async def _stop(self) -> None:
+        self._closed = True  # a read arriving after this point gets EOF, not a dead future
+        if self._paste_timer is not None:
+            self._paste_timer.cancel()
+            self._paste_timer = None
+            self._paste_parts = []
         self._fail_pending(EOFError())
         try:
             task = self._app_task
@@ -656,6 +1167,8 @@ class FullScreenTui:
     # -- ChatApp I/O callables ---------------------------------------------------------
 
     async def read_line(self, prompt: str) -> str:
+        if self._closed:
+            raise EOFError
         self._prompt_text = prompt
         self._set_mode("prompt")
         if self._queued_inputs:
@@ -676,7 +1189,7 @@ class FullScreenTui:
                 self._read_future = None
 
     async def read_answer(self, prompt: str) -> str:
-        if self._app_task is not None and self._app_task.done():
+        if self._closed or (self._app_task is not None and self._app_task.done()):
             raise EOFError
         self._question_prompt = prompt.lstrip() or "> "
         self._answer_buffer.reset()
@@ -693,7 +1206,7 @@ class FullScreenTui:
             self._set_mode("running" if self._turn_active else "prompt")
 
     async def read_secret(self, prompt: str) -> str:
-        if self._app_task is not None and self._app_task.done():
+        if self._closed or (self._app_task is not None and self._app_task.done()):
             raise EOFError
         self._secret_prompt = prompt.lstrip() or "Secret: "
         self._secret_buffer.reset()
@@ -754,14 +1267,40 @@ class FullScreenTui:
         lines = text.split("\n")
         prefix = self._prompt_text
         more = self._more_text
-        if self._color:
-            rendered = [f"\x1b[1;36m{prefix}\x1b[0m{_plain_text(lines[0])}"]
-            rendered.extend(f"\x1b[2m{more}\x1b[0m{_plain_text(line)}" for line in lines[1:])
+        paint = self._chat_app.paint if self._chat_app is not None else None
+        if self._color and paint is not None:
+            rendered = [paint("accent+bold", prefix) + paint("user", _plain_text(lines[0]))]
+            rendered.extend(
+                paint("muted", more) + paint("user", _plain_text(line)) for line in lines[1:]
+            )
         else:
             rendered = [f"{prefix}{_plain_text(lines[0])}"]
             rendered.extend(f"{more}{_plain_text(line)}" for line in lines[1:])
         self._transcript.scroll_to_bottom()
-        self.write("\n".join(rendered) + "\n")
+        self.write("\n" + "\n".join(rendered) + "\n")
+
+    def write_block(self, folded: str, full: str) -> None:
+        """Lines that Ctrl+O switches between their short and their full form."""
+        self._transcript.append_block(folded, full)
+        self.invalidate()
+
+    def set_live(self, text: str) -> None:
+        """The line of the answer still being streamed (replaced as it grows)."""
+        self._transcript.set_live(text)
+        self.invalidate()
+
+    def _width(self) -> int:
+        return max(self._app.output.get_size().columns, 1)
+
+    def _roles(self, fragments: list[tuple[str, str]]) -> StyleAndTextTuples:
+        """(colour roles, text) pieces as prompt_toolkit fragments of this theme."""
+        if not self._color:
+            return [("", text) for _, text in fragments]
+        pt = self._theme.pt
+        return [
+            (" ".join(pt(role) for role in roles.split("+") if role), text)
+            for roles, text in fragments
+        ]
 
     def _snapshot(self) -> StatusSnapshot:
         if self._chat_app is not None:
@@ -782,76 +1321,132 @@ class FullScreenTui:
         )
 
     def _status_bar_text(self) -> StyleAndTextTuples:
-        snap = self._snapshot()
-        dot = self._glyph["dot"]
-        left: StyleAndTextTuples = [
-            ("class:status-bar", " "),
-            ("class:status-bar.model", _plain_text(snap.model)),
-        ]
-        proj = _plain_text(snap.workspace_name)
-        if snap.branch:
-            proj = f"{proj} ({_plain_text(snap.branch)})"
-        left.append(("class:status-bar.dim", f"{dot}{proj}"))
+        return self._roles(status_bar_fragments(self._snapshot(), self._glyph, self._width()))
 
-        activity = snap.activity
-        if not activity and self._turn_status_fn is not None:
-            activity = self._turn_status_fn()
-        if snap.running and activity:
-            left.append(("class:status-bar.dim", dot))
-            left.append(("class:status-bar.activity", _plain_text(activity)))
-        elif not self._transcript.follow and self._transcript.lines_below > 0:
-            left.append(("class:status-bar.dim", dot))
-            left.append(
-                (
-                    "class:status-bar.scroll",
-                    f"scrolled +{self._transcript.lines_below}L (End)",
-                )
-            )
+    def _activity_text(self) -> StyleAndTextTuples:
+        """What the turn does (spinner, phase, time, how to stop it) on the left; queued
+        messages and how far the view is scrolled up on the right."""
+        g = self._glyph
+        dot = g["dot"]
+        left: list[tuple[str, str]] = []
+        if self._turn_active:
+            if self._chat_app is not None:
+                phase, elapsed = self._chat_app.activity()
+            else:
+                phase, elapsed = (self._turn_status_fn() if self._turn_status_fn else ""), 0.0
+            spin = g.get("spin", "|/-\\")
+            spinner = spin[int(elapsed * 10) % len(spin)]
+            left = [("", " "), ("accent", spinner), ("", " ")]
+            tail = [("muted", f"  {elapsed:.1f}s{dot}"), ("muted+bold", "esc"), ("muted", " stop")]
+            room = self._width() - 6 - sum(cell_width(t) for _, t in tail) - 24
+            left += [("", clip_cells(_plain_text(phase), max(room, 10))), *tail]
+        right: list[tuple[str, str]] = []
+        queued = sum(1 for item in self._queued_inputs if isinstance(item, str))
+        if queued and self._turn_active:
+            right += [("warning", f"{queued} queued"), ("muted", " (esc clears)")]
+        below = 0 if self._transcript.follow else self._transcript.lines_below
+        if below > 0:
+            if right:
+                right.append(("muted", dot))
+            right += [("warning", f"{g.get('up', '^')} {below} lines below"), ("muted", " (end)")]
+        if self._notice is not None and time.monotonic() < self._notice[1]:
+            if right:
+                right.append(("muted", dot))
+            right.append(("success", self._notice[0]))
+        if right:
+            used = sum(cell_width(t) for _, t in left) + sum(cell_width(t) for _, t in right)
+            left.append(("", " " * max(self._width() - used - 1, 1)))
+            left += right
+        return self._roles(left)
 
-        right: StyleAndTextTuples = []
-        if snap.context_window:
-            ctx = f"ctx {_k(snap.context_used)}/{_k(snap.context_window)} ({snap.context_pct}%)"
-            tok = f"{_k(snap.total_tokens)} tok{dot}{ctx}" if snap.total_tokens else ctx
-            right.append(("class:status-bar.dim", tok + dot))
-        mode_style = {
-            "allow": "class:status-bar.allow",
-            "deny": "class:status-bar.deny",
-        }.get(snap.approval_mode, "class:status-bar.dim")
-        right.append((mode_style, f"approve:{snap.approval_mode}"))
-        right.append(("class:status-bar", " "))
-
-        width = self._app.output.get_size().columns
-        left_w = fragment_list_width(left)
-        right_w = fragment_list_width(right)
-        gap = width - left_w - right_w
-        if gap >= 2:
-            return [*left, ("class:status-bar", " " * gap), *right]
-        return [*left, ("class:status-bar.dim", dot), *right]
+    def _box_bottom_text(self) -> StyleAndTextTuples:
+        return self._roles(box_bottom(self._width(), self._glyph, key_hints(self._mode)))
 
     def _question_banner_text(self) -> StyleAndTextTuples:
         dot = self._glyph["dot"]
+        warn = self._glyph.get("warn", "!")
         if "run it?" in self._question_prompt.lower():
             return [
                 (
                     "class:question-bar",
-                    f" Approval required — y: run{dot}n: deny{dot}a: always{dot}Esc: stop turn",
+                    f" {warn} Approval required: y run{dot}n deny{dot}a always{dot}esc stop turn",
                 )
             ]
-        return [
-            (
-                "class:question-bar",
-                f" Input required — Enter: confirm{dot}Esc / Ctrl+C: cancel",
-            )
-        ]
+        return [("class:question-bar", f" {warn} Input required: enter confirm{dot}esc cancel")]
 
     def _secret_banner_text(self) -> StyleAndTextTuples:
         dot = self._glyph["dot"]
-        return [
-            (
-                "class:secret-bar",
-                f" Hidden input (not echoed) — Enter: submit{dot}Esc / Ctrl+C: cancel",
+        return [("class:secret-bar", f" Hidden input (not echoed): enter submit{dot}esc cancel")]
+
+    def _attach_text(self) -> StyleAndTextTuples:
+        """The pictures waiting to go with the next message, inside the input box."""
+        from karox6.chat_features import picture_chip
+
+        pend = self._chat_app.pending_images if self._chat_app is not None else []
+        chips = "  ".join(picture_chip(path, i + 1) for i, path in enumerate(pend))
+        return self._roles([("muted", f" {chips}")])
+
+    def _set_notice(self, text: str, seconds: float = 3.0) -> None:
+        """A short message on the right of the activity line ("copied 42 chars")."""
+        self._notice = (text, time.monotonic() + seconds)
+        if self._notice_timer is not None:
+            self._notice_timer.cancel()
+        with contextlib.suppress(RuntimeError):  # a loop might not be running in a test
+            self._notice_timer = asyncio.get_running_loop().call_later(
+                seconds + 0.05, self.invalidate
             )
-        ]
+        self.invalidate()
+
+    def _copy_selection(self, text: str) -> None:
+        """Drag released with text under it: put it on the clipboard off the event
+        loop (a Windows clipboard call can block on another app's window)."""
+
+        async def go() -> None:
+            try:
+                how = await asyncio.to_thread(self.copy_to_clipboard, text)
+            except Exception as exc:
+                self._set_notice(f"copy failed: {exc}", 4.0)
+            else:
+                via = " via OSC 52" if how == "osc52" else ""
+                self._set_notice(f"copied {len(text)} chars{via}")
+
+        task = asyncio.ensure_future(go())
+        self._copy_tasks.add(task)
+        task.add_done_callback(self._copy_tasks.discard)
+
+    def _paste_from_clipboard(self) -> None:
+        """Ctrl+V, or a bracketed paste that arrived empty: text goes into the input
+        like any paste; a picture attaches to the next message. The Windows Terminal
+        sends nothing for an image-only clipboard, so the empty case looks there."""
+        if self._paste_task is not None or self._chat_app is None:
+            return
+        task = asyncio.ensure_future(self._clipboard_text_or_image())
+        self._paste_task = task
+        task.add_done_callback(self._paste_done)
+
+    async def _clipboard_text_or_image(self) -> None:
+        from karox6.clipboard import grab_text
+
+        text = await asyncio.to_thread(grab_text)
+        if text:
+            shown = self._pastes.offer(text.replace("\r\n", "\n").replace("\r", "\n"))
+            self._input_buffer.insert_text(shown)
+            self.invalidate()
+            return
+        await self._chat_app.paste_image()  # type: ignore[union-attr]
+
+    def _flush_paste(self) -> None:
+        """Insert the paste pieces gathered so far — run by the quiet timer, or
+        early when a keypress needs the input to hold the paste already."""
+        if self._paste_timer is not None:
+            self._paste_timer.cancel()
+            self._paste_timer = None
+        parts, self._paste_parts = self._paste_parts, []
+        if not parts:
+            return
+        data = "".join(parts)
+        self._input_buffer.insert_text(self._pastes.offer(data))
+        self.invalidate()
 
     # -- key bindings ------------------------------------------------------------------
 
@@ -895,6 +1490,11 @@ class FullScreenTui:
             if self._transcript.scroll_to_top():
                 event.app.invalidate()
 
+        @keys.add("c-o", eager=True)
+        def _toggle_output(event: KeyPressEvent) -> None:
+            self._transcript.toggle_blocks()
+            event.app.invalidate()
+
         @keys.add("end", filter=Condition(_end_should_scroll) & ~is_searching)
         def _end_jump_bottom(event: KeyPressEvent) -> None:
             if self._transcript.scroll_to_bottom():
@@ -909,7 +1509,7 @@ class FullScreenTui:
             self._queued_inputs.clear()
             if self._turn_interrupt_fn is not None:
                 self._turn_interrupt_fn()
-                event.app.invalidate()
+            event.app.invalidate()
 
         # -- inline question & secret dialogs --
 
@@ -991,9 +1591,40 @@ class FullScreenTui:
             del event
             self._input_buffer.insert_text("\n")
 
+        @keys.add("escape", "v", filter=in_prompt & ~is_searching)
+        def _alt_v(event: KeyPressEvent) -> None:
+            del event
+            if self._chat_app is not None and self._paste_task is None:
+                # Reading the clipboard must not block typing.
+                task = asyncio.ensure_future(self._chat_app.paste_image())
+                self._paste_task = task
+                task.add_done_callback(self._paste_done)
+
+        @keys.add(Keys.BracketedPaste, filter=in_input & ~is_searching)
+        def _bracketed_paste(event: KeyPressEvent) -> None:
+            data = (event.data or "").replace("\r\n", "\n").replace("\r", "\n")
+            if not data:
+                # The Windows Terminal sends an empty bracketed paste when the
+                # clipboard holds a picture only: Ctrl+V then means "attach it".
+                self._paste_from_clipboard()
+                return
+            # A console without bracketed paste delivers a paste as several
+            # bursts: gather the pieces briefly and insert them as one.
+            self._paste_parts.append(data)
+            if self._paste_timer is not None:
+                self._paste_timer.cancel()
+            with contextlib.suppress(RuntimeError):  # a loop might not run in a test
+                self._paste_timer = asyncio.get_running_loop().call_later(0.1, self._flush_paste)
+
+        @keys.add("c-v", filter=in_input & ~is_searching)
+        def _ctrl_v(event: KeyPressEvent) -> None:
+            del event
+            self._paste_from_clipboard()
+
         @keys.add("c-j", filter=in_input & ~is_searching)
         def _ctrl_j(event: KeyPressEvent) -> None:
             del event
+            self._flush_paste()
             self._input_buffer.insert_text("\n")
 
         @keys.add("tab", filter=in_prompt & ~is_searching)
@@ -1014,26 +1645,43 @@ class FullScreenTui:
 
         @keys.add("enter", filter=in_input & ~is_searching)
         def _enter(event: KeyPressEvent) -> None:
-            del event
+            self._flush_paste()  # an Enter lands after the paste it follows
             buf = self._input_buffer
-            state = buf.complete_state
-            if state is not None and state.current_completion is not None:
-                buf.apply_completion(state.current_completion)
-                return
             doc = buf.document
             if doc.text_before_cursor.endswith("\\") and not doc.text_after_cursor:
                 buf.delete_before_cursor(1)
                 buf.insert_text("\n")
                 return
-            text = buf.text
+            if pasted_line_end(event):
+                buf.insert_text("\n")
+                return
+            state = buf.complete_state
+            if state is not None and state.current_completion is not None:
+                buf.apply_completion(state.current_completion)
+                return
+            shown = buf.text
+            text = self._pastes.expand(shown)  # placeholders become their payloads
+            size = len(text.encode("utf-8"))
+            if size > WARN_BYTES and shown != self._large_ok:
+                self._large_ok = shown
+                self.write(
+                    f"  ! this message is {size / (1024 * 1024):.1f} MB — "
+                    "a model sees every byte. Enter again sends it.\n"
+                )
+                return
+            if text != shown:
+                buf.set_document(Document(text, len(text)), bypass_readonly=True)
             if text.strip():
                 buf.append_to_history()
             buf.cancel_completion()
             buf.reset()
+            self._pastes.clear()
+            self._large_ok = None
             if self._read_future is not None and not self._read_future.done():
-                self._echo_user_message(text)
+                self._echo_user_message(shown)
                 self._read_future.set_result(text)
-            else:
+            elif text.strip():
                 self._queued_inputs.append(text)
+                self.invalidate()  # the status bar counts what is waiting
 
         return keys

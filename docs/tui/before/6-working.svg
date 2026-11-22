@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="856" height="592" font-family="Cascadia Mono, Consolas, monospace" font-size="14"><rect width="100%" height="100%" fill="#0c0c0c"/>
+<text x="8.0" y="22" fill="#cccccc" xml:space="preserve">╭─ </text>
+<text x="33.2" y="22" fill="#cccccc" font-weight="bold" xml:space="preserve">KaroX 6.0.0.dev39</text>
+<text x="176.0" y="22" fill="#cccccc" xml:space="preserve"> ────────────────────────────────────────────────╮                              </text>
+<text x="8.0" y="40" fill="#cccccc" xml:space="preserve">│ model      demo-model · openai-chat                                │                              </text>
+<text x="8.0" y="58" fill="#cccccc" xml:space="preserve">│ project    C:\Users\ekono\AppData\Local\Temp\tmpvosa4bjz\ws · main │                              </text>
+<text x="8.0" y="76" fill="#cccccc" xml:space="preserve">│ approvals  ask  (/approve to change)                               │                              </text>
+<text x="8.0" y="94" fill="#cccccc" xml:space="preserve">│                                                                    │                              </text>
+<text x="8.0" y="112" fill="#cccccc" xml:space="preserve">│            / commands · @ attach a file · Alt+Enter new line       │                              </text>
+<text x="8.0" y="130" fill="#cccccc" xml:space="preserve">│            Esc stops the agent · /help · Ctrl+D quits              │                              </text>
+<text x="8.0" y="148" fill="#cccccc" xml:space="preserve">╰────────────────────────────────────────────────────────────────────╯                              </text>
+<text x="8.0" y="166" fill="#cccccc" xml:space="preserve">Type a task to start.                                                                               </text>
+<text x="8.0" y="184" fill="#3a96dd" font-weight="bold" xml:space="preserve">› </text>
+<text x="24.8" y="184" fill="#cccccc" xml:space="preserve">run the tests                                                                                     </text>
+<rect x="8.0" y="548" width="8.4" height="18" fill="#262626"/>
+<rect x="16.4" y="548" width="84.0" height="18" fill="#262626"/>
+<text x="16.4" y="562" fill="#87d7ff" font-weight="bold" xml:space="preserve">demo-model</text>
+<rect x="100.4" y="548" width="126.0" height="18" fill="#262626"/>
+<text x="100.4" y="562" fill="#9e9e9e" xml:space="preserve"> · ws (main) · </text>
+<rect x="226.4" y="548" width="168.0" height="18" fill="#262626"/>
+<text x="226.4" y="562" fill="#ffd75f" font-weight="bold" xml:space="preserve">- 2.3s  Running bash</text>
+<rect x="394.4" y="548" width="58.8" height="18" fill="#262626"/>
+<rect x="453.2" y="548" width="378.0" height="18" fill="#262626"/>
+<text x="453.2" y="562" fill="#9e9e9e" xml:space="preserve">1.0k tok · ctx 1.0k/400.0k (0%) · approve:ask</text>
+<rect x="831.2" y="548" width="8.4" height="18" fill="#262626"/>
+<text x="8.0" y="580" fill="#3a96dd" font-weight="bold" xml:space="preserve">› </text>
+</svg>

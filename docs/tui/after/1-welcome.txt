@@ -1,0 +1,32 @@
+╭─ KaroX 6.0.0.dev40 ────────────────────────────────────────────────╮
+│ model      demo-model · openai-chat                                │
+│ project    ~\AppData\Local\Temp\tmpt01621_z\ws · main              │
+│ approvals  ask  (/approve to change)                               │
+│                                                                    │
+│            / commands · @ attach a file · Alt+Enter new line       │
+│            Esc stops the agent · Ctrl+O tool output · Ctrl+D quits │
+╰────────────────────────────────────────────────────────────────────╯
+Type a task to start.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+╭─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ›                                                                                               │
+╰─────────────────── enter send · alt+enter new line · / commands · @ files · ctrl+o tool output ─╯
+ demo-model · ws (main)                                               ctx ▱▱▱▱▱ 0% · approvals ask

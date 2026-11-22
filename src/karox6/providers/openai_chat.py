@@ -12,15 +12,19 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from karox6.core.messages import Message, ToolCall, Usage
+from karox6.core.messages import Message, ToolCall, Usage, image_note, image_payload
 from karox6.providers.base import (
+    STREAM_IDLE_S,
     Delta,
     DeltaCallback,
     ErrorCode,
     ModelRequest,
     ModelResponse,
     ProviderError,
+    StreamStalled,
     is_empty,
+    retry_after_seconds,
+    stream_lines,
 )
 
 if TYPE_CHECKING:
@@ -33,6 +37,13 @@ _CONTEXT_HINTS = (
     "maximum context",
     "too many tokens",
     "context window",
+    # the same refusal in other servers' words
+    "prompt is too long",  # Anthropic: prompt is too long: N tokens > M maximum
+    "exceed context limit",  # Anthropic: input length and `max_tokens` exceed context limit
+    "exceeds the maximum number of tokens",  # Gemini: The input token count (N) exceeds ...
+    "maximum prompt length",  # xAI: This model's maximum prompt length is N but ...
+    "exceeds the available context size",  # llama.cpp server
+    "input is too long",  # Bedrock: Input is too long for requested model.
 )
 # In a 5xx body only explicit overflow wording counts ("failed to load context window
 # configuration" is a gateway fault to retry, not an overflow).
@@ -43,6 +54,31 @@ _OVERFLOW_HINTS = (
     "exceeds the context",
     "exceed the context",
     "context length exceeded",
+    "prompt is too long",
+    "exceed context limit",
+    "maximum prompt length",
+    "exceeds the available context size",
+    "exceeds the maximum number of tokens",
+)
+
+
+# (what to change, the field the server's error names)
+_QUIRKS = (
+    ("max_completion_tokens", "max_completion_tokens"),
+    ("no_temperature", "temperature"),
+    ("no_stream_options", "stream_options"),
+    ("no_reasoning_effort", "reasoning_effort"),
+)
+_REFUSAL_WORDS = (
+    "unsupported",
+    "not supported",
+    "does not support",
+    "unknown",
+    "unrecognized",
+    "unexpected",
+    "extra inputs",
+    "not permitted",
+    "only the default",
 )
 
 
@@ -54,6 +90,10 @@ class OpenAIChatProvider:
     stream: bool = True
     timeout_s: float = 900.0
     headers: dict[str, str] = field(default_factory=dict)
+    stream_idle_s: float | None = STREAM_IDLE_S  # silence allowed once the answer flows
+    # What this server turned out not to accept (learned from its 400 answers, see
+    # ``_learn``): the request is then built without it for the rest of the session.
+    quirks: set[str] = field(default_factory=set)
     _client: httpx.AsyncClient | None = None
 
     def _http(self) -> httpx.AsyncClient:
@@ -63,6 +103,22 @@ class OpenAIChatProvider:
             timeout = httpx.Timeout(self.timeout_s, connect=30.0)
             self._client = httpx.AsyncClient(timeout=timeout)
         return self._client
+
+    def _learn(self, exc: ProviderError) -> bool:
+        """A request field this server refuses, read from its error: True when the next
+        request will differ (so it is worth sending again). OpenAI's reasoning models
+        want ``max_completion_tokens`` instead of ``max_tokens`` and no ``temperature``;
+        some compatible servers reject ``stream_options`` or ``reasoning_effort``."""
+        if exc.code != "bad_request" or exc.status not in (400, 422):
+            return False
+        text = str(exc).lower()
+        if not any(word in text for word in _REFUSAL_WORDS):
+            return False
+        for quirk, field_name in _QUIRKS:
+            if quirk not in self.quirks and field_name in text:
+                self.quirks.add(quirk)
+                return True
+        return False
 
     async def aclose(self) -> None:
         if self._client is not None:
@@ -87,19 +143,34 @@ class OpenAIChatProvider:
                 }
                 for t in request.tools
             ]
+        quirks = self.quirks
         if request.max_output_tokens:
-            body["max_tokens"] = request.max_output_tokens
-        if request.temperature is not None:
+            name = "max_completion_tokens" if "max_completion_tokens" in quirks else "max_tokens"
+            body[name] = request.max_output_tokens
+        if request.temperature is not None and "no_temperature" not in quirks:
             body["temperature"] = request.temperature
-        if request.reasoning_effort:
+        if request.reasoning_effort and "no_reasoning_effort" not in quirks:
             body["reasoning_effort"] = request.reasoning_effort
         if self.stream:
             body["stream"] = True
-            body["stream_options"] = {"include_usage": True}
+            if "no_stream_options" not in quirks:
+                body["stream_options"] = {"include_usage": True}
         body.update(request.extra_body)
         return body
 
     async def complete(
+        self, request: ModelRequest, on_delta: DeltaCallback | None = None
+    ) -> ModelResponse:
+        while True:
+            try:
+                return await self._attempt(request, on_delta)
+            except ProviderError as exc:
+                # A field the server refuses is dropped (or renamed) and the request
+                # sent again at once: nothing was generated or billed for a 400.
+                if not self._learn(exc):
+                    raise
+
+    async def _attempt(
         self, request: ModelRequest, on_delta: DeltaCallback | None = None
     ) -> ModelResponse:
         import httpx
@@ -117,11 +188,13 @@ class OpenAIChatProvider:
                         await resp.aread()
                         raise _http_error(resp.status_code, resp.text, resp.headers)
                     try:
-                        async for line in resp.aiter_lines():
+                        async for line in stream_lines(
+                            resp, self.stream_idle_s, lambda: acc.flowing
+                        ):
                             acc.feed_sse_line(line, on_delta)
                             if acc.done:
                                 break  # a reset after [DONE] must not discard the reply
-                    except (httpx.TimeoutException, httpx.TransportError):
+                    except (httpx.TimeoutException, httpx.TransportError, StreamStalled):
                         # The connection dropped after the reply finished (finish reason
                         # and usage arrived, only [DONE] is missing): keep it rather than
                         # pay for the whole request again. Without usage the max_tokens
@@ -181,6 +254,16 @@ def to_wire(m: Message) -> dict[str, Any]:
         if m.reasoning:
             out[str(m.extra.get("reasoning_field") or "reasoning_content")] = m.reasoning
         return out
+    if m.images:
+        parts: list[dict[str, Any]] = [{"type": "text", "text": m.content}] if m.content else []
+        for image in m.images:
+            payload = image_payload(image)
+            if payload is None:
+                parts.append({"type": "text", "text": image_note(image)})
+            else:
+                url = f"data:{payload[0]};base64,{payload[1]}"
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+        return {"role": m.role, "content": parts}
     return {"role": m.role, "content": m.content}
 
 
@@ -203,6 +286,7 @@ class _Accumulator:
         self.usage_seen = False
         self.model: str | None = None
         self.done = False
+        self.flowing = False  # answer tokens (text or tool calls) have started to arrive
 
     def feed_sse_line(self, line: str, on_delta: DeltaCallback | None) -> None:
         line = line.strip()
@@ -232,6 +316,7 @@ class _Accumulator:
             delta = choice.get("delta") or {}
             text = delta.get("content")
             if isinstance(text, str) and text:
+                self.flowing = True
                 self.text.append(text)
                 if on_delta:
                     on_delta(Delta("text", text))
@@ -244,6 +329,7 @@ class _Accumulator:
                         on_delta(Delta("reasoning", thought))
                     break
             for part in delta.get("tool_calls") or []:
+                self.flowing = True
                 self._call_delta(part)
             if choice.get("finish_reason"):
                 self.finish_reason = choice["finish_reason"]
@@ -396,22 +482,27 @@ _QUOTA_HINTS = (
     "billing",
     "top up your balance",
     "credit balance is too low",
+    # an allowance per day: minutes of waiting do not bring it back
+    "daily limit",
+    "daily quota",
+    "per day",
+    "per-day",
+    "дневной лимит",
+    "суточный лимит",
 )
+# A "quota" refusal that names a short wait is a per-minute window in quota wording
+# (Gemini's free tier: "You exceeded your current quota ... Please retry in 23s").
+QUOTA_SHORT_WAIT_S = 120.0
 
 
 def _http_error(status: int, text: str, headers: Any) -> ProviderError:
     snippet = " ".join(text.split())[:500]
-    retry_after: float | None = None
-    raw_retry = headers.get("retry-after") if hasattr(headers, "get") else None
-    if raw_retry:
-        try:
-            retry_after = float(raw_retry)
-        except ValueError:
-            retry_after = None
+    retry_after = retry_after_seconds(headers, text)
     code: ErrorCode
     lowered = snippet.lower()
     if status in (402, 429) and any(hint in lowered for hint in _QUOTA_HINTS):
-        code = "quota"
+        short = retry_after is not None and retry_after <= QUOTA_SHORT_WAIT_S
+        code = "rate_limit" if status == 429 and short else "quota"
     elif status == 429:
         code = "rate_limit"
     elif status in (401, 403):

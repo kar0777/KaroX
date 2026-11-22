@@ -195,6 +195,33 @@ def test_http_errors(status, body, code):
         assert exc.value.retry_after == 2.0
 
 
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        "This model's maximum prompt length is 131072 but the request contains 144548 tokens.",
+        "the request exceeds the available context size, try increasing it",
+        "request (4390 tokens) exceeds the available context size (4096 tokens), try increasing it",
+        "Input is too long for requested model.",
+        "prompt is too long: 213000 tokens > 200000 maximum",
+        "input length and `max_tokens` exceed context limit: 196280 + 21333 > 200000",
+        "The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).",
+    ],
+)
+def test_a_context_overflow_in_other_servers_words(refusal):
+    # xAI, llama.cpp, Bedrock, Anthropic (twice) and Gemini behind an OpenAI-compatible route:
+    # each must lead to a smaller conversation, not to the end of the run.
+    with pytest.raises(ProviderError) as exc:
+        run_response(json.dumps({"error": {"message": refusal}}), status=400)
+    assert exc.value.code == "context_window"
+
+
+def test_a_gateway_500_wrapping_anthropics_overflow_is_not_retried_as_a_fault():
+    body = '{"error": {"message": "upstream: prompt is too long: 213000 tokens > 200000 maximum"}}'
+    with pytest.raises(ProviderError) as exc:
+        run_response(body, status=502)
+    assert exc.value.code == "context_window"
+
+
 def test_incomplete_stream():
     with pytest.raises(ProviderError) as exc:
         run_response("data: " + json.dumps(chunk({"content": "partial"})) + "\n\n")
@@ -405,6 +432,17 @@ def test_stream_error_with_a_string_code(error, code):
     with pytest.raises(ProviderError) as exc:
         run_response(sse({"error": error}))
     assert exc.value.code == code
+
+
+def test_a_bare_string_error_in_the_stream_that_names_an_overflow():
+    # Some routes send {"error": "<text>"} with no code or type (xAI through gRPC bridges).
+    refusal = "This model's maximum prompt length is 256000 but the request contains 300000 tokens."
+    with pytest.raises(ProviderError) as exc:
+        run_response(sse({"error": refusal}))
+    assert exc.value.code == "context_window"
+    with pytest.raises(ProviderError) as exc:
+        run_response(sse({"error": "upstream connect error or disconnect/reset before headers"}))
+    assert exc.value.code == "server"
 
 
 def test_gateway_500_wrapping_a_context_overflow():

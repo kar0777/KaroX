@@ -9,16 +9,15 @@ from karox6.providers.base import ModelRequest, ProviderError, ToolSpec
 from karox6.providers.openai_responses import OpenAIResponsesProvider
 
 
-def run(events, status=200, headers=None, request=None):
+def run(events, status=200, headers=None, request=None, body=None):
     captured = {}
 
     def handler(req):
         captured["body"] = json.loads(req.content)
         captured["url"] = str(req.url)
         if status != 200:
-            return httpx.Response(
-                status, text="prompt is too long" if status == 400 else "error", headers=headers
-            )
+            text = body or ("prompt is too long" if status == 400 else "error")
+            return httpx.Response(status, text=text, headers=headers)
         data = "".join("data: " + json.dumps(e) + "\n\n" for e in events)
         return httpx.Response(200, text=data, headers={"content-type": "text/event-stream"})
 
@@ -152,3 +151,65 @@ def test_encrypted_reasoning_roundtrip():
     assert item in captured["body"]["input"]
     assert captured["body"]["store"] is False
     assert captured["body"]["include"] == ["reasoning.encrypted_content"]
+
+
+def failed(code, message):
+    error = {"code": code, "message": message}
+    return {"type": "response.failed", "response": {"status": "failed", "error": error}}
+
+
+@pytest.mark.parametrize(
+    ("event", "code", "says"),
+    [
+        # the API's own `error` event: code and message at the top level, no "error" object
+        (
+            {
+                "type": "error",
+                "code": "rate_limit_exceeded",
+                "message": "Rate limit reached for requests. Please try again in 1.5s.",
+                "param": None,
+                "sequence_number": 2,
+            },
+            "rate_limit",
+            "Rate limit reached",
+        ),
+        (
+            {"type": "error", "code": None, "message": "The server had an error.", "param": None},
+            "server",
+            "The server had an error.",
+        ),
+        (
+            failed(
+                "context_length_exceeded", "Your input exceeds the context window of this model."
+            ),
+            "context_window",
+            "exceeds the context window",
+        ),
+        (
+            failed("insufficient_quota", "You exceeded your current quota, check your plan."),
+            "quota",
+            "current quota",
+        ),
+        (
+            failed("server_error", "The model failed to generate a response."),
+            "server",
+            "failed to generate",
+        ),
+    ],
+)
+def test_an_error_inside_the_stream_keeps_its_kind_and_message(event, code, says):
+    with pytest.raises(ProviderError) as exc:
+        run([*TEXT, event])
+    assert exc.value.code == code
+    assert says in str(exc.value)
+    if code == "rate_limit":
+        assert exc.value.retry_after == 1.5
+
+
+def test_a_filtered_reply_is_not_the_final_answer():
+    stopped = {
+        "type": "response.incomplete",
+        "response": {"incomplete_details": {"reason": "content_filter"}},
+    }
+    result, _ = run([*TEXT, stopped])
+    assert result.finish_reason == "content_filter"

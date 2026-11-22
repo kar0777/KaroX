@@ -24,14 +24,69 @@ EXIT_CODES = {"completed": 0, "error": 1, "limit": 3, "loop": 4, "cancelled": 13
 SIGTERM_EXIT = 143  # 128 + SIGTERM
 
 
-def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
+class _Interrupts:
+    """Ctrl+C (SIGINT) for a chat, taken before its first frame is painted.
+
+    Python's own handler raises KeyboardInterrupt wherever the main thread happens to be,
+    and while a chat starts that is inside the imports. Raised in an `exec` of source text
+    (the standard library builds namedtuples and dataclasses that way) it makes the
+    interpreter end by the signal although the chat caught it and returned 0; raised in a
+    callback it is printed and dropped, and the key is lost; raised in an extension
+    module's import it can come out as another error. This handler does not raise there:
+    until the event loop runs it only counts the interrupt, and the loop's first step
+    ends the start. From then on it cancels the main task, as asyncio's handler does
+    (asyncio.run puts that one over Python's default handler only, so not over this
+    one), and like it raises KeyboardInterrupt when asked again.
+    """
+
+    def __init__(self) -> None:
+        import signal
+
+        self.seen = 0
+        self._cancel: Callable[[], None] | None = None
+        self._previous: Any = signal.getsignal(signal.SIGINT)
+        self._installed = False
+        if self._previous is None:  # set by other code than Python's: theirs to handle
+            return
+        if self._previous is signal.SIG_IGN and not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return  # started to ignore it and no keyboard of its own: it stays ignored
+        try:
+            signal.signal(signal.SIGINT, self._on_sigint)
+        except ValueError:  # not the main thread
+            return
+        self._installed = True
+
+    def _on_sigint(self, _signum: int, _frame: Any) -> None:
+        self.seen += 1
+        if self._cancel is None:
+            return
+        if self.seen > 1:
+            raise KeyboardInterrupt
+        self._cancel()
+
+    def attach(self, cancel: Callable[[], None]) -> bool:
+        """The event loop runs: an interrupt calls ``cancel`` from now on. True when one
+        has come already, and the start ends here."""
+        self._cancel = cancel
+        return self.seen > 0
+
+    def restore(self) -> None:
+        if self._installed:
+            import signal
+
+            self._installed = False
+            signal.signal(signal.SIGINT, self._previous)
+
+
+def run_async[T](main_coro: Coroutine[Any, Any, T], interrupts: _Interrupts | None = None) -> T:
     """asyncio.run, where SIGTERM (POSIX) stops the program the way Ctrl+C does: the main
     task is cancelled, so `finally` blocks run, child process trees are killed and the
     session is recorded. MCP clients and process managers stop a server with SIGTERM;
     left to Python's default the process just vanished and its commands kept running.
     On Windows CTRL_BREAK (SIGBREAK) is handled the same way: it is how `karox mcp
     --supervise` stops its server, and Python's default ends the process without cleanup
-    (a Tailscale route would outlive it)."""
+    (a Tailscale route would outlive it). With ``interrupts`` (a chat) Ctrl+C is theirs:
+    it cancels the main task and ends as KeyboardInterrupt, as with asyncio's handler."""
     import asyncio
     import signal
 
@@ -48,6 +103,18 @@ def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
             terminated = True
             if task is not None:
                 task.cancel()
+
+        if interrupts is not None:
+
+            def on_interrupt() -> None:
+                if task is not None:
+                    task.cancel()
+                with contextlib.suppress(RuntimeError):  # the loop has just been closed
+                    loop.call_soon_threadsafe(lambda: None)  # wake a loop that waits for I/O
+
+            if interrupts.attach(on_interrupt):  # Ctrl+C came while the chat was imported
+                main_coro.close()
+                raise asyncio.CancelledError
 
         installed = False
         previous: Any = None
@@ -78,6 +145,8 @@ def run_async[T](main_coro: Coroutine[Any, Any, T]) -> T:
     except asyncio.CancelledError:
         if terminated:
             raise SystemExit(SIGTERM_EXIT) from None
+        if interrupts is not None and interrupts.seen:
+            raise KeyboardInterrupt from None
         raise
     if terminated:
         raise SystemExit(SIGTERM_EXIT)
@@ -110,12 +179,37 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     chat.add_argument("--cwd", type=Path, default=None, help="workspace directory")
     chat.add_argument("--resume", default=None, help="session id or 'last'")
     chat.add_argument(
+        "-c",
+        "--continue",
+        dest="resume",
+        action="store_const",
+        const="last",
+        help="continue this project's last session (same as --resume last)",
+    )
+    chat.add_argument(
+        "--fork",
+        default=None,
+        metavar="ID|last",
+        help="start a new session as a copy of a saved one (the original stays as it is)",
+    )
+    chat.add_argument(
+        "--no-undo",
+        action="store_true",
+        help="do not record the workspace around each turn (/undo then restores no files)",
+    )
+    chat.add_argument(
         "--approve-dangerous",
         choices=["ask", "deny", "allow"],
         default="ask",
         help="destructive commands: ask (default), deny, allow",
     )
     chat.add_argument("--no-color", action="store_true", help="plain output without ANSI colors")
+    chat.add_argument(
+        "--theme",
+        choices=["auto", "mid", "dark", "light", "ansi"],
+        default=argparse.SUPPRESS,  # not None: that would shadow config.toml's `theme`
+        help="colours: auto (default), dark, light, mid (any background), ansi (16 colours)",
+    )
     chat.add_argument(
         "--inline",
         action="store_true",
@@ -195,6 +289,18 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
         help="with --http: run the server as a child process and start it again when it "
         "exits unexpectedly (waits 1 s, doubling up to 60 s); Ctrl+C stops both",
     )
+
+    update = sub.add_parser(
+        "update", help="install the newest KaroX from its git branch into this environment"
+    )
+    update.add_argument(
+        "--check", action="store_true", help="only say whether a newer version is there"
+    )
+    update.add_argument(
+        "--force", action="store_true", help="build and install even when already up to date"
+    )
+    update.add_argument("--repo", default=None, help="git repository to update from")
+    update.add_argument("--branch", default=None, help="branch of that repository")
 
     debug = sub.add_parser("debug", help="diagnostics for developers")
     debug_sub = debug.add_subparsers(dest="debug_command", required=True)
@@ -372,9 +478,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _chat(args, parser)
     if args.command == "mcp":
         return _mcp(args, parser, argv)
+    if args.command == "update":
+        return _update(args, settings)
     if args.command == "debug" and args.debug_command == "rss":
         return _debug_rss()
     parser.print_help()
+    return 0
+
+
+def _update(args: argparse.Namespace, settings: dict[str, Any]) -> int:
+    from karox6 import update
+    from karox6.tui_text import _plain_text
+
+    source = update.Source.from_settings(settings, args.repo, args.branch)
+
+    def out(line: str) -> None:
+        # progress/subject lines carry bytes the remote repo wrote — never raw to a tty
+        sys.stdout.write(_plain_text(line) + "\n")
+        sys.stdout.flush()
+
+    try:
+        result = update.run_update(source, out, force=args.force, check_only=args.check)
+    except update.UpdateError as exc:
+        sys.stderr.write(f"karox: update failed: {_plain_text(str(exc))}\n")
+        return 1
+    for line in update.describe(result):
+        out(line)
+    if result.status == "available" and args.check:
+        out("run `karox6 update` to install it")
     return 0
 
 
@@ -444,27 +575,79 @@ def _chat(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     # No model yet: the chat starts with its setup (provider, model, key) instead.
     if not args.model and not (sys.stdin.isatty() and sys.stdout.isatty()):
         parser.error("--model is required (or set KAROX_MODEL, or run `karox6` in a terminal)")
+    interrupts = _Interrupts()  # before the frame: Ctrl+C must not raise inside the imports
     try:
-        return run_async(_chat_async(args))
-    except KeyboardInterrupt:
-        return 0
-    except (ValueError, FileNotFoundError) as exc:
-        sys.stderr.write(f"karox: {exc}\n")
-        return 2
+        splash = _first_frame(args)  # on screen before asyncio and prompt_toolkit are imported
+        try:
+            return run_async(_chat_async(args, splash), interrupts)
+        except KeyboardInterrupt:
+            return 0
+        except (ValueError, FileNotFoundError) as exc:
+            if splash is not None:
+                splash.close()
+            sys.stderr.write(f"karox: {exc}\n")
+            return 2
+        finally:
+            if splash is not None:
+                splash.close()
+    finally:
+        interrupts.restore()
 
 
-async def _chat_async(args: argparse.Namespace) -> int:
+def _initial_window(args: argparse.Namespace) -> int:
+    """The context budget shown before the session exists (as SessionConfig derives it)."""
+    known = [v for v in (args.context_window, args.context_limit) if v]
+    return min(known) if known else 400_000
+
+
+def _first_frame(args: argparse.Namespace) -> Any:
+    """Paint the full-screen chat's first frame right away (see karox6.splash); None when
+    the chat will not start with that frame."""
+    if not args.model or args.no_color or getattr(args, "inline", False):
+        return None
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    workspace = (args.cwd or Path.cwd()).expanduser().resolve()
+    if not workspace.is_dir():
+        return None
+    from karox6 import __version__, splash
+
+    theme, legacy = _look(args, True)
+    return splash.show(
+        version=__version__,
+        model=args.model,
+        provider=args.provider,
+        workspace=workspace,
+        approval_mode=args.approve_dangerous,
+        context_window=_initial_window(args),
+        theme=theme,
+        legacy_glyphs=legacy,
+    )
+
+
+def _look(args: argparse.Namespace, color: bool) -> tuple[Any, bool]:
+    """The chat's theme (karox6.tui_theme) for this terminal, and whether its glyphs must
+    stay within what a classic Windows console font draws."""
+    from karox6.tui_text import legacy_console
+    from karox6.tui_theme import Theme, color_depth, theme_name
+
+    depth = color_depth() if color else 0
+    return Theme(theme_name(getattr(args, "theme", None)), depth), legacy_console()
+
+
+async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
+    from karox6.chat_features import McpState
     from karox6.core.config import SessionConfig
     from karox6.settings import default_home
     from karox6.tui import (
         ChatApp,
-        _plain_text,
         color_enabled,
         secret_reader,
         stdout_write,
         terminal_display,
         terminal_io,
     )
+    from karox6.tui_text import _plain_text
 
     home = (args.home or default_home()).expanduser().resolve()
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
@@ -475,6 +658,7 @@ async def _chat_async(args: argparse.Namespace) -> int:
     use_fullscreen = is_tty and not getattr(args, "inline", False)
     color = not args.no_color and color_enabled()
     encoding = getattr(sys.stdout, "encoding", None)
+    theme, legacy = _look(args, color)
     ui: Any = None
     if use_fullscreen:
         try:
@@ -495,9 +679,14 @@ async def _chat_async(args: argparse.Namespace) -> int:
                 model=args.model or "",
                 provider=args.provider,
                 approval_mode=args.approve_dangerous,
+                splash=splash,
+                theme=theme,
+                legacy_glyphs=legacy,
             )
 
     if ui is None:
+        if splash is not None:
+            splash.close()
         read_line, read_answer = terminal_io(home / "chat_history", workspace=workspace, home=home)
 
         async def read_secret(prompt: str) -> str:
@@ -523,6 +712,9 @@ async def _chat_async(args: argparse.Namespace) -> int:
         session_kwargs = (
             resume_kwargs(home, args.resume, workspace=workspace) if args.resume else {}
         )
+        if args.fork and not args.resume:
+            # A new session that starts with the saved one's conversation.
+            app._fork_source = resume_kwargs(home, args.fork, workspace=workspace)
         if app.provider is None:
             # Drop the key from the environment before starting any MCP server.
             app.provider = _provider(args)
@@ -534,11 +726,20 @@ async def _chat_async(args: argparse.Namespace) -> int:
                 app.bridge_agent_args += ["--api-key-env", "KAROX_BRIDGE_API_KEY"]
                 app.bridge_env = {"KAROX_BRIDGE_API_KEY": key}
         if mcp_handles is None:
+            failures: dict[str, str] = {}
 
             def warn(message: str) -> None:
+                server = getattr(message, "server", None)  # mcp.client.ServerSkipped
+                if server is not None:
+                    failures[server] = str(getattr(message, "reason", ""))
                 app.write(_plain_text(message))
 
             app.extra_tools, mcp_handles = await _mcp_tools(args, home, warn=warn)
+            app.mcp = McpState(
+                path=None if args.no_mcp else (args.mcp_config or home / "mcp.json"),
+                handles=mcp_handles,
+                failures=failures,
+            )
         return session_kwargs
 
     async def check_key(app: ChatApp) -> None:
@@ -565,8 +766,51 @@ async def _chat_async(args: argparse.Namespace) -> int:
             app.bridge_env = {"KAROX_BRIDGE_API_KEY": typed}
             app.write("key saved (encrypted for your user); /key changes it\n")
 
+    def make_app() -> ChatApp:
+        import shutil
+
+        created = ChatApp(
+            config=SessionConfig(
+                model=args.model,
+                provider_name=args.provider,
+                workspace=workspace,
+                home=home,
+                context_window=args.context_window,
+                context_limit=args.context_limit,
+            ),
+            provider=None,
+            read_line=read_line,
+            read_answer=read_answer,
+            write=write_fn,
+            approval_mode=args.approve_dangerous,
+            color=color,
+            encoding=encoding,
+            read_secret=read_secret,
+            initialize=initialize,
+            before_turn=check_key,
+            display_factory=display_factory,
+            columns=ui.columns if ui is not None else lambda: shutil.get_terminal_size().columns,
+            snapshots=not args.no_undo,
+            prefill=ui.prefill if ui is not None else None,
+            theme=theme,
+            legacy_glyphs=legacy,
+            write_block=ui.write_block if ui is not None else None,
+            live=ui.set_live if ui is not None else None,
+            copy_to_clipboard=ui.copy_to_clipboard if ui is not None else None,
+        )
+        if ui is not None:
+            ui.attach_app(created)
+        return created
+
     app: ChatApp | None = None
     summary: str | None = None
+    banner = True
+    if ui is not None and not chose_model:
+        # The welcome card is part of the very first frame (it used to pop in a frame
+        # later), which is also what the start-up frame has already painted.
+        app = make_app()
+        ui.write(app._banner())
+        banner = False
     try:
         async with ui if ui is not None else contextlib.nullcontext():
             if chose_model:
@@ -583,27 +827,11 @@ async def _chat_async(args: argparse.Namespace) -> int:
                     choice.base_url,
                     choice.model,
                 )
-
-            app = ChatApp(
-                config=SessionConfig(
-                    model=args.model, provider_name=args.provider, workspace=workspace, home=home
-                ),
-                provider=None,
-                read_line=read_line,
-                read_answer=read_answer,
-                write=write_fn,
-                approval_mode=args.approve_dangerous,
-                color=color,
-                encoding=encoding,
-                read_secret=read_secret,
-                initialize=initialize,
-                before_turn=check_key,
-                display_factory=display_factory,
-            )
-            if ui is not None:
-                ui.attach_app(app)
+            if app is None:
+                app = make_app()
+            _start_update_check(args, home, app)
             try:
-                return await app.run()
+                return await app.run(banner=banner)
             finally:
                 if ui is not None:
                     summary = app.exit_summary()
@@ -615,8 +843,41 @@ async def _chat_async(args: argparse.Namespace) -> int:
                 await app.provider.aclose()
         finally:
             await _close_mcp(mcp_handles or [])
+        if splash is not None:
+            splash.close()  # the app never drew: back to the user's screen first
         if summary:
             stdout_write(summary + "\n")
+
+
+def _start_update_check(args: argparse.Namespace, home: Path, app: Any) -> None:
+    """Look for a newer KaroX in the background (at most once a day; see karox6.update):
+    a daemon thread, so neither the first frame nor the exit waits for the network. Off
+    with ``update_check = false`` or KAROX_UPDATE_CHECK=0, and when KaroX runs from a
+    source tree; KAROX_UPDATE_CHECK=1 forces it on either way."""
+    import asyncio
+    import threading
+
+    from karox6 import update
+
+    # /update installs from this source even when the background check below is off.
+    settings = {k: getattr(args, k, None) for k in ("update_repo", "update_branch")}
+    source = update.Source.from_settings(settings)
+    app.update_source = source
+
+    wanted = os.environ.get("KAROX_UPDATE_CHECK", "")
+    if wanted == "0" or (
+        wanted != "1" and (getattr(args, "update_check", True) is False or update.from_checkout())
+    ):
+        return
+    loop = asyncio.get_running_loop()
+
+    def check() -> None:
+        with contextlib.suppress(Exception):
+            found = update.check_cached(home, source)
+            if found:
+                loop.call_soon_threadsafe(app.notice_update, found)
+
+    threading.Thread(target=check, name="karox-update-check", daemon=True).start()
 
 
 def _session_config(

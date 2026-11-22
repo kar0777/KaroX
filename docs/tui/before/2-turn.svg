@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="856" height="1024" font-family="Cascadia Mono, Consolas, monospace" font-size="14"><rect width="100%" height="100%" fill="#0c0c0c"/>
+<text x="8.0" y="22" fill="#cccccc" xml:space="preserve">╭─ </text>
+<text x="33.2" y="22" fill="#cccccc" font-weight="bold" xml:space="preserve">KaroX 6.0.0.dev39</text>
+<text x="176.0" y="22" fill="#cccccc" xml:space="preserve"> ────────────────────────────────────────────────╮                              </text>
+<text x="8.0" y="40" fill="#cccccc" xml:space="preserve">│ model      demo-model · openai-chat                                │                              </text>
+<text x="8.0" y="58" fill="#cccccc" xml:space="preserve">│ project    C:\Users\ekono\AppData\Local\Temp\tmpz8qon2_w\ws · main │                              </text>
+<text x="8.0" y="76" fill="#cccccc" xml:space="preserve">│ approvals  ask  (/approve to change)                               │                              </text>
+<text x="8.0" y="94" fill="#cccccc" xml:space="preserve">│                                                                    │                              </text>
+<text x="8.0" y="112" fill="#cccccc" xml:space="preserve">│            / commands · @ attach a file · Alt+Enter new line       │                              </text>
+<text x="8.0" y="130" fill="#cccccc" xml:space="preserve">│            Esc stops the agent · /help · Ctrl+D quits              │                              </text>
+<text x="8.0" y="148" fill="#cccccc" xml:space="preserve">╰────────────────────────────────────────────────────────────────────╯                              </text>
+<text x="8.0" y="166" fill="#cccccc" xml:space="preserve">Type a task to start.                                                                               </text>
+<text x="8.0" y="184" fill="#3a96dd" font-weight="bold" xml:space="preserve">› </text>
+<text x="24.8" y="184" fill="#cccccc" xml:space="preserve">fix the greeting in hello.py                                                                      </text>
+<text x="8.0" y="202" fill="#3a96dd" xml:space="preserve">●</text>
+<text x="24.8" y="202" fill="#cccccc" font-weight="bold" xml:space="preserve">read</text>
+<text x="58.4" y="202" fill="#cccccc" xml:space="preserve"> hello.py  </text>
+<text x="150.8" y="202" fill="#13a10e" xml:space="preserve">✓</text>
+<text x="159.2" y="202" fill="#cccccc" xml:space="preserve"> 1 lines (0.0s)                                                                   </text>
+<text x="8.0" y="220" fill="#3a96dd" xml:space="preserve">●</text>
+<text x="24.8" y="220" fill="#cccccc" font-weight="bold" xml:space="preserve">bash</text>
+<text x="58.4" y="220" fill="#cccccc" xml:space="preserve"> python hello.py  </text>
+<text x="209.6" y="220" fill="#13a10e" xml:space="preserve">✓</text>
+<text x="218.0" y="220" fill="#cccccc" xml:space="preserve"> exit 0 · hi (0.2s)                                                        </text>
+<text x="8.0" y="238" fill="#3a96dd" xml:space="preserve">●</text>
+<text x="24.8" y="238" fill="#cccccc" font-weight="bold" xml:space="preserve">edit</text>
+<text x="58.4" y="238" fill="#cccccc" xml:space="preserve"> hello.py  </text>
+<text x="150.8" y="238" fill="#13a10e" xml:space="preserve">✓</text>
+<text x="167.6" y="238" fill="#13a10e" xml:space="preserve">+2</text>
+<text x="192.8" y="238" fill="#c50f1f" xml:space="preserve">-1</text>
+<text x="209.6" y="238" fill="#cccccc" xml:space="preserve"> (0.0s)                                                                     </text>
+<text x="24.8" y="256" fill="#c50f1f" xml:space="preserve">    1 - print(&#x27;hi&#x27;)</text>
+<text x="24.8" y="274" fill="#13a10e" xml:space="preserve">    1 + print(&#x27;hello&#x27;)</text>
+<text x="24.8" y="292" fill="#13a10e" xml:space="preserve">    2 + print(&#x27;bye&#x27;)</text>
+<text x="8.0" y="328" fill="#cccccc" xml:space="preserve">## Done: the greeting is fixed                                                                      </text>
+<text x="8.0" y="364" fill="#cccccc" xml:space="preserve">`hello.py` now prints **hello** and then *bye*:                                                     </text>
+<text x="8.0" y="400" fill="#cccccc" xml:space="preserve">- the old `print(&#x27;hi&#x27;)` is gone                                                                     </text>
+<text x="8.0" y="418" fill="#cccccc" xml:space="preserve">- a second line says goodbye                                                                        </text>
+<text x="8.0" y="436" fill="#cccccc" xml:space="preserve">  - nested item for the layout                                                                      </text>
+<text x="8.0" y="472" fill="#cccccc" xml:space="preserve">1. run it: `python hello.py`                                                                        </text>
+<text x="8.0" y="490" fill="#cccccc" xml:space="preserve">2. commit when happy                                                                                </text>
+<text x="8.0" y="526" fill="#cccccc" xml:space="preserve">```python                                                                                           </text>
+<text x="8.0" y="544" fill="#cccccc" xml:space="preserve">def greet(name: str) -&gt; str:                                                                        </text>
+<text x="8.0" y="562" fill="#cccccc" xml:space="preserve">    # say hello                                                                                     </text>
+<text x="8.0" y="580" fill="#cccccc" xml:space="preserve">    return f&quot;hello, {name}&quot;  # 2 lines                                                              </text>
+<text x="8.0" y="598" fill="#cccccc" xml:space="preserve">```                                                                                                 </text>
+<text x="8.0" y="634" fill="#cccccc" xml:space="preserve">| file | change | lines |                                                                           </text>
+<text x="8.0" y="652" fill="#cccccc" xml:space="preserve">|------|--------|------:|                                                                           </text>
+<text x="8.0" y="670" fill="#cccccc" xml:space="preserve">| hello.py | greeting | +2 -1 |                                                                     </text>
+<text x="8.0" y="688" fill="#cccccc" xml:space="preserve">| README.md | none | 0 |                                                                            </text>
+<text x="8.0" y="724" fill="#cccccc" xml:space="preserve">&gt; Tip: `/diff` shows the whole change, `/undo` takes it back.                                       </text>
+<text x="8.0" y="742" fill="#13a10e" xml:space="preserve">[completed]</text>
+<text x="100.4" y="742" fill="#cccccc" xml:space="preserve"> 4 steps · 1s · 6.4k in / 204 out · 1 files changed (/diff)                              </text>
+<rect x="8.0" y="980" width="8.4" height="18" fill="#262626"/>
+<rect x="16.4" y="980" width="84.0" height="18" fill="#262626"/>
+<text x="16.4" y="994" fill="#87d7ff" font-weight="bold" xml:space="preserve">demo-model</text>
+<rect x="100.4" y="980" width="100.8" height="18" fill="#262626"/>
+<text x="100.4" y="994" fill="#9e9e9e" xml:space="preserve"> · ws (main)</text>
+<rect x="201.2" y="980" width="252.0" height="18" fill="#262626"/>
+<rect x="453.2" y="980" width="378.0" height="18" fill="#262626"/>
+<text x="453.2" y="994" fill="#9e9e9e" xml:space="preserve">6.6k tok · ctx 2.3k/400.0k (1%) · approve:ask</text>
+<rect x="831.2" y="980" width="8.4" height="18" fill="#262626"/>
+<text x="8.0" y="1012" fill="#3a96dd" font-weight="bold" xml:space="preserve">› </text>
+</svg>

@@ -530,13 +530,52 @@ async def connect(name: str, spec: dict[str, Any]) -> McpServerHandle:
     return McpServerHandle(name, connection, tools, spec=spec, call_timeout=call_timeout(spec))
 
 
+def configured_servers(path: Path) -> dict[str, dict[str, Any]]:
+    """The servers a config file names (name -> its spec); empty when there is no file or
+    it cannot be read."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    servers = data.get("mcpServers") or data.get("servers") or {}
+    if not isinstance(servers, dict):
+        return {}
+    return {str(name): spec for name, spec in servers.items() if isinstance(spec, dict)}
+
+
+def describe_server(spec: dict[str, Any]) -> tuple[str, str]:
+    """(transport, where) of a configured server, for display: no environment, no headers
+    (they may hold tokens)."""
+    if spec.get("url"):
+        return "http", str(spec["url"])
+    command = [str(spec.get("command") or ""), *(str(a) for a in spec.get("args") or [])]
+    return "stdio", " ".join(part for part in command if part)
+
+
+class ServerSkipped(str):
+    """The warning for a server that could not be connected: the text as before, plus the
+    server's name and the reason for callers that keep track (the chat's /mcp screen)."""
+
+    server: str
+    reason: str
+
+    def __new__(cls, server: str, reason: str) -> ServerSkipped:
+        self = super().__new__(cls, f"karox: MCP server {server!r} skipped: {reason}\n")
+        self.server = server
+        self.reason = reason
+        return self
+
+
 async def load_mcp_tools(
     path: Path, *, warn: Callable[[str], object] | None = None
 ) -> tuple[list[McpTool], list[McpServerHandle]]:
     """Connect every configured server; return their tools and handles (close them later).
 
     On failure or cancellation part-way, the servers already connected are closed here:
-    the caller never received their handles.
+    the caller never received their handles. A server that cannot be connected is reported
+    to ``warn`` as a :class:`ServerSkipped` and left out.
     """
     report = warn or sys.stderr.write
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -554,7 +593,7 @@ async def load_mcp_tools(
             handle = await asyncio.wait_for(connect(name, spec), CONNECT_TIMEOUT_S + 5)
         except Exception as exc:
             reason = str(exc) or f"{type(exc).__name__} (no answer in {CONNECT_TIMEOUT_S:g}s)"
-            report(f"karox: MCP server {name!r} skipped: {reason}\n")
+            report(ServerSkipped(name, reason))
             return
         connected.append(handle)
 

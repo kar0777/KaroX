@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from karox6.core.messages import Message, ToolCall, Usage
+from karox6.core.messages import Message, ToolCall, Usage, image_note, image_payload
 from karox6.providers._stream import StreamProvider, stream_error
 from karox6.providers.base import (
     Delta,
@@ -16,6 +16,8 @@ from karox6.providers.base import (
     ProviderError,
     is_empty,
 )
+
+CACHE_MESSAGE_BREAKPOINTS = 2
 
 
 @dataclass(slots=True)
@@ -49,15 +51,32 @@ class AnthropicProvider(StreamProvider):
                     }
                 )
             else:
-                blocks.append({"type": "text", "text": m.content})
+                for image in m.images:
+                    payload = image_payload(image)
+                    if payload is None:
+                        blocks.append({"type": "text", "text": image_note(image)})
+                    else:
+                        source = {"type": "base64", "media_type": payload[0], "data": payload[1]}
+                        blocks.append({"type": "image", "source": source})
+                if m.content or not m.images:
+                    blocks.append({"type": "text", "text": m.content})
             if messages and messages[-1]["role"] == role:
                 messages[-1]["content"].extend(blocks)
             else:
                 messages.append({"role": role, "content": blocks})
+        # Cache breakpoints (4 allowed; the system block below is one): the end of the
+        # conversation, where this request writes its cache entry, and the end of the
+        # user message before it, where the previous request wrote its own. The second
+        # one makes the read exact: without it the API only looks 20 blocks back from
+        # the new breakpoint, and a step with many parallel tool calls adds more blocks
+        # than that, so the whole conversation was written to the cache again at 1.25x.
+        marked = 0
         for msg in reversed(messages):
             if msg["role"] == "user" and msg["content"]:
                 msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
-                break
+                marked += 1
+                if marked == CACHE_MESSAGE_BREAKPOINTS:
+                    break
         body: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
@@ -147,6 +166,8 @@ class AnthropicProvider(StreamProvider):
                     "stop_sequence": "stop",
                     "tool_use": "tool_calls",
                     "max_tokens": "length",
+                    "refusal": "content_filter",  # stopped by a safeguard: not an answer
+                    "model_context_window_exceeded": "window",
                 }.get(str(raw), "other")
                 usage.output_tokens = int((event.get("usage") or {}).get("output_tokens") or 0)
             elif kind == "message_stop":
@@ -160,10 +181,20 @@ class AnthropicProvider(StreamProvider):
         if self.api_key:
             headers["x-api-key"] = self.api_key
         await self._stream(
-            self.base_url.rstrip("/") + "/v1/messages", self.build_body(request), headers, feed
+            self.base_url.rstrip("/") + "/v1/messages",
+            self.build_body(request),
+            headers,
+            feed,
+            flowing=lambda: bool(text) or any(fragments.values()),
         )
         if not done:
             raise ProviderError("transport", "stream ended before the response finished")
+        if finish == "window":
+            # Input plus this reply filled the model's window: the conversation has to
+            # shrink before the step is asked again; "continue" would hit the same wall.
+            raise ProviderError(
+                "context_window", "the reply stopped at the model's context window limit"
+            )
         calls = [
             ToolCall(
                 id=b.get("id", ""),

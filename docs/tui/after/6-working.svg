@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="856" height="592" font-family="Cascadia Mono, Consolas, monospace" font-size="14"><rect width="100%" height="100%" fill="#0c0c0c"/>
+<text x="8.0" y="22" fill="#6c6c6c" xml:space="preserve">╭─</text>
+<text x="33.2" y="22" fill="#af87ff" font-weight="bold" xml:space="preserve">KaroX</text>
+<text x="83.6" y="22" fill="#8a8a8a" xml:space="preserve">6.0.0.dev40</text>
+<text x="184.4" y="22" fill="#6c6c6c" xml:space="preserve">────────────────────────────────────────────────╮</text>
+<text x="8.0" y="40" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="24.8" y="40" fill="#8a8a8a" xml:space="preserve">model    </text>
+<text x="117.2" y="40" fill="#cccccc" font-weight="bold" xml:space="preserve">demo-model</text>
+<text x="201.2" y="40" fill="#8a8a8a" xml:space="preserve"> · openai-chat</text>
+<text x="587.6" y="40" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="58" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="24.8" y="58" fill="#8a8a8a" xml:space="preserve">project  </text>
+<text x="100.4" y="58" fill="#cccccc" xml:space="preserve">  ~\AppData\Local\Temp\tmpkwt2n5b5\ws</text>
+<text x="411.2" y="58" fill="#8a8a8a" xml:space="preserve"> · main</text>
+<text x="587.6" y="58" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="76" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="24.8" y="76" fill="#8a8a8a" xml:space="preserve">approvals</text>
+<text x="100.4" y="76" fill="#cccccc" xml:space="preserve">  ask</text>
+<text x="142.4" y="76" fill="#8a8a8a" xml:space="preserve">  (/approve to change)</text>
+<text x="587.6" y="76" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="94" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="587.6" y="94" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="112" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="117.2" y="112" fill="#5fafd7" xml:space="preserve">/</text>
+<text x="125.6" y="112" fill="#8a8a8a" xml:space="preserve"> commands · </text>
+<text x="226.4" y="112" fill="#5fafd7" xml:space="preserve">@</text>
+<text x="234.8" y="112" fill="#8a8a8a" xml:space="preserve"> attach a file · </text>
+<text x="377.6" y="112" fill="#5fafd7" xml:space="preserve">Alt+Enter</text>
+<text x="453.2" y="112" fill="#8a8a8a" xml:space="preserve"> new line</text>
+<text x="587.6" y="112" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="130" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="117.2" y="130" fill="#5fafd7" xml:space="preserve">Esc</text>
+<text x="142.4" y="130" fill="#8a8a8a" xml:space="preserve"> stops the agent · </text>
+<text x="302.0" y="130" fill="#5fafd7" xml:space="preserve">Ctrl+O</text>
+<text x="352.4" y="130" fill="#8a8a8a" xml:space="preserve"> tool output · </text>
+<text x="478.4" y="130" fill="#5fafd7" xml:space="preserve">Ctrl+D</text>
+<text x="528.8" y="130" fill="#8a8a8a" xml:space="preserve"> quits</text>
+<text x="587.6" y="130" fill="#6c6c6c" xml:space="preserve">│</text>
+<text x="8.0" y="148" fill="#6c6c6c" xml:space="preserve">╰────────────────────────────────────────────────────────────────────╯</text>
+<text x="8.0" y="166" fill="#8a8a8a" xml:space="preserve">Type a task to start.</text>
+<text x="8.0" y="202" fill="#5fafd7" font-weight="bold" xml:space="preserve">› </text>
+<text x="24.8" y="202" fill="#cccccc" font-weight="bold" xml:space="preserve">run the tests</text>
+<text x="16.4" y="508" fill="#5fafd7" xml:space="preserve">⠸</text>
+<text x="24.8" y="508" fill="#cccccc" xml:space="preserve"> Running bash python -c &quot;import time; time.sleep(30)&quot;</text>
+<text x="470.0" y="508" fill="#8a8a8a" xml:space="preserve">  2.3s · </text>
+<text x="545.6" y="508" fill="#8a8a8a" font-weight="bold" xml:space="preserve">esc</text>
+<text x="570.8" y="508" fill="#8a8a8a" xml:space="preserve"> stop</text>
+<text x="8.0" y="526" fill="#6c6c6c" xml:space="preserve">╭─────────────────────────────────────────────────────────────────────────────────────────────────╮</text>
+<text x="8.0" y="544" fill="#6c6c6c" xml:space="preserve">│ </text>
+<text x="24.8" y="544" fill="#5fafd7" font-weight="bold" xml:space="preserve">› </text>
+<text x="822.8" y="544" fill="#6c6c6c" xml:space="preserve"> │</text>
+<text x="8.0" y="562" fill="#6c6c6c" xml:space="preserve">╰─────────────────────────────────────────</text>
+<text x="369.2" y="562" fill="#8a8a8a" font-weight="bold" xml:space="preserve">esc</text>
+<text x="394.4" y="562" fill="#8a8a8a" xml:space="preserve"> stop</text>
+<text x="436.4" y="562" fill="#6c6c6c" xml:space="preserve"> · </text>
+<text x="461.6" y="562" fill="#8a8a8a" font-weight="bold" xml:space="preserve">enter</text>
+<text x="503.6" y="562" fill="#8a8a8a" xml:space="preserve"> queue a message</text>
+<text x="638.0" y="562" fill="#6c6c6c" xml:space="preserve"> · </text>
+<text x="663.2" y="562" fill="#8a8a8a" font-weight="bold" xml:space="preserve">ctrl+o</text>
+<text x="713.6" y="562" fill="#8a8a8a" xml:space="preserve"> tool output</text>
+<text x="822.8" y="562" fill="#6c6c6c" xml:space="preserve">─╯</text>
+<text x="16.4" y="580" fill="#5fafd7" font-weight="bold" xml:space="preserve">demo-model</text>
+<text x="100.4" y="580" fill="#8a8a8a" xml:space="preserve"> · ws (main)</text>
+<text x="537.2" y="580" fill="#8a8a8a" xml:space="preserve">ctx </text>
+<text x="570.8" y="580" fill="#6c6c6c" xml:space="preserve">▱▱▱▱▱</text>
+<text x="612.8" y="580" fill="#cccccc" xml:space="preserve"> 0%</text>
+<text x="638.0" y="580" fill="#8a8a8a" xml:space="preserve"> · 2.3s · approvals </text>
+<text x="806.0" y="580" fill="#cccccc" xml:space="preserve">ask  </text>
+</svg>

@@ -55,7 +55,9 @@ are marked **[user]** and are not revisited without asking the user.
 - **D-020** Judge only on held-out tasks. Night tasks are `data/night_tasks.txt` lines 13-73
   of the bench repo. Burned (analysed before KaroX 6, never used for scoring):
   **13, 28, 32, 39, 40, 46, 52, 57, 59, 68, 71**. Every task whose trajectory is analysed
-  to change KaroX 6 gets added here and leaves the scoring pool.
+  to change KaroX 6 gets added here and leaves the scoring pool. Added 2026-11-22: **21,
+  35, 48, 60, 65** (h12 tasks of the bench's `disc` set, read for the dev38 prompt) and
+  **47, 54, 58, 62, 70, 73** (read for time sinks after or1, 2026-11-16).
 - **D-021** No rule may mention a specific task, repository or library. Every prompt/tool
   change goes through an A/B on the same tasks; a rule without measurable gain is removed.
 - **D-022** Rival baseline (already paid): run `43027228648`, night tasks 13-73,
