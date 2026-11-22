@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import functools
 import os
 import shutil
 import struct
 import subprocess
 import sys
+import time
+import types
 from collections.abc import Callable
 from pathlib import Path, PurePath
 from typing import Any
@@ -34,6 +37,34 @@ _FAKE_ENV = "KAROX_FAKE_CLIPBOARD"
 
 class ClipboardError(Exception):
     pass
+
+
+async def in_daemon_thread[T](fn: Callable[..., T], *args: Any) -> T:
+    """``fn(*args)`` in a daemon thread, awaited. A clipboard call can block for as long
+    as another program holds the clipboard, and ``asyncio.to_thread`` would make
+    ``asyncio.run`` wait for that thread at exit; a daemon thread is simply left behind."""
+    import asyncio
+    import threading
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[T] = loop.create_future()
+
+    def deliver(setter: Callable[[Any], None], value: Any) -> None:
+        if not future.done():
+            setter(value)
+
+    def work() -> None:
+        try:
+            result = fn(*args)
+        except BaseException as exc:
+            outcome: tuple[Callable[[Any], None], Any] = (future.set_exception, exc)
+        else:
+            outcome = (future.set_result, result)
+        with contextlib.suppress(RuntimeError):  # the loop is gone: nobody waits
+            loop.call_soon_threadsafe(deliver, *outcome)
+
+    threading.Thread(target=work, name="karox-clipboard", daemon=True).start()
+    return await future
 
 
 def _fake_dir() -> Path | None:
@@ -86,48 +117,129 @@ def grab_text() -> str | None:
             raise ClipboardError("reading the clipboard needs pbpaste")
         data = _run(["pbpaste"])
         return data.decode("utf-8", errors="replace") if data else None
+    found = False
     for command in (
-        ["wl-paste", "--no-newline"],
+        ["wl-paste", "--type", "text", "--no-newline"],
         ["xclip", "-selection", "clipboard", "-o"],
         ["xsel", "--clipboard", "--output"],
     ):
         if shutil.which(command[0]):
+            found = True
             data = _run(command)
-            return data.decode("utf-8", errors="replace") if data else None
-    raise ClipboardError("reading the clipboard needs wl-paste (Wayland) or xclip/xsel (X11)")
+            if data:
+                return data.decode("utf-8", errors="replace")
+    if not found:
+        raise ClipboardError("reading the clipboard needs wl-paste (Wayland) or xclip/xsel (X11)")
+    return None
 
 
-def _windows_text_get() -> str | None:
+# -- Win32 -----------------------------------------------------------------------------
+
+_OPEN_TRIES = 5  # another program may hold the clipboard for a moment
+_OPEN_PAUSE = 0.02
+_CF_UNICODETEXT = 13
+_CF_DIB = 8
+_HWND_MESSAGE = -3  # CreateWindowEx parent: a message-only window
+
+
+@functools.cache
+def _win32() -> Any:
+    """The Win32 calls the clipboard needs, in private library objects (the shared
+    ``ctypes.windll`` ones belong to everybody, so their prototypes are not ours to set)
+    with every argument and result typed: a handle is 64 bits wide."""
     import ctypes
     from ctypes import wintypes
 
-    windll: Any = getattr(ctypes, "windll")  # noqa: B009 - Windows only
-    user32, kernel32 = windll.user32, windll.kernel32
-    user32.GetClipboardData.restype = ctypes.c_void_p
-    user32.GetClipboardData.argtypes = [wintypes.UINT]
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalSize.restype = ctypes.c_size_t
-    kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
-    if not user32.OpenClipboard(None):
-        raise ClipboardError("the clipboard is in use by another program; try again")
+    vp, uint, dword = ctypes.c_void_p, wintypes.UINT, wintypes.DWORD
+    win_dll: Any = getattr(ctypes, "WinDLL")  # noqa: B009 - Windows only
+    user32 = win_dll("user32", use_last_error=True)
+    kernel32 = win_dll("kernel32", use_last_error=True)
+
+    def proto(fn: Any, restype: Any, *argtypes: Any) -> None:
+        fn.restype, fn.argtypes = restype, list(argtypes)
+
+    proto(user32.OpenClipboard, wintypes.BOOL, vp)
+    proto(user32.CloseClipboard, wintypes.BOOL)
+    proto(user32.EmptyClipboard, wintypes.BOOL)
+    proto(user32.IsClipboardFormatAvailable, wintypes.BOOL, uint)
+    proto(user32.GetClipboardData, vp, uint)
+    proto(user32.SetClipboardData, vp, uint, vp)
+    proto(user32.RegisterClipboardFormatW, uint, wintypes.LPCWSTR)
+    proto(
+        user32.CreateWindowExW,
+        vp,
+        dword,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        dword,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        vp,
+        vp,
+        vp,
+        vp,
+    )
+    proto(user32.DestroyWindow, wintypes.BOOL, vp)
+    proto(kernel32.GetConsoleWindow, vp)
+    proto(kernel32.GlobalAlloc, vp, uint, ctypes.c_size_t)
+    proto(kernel32.GlobalLock, vp, vp)
+    proto(kernel32.GlobalUnlock, wintypes.BOOL, vp)
+    proto(kernel32.GlobalFree, vp, vp)
+    proto(kernel32.GlobalSize, ctypes.c_size_t, vp)
+    return types.SimpleNamespace(user32=user32, kernel32=kernel32)
+
+
+def _open_clipboard(user32: Any, owner: Any = None) -> None:
+    for attempt in range(_OPEN_TRIES):
+        if user32.OpenClipboard(owner):
+            return
+        if attempt + 1 < _OPEN_TRIES:
+            time.sleep(_OPEN_PAUSE)
+    raise ClipboardError("the clipboard is in use by another program; try again")
+
+
+def _owner_window(api: Any) -> tuple[Any, bool]:
+    """A window to own the clipboard while we write: a hidden message-only one (its
+    predefined STATIC class needs no window procedure). Without an owner,
+    ``EmptyClipboard`` leaves ``SetClipboardData`` refused. Returns (handle, ours to
+    destroy); the console window stands in when no window can be made."""
+    hwnd = api.user32.CreateWindowExW(0, "STATIC", None, 0, 0, 0, 0, 0, _HWND_MESSAGE, 0, 0, 0)
+    if hwnd:
+        return hwnd, True
+    console = api.kernel32.GetConsoleWindow()
+    if console:
+        return console, False
+    raise ClipboardError("could not create a window to own the clipboard")
+
+
+def _read_global(api: Any, handle: Any) -> bytes | None:
+    import ctypes
+
+    pointer = api.kernel32.GlobalLock(handle)
+    if not pointer:
+        return None
     try:
-        if not user32.IsClipboardFormatAvailable(13):  # CF_UNICODETEXT
-            return None
-        handle = user32.GetClipboardData(13)
-        if not handle:
-            return None
-        pointer = kernel32.GlobalLock(handle)
-        if not pointer:
-            return None
-        try:
-            # Bounded by the allocation size, then the terminator cut off.
-            return ctypes.wstring_at(pointer, kernel32.GlobalSize(handle) // 2).rstrip("\x00")
-        finally:
-            kernel32.GlobalUnlock(handle)
+        return ctypes.string_at(pointer, api.kernel32.GlobalSize(handle))
     finally:
-        user32.CloseClipboard()
+        api.kernel32.GlobalUnlock(handle)
+
+
+def _windows_text_get() -> str | None:
+    api = _win32()
+    _open_clipboard(api.user32)
+    try:
+        if not api.user32.IsClipboardFormatAvailable(_CF_UNICODETEXT):
+            return None
+        handle = api.user32.GetClipboardData(_CF_UNICODETEXT)
+        data = _read_global(api, handle) if handle else None
+    finally:
+        api.user32.CloseClipboard()
+    if data is None:
+        return None
+    # The block can be larger than the text: it ends at the first NUL.
+    return data[: len(data) // 2 * 2].decode("utf-16-le", errors="replace").partition("\x00")[0]
 
 
 # -- text: write (drag copy, /copy) ---------------------------------------------------
@@ -186,35 +298,28 @@ def _windows_text_set(text: str) -> None:
     """CF_UNICODETEXT through the Win32 clipboard API (Cyrillic and friends survive:
     the data is UTF-16)."""
     import ctypes
-    from ctypes import wintypes
 
-    windll: Any = getattr(ctypes, "windll")  # noqa: B009 - Windows only
-    user32, kernel32 = windll.user32, windll.kernel32
-    kernel32.GlobalAlloc.restype = ctypes.c_void_p
-    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
-    user32.SetClipboardData.restype = ctypes.c_void_p
-    user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
-
-    data = (text + "\x00").encode("utf-16-le")
-    handle = kernel32.GlobalAlloc(0x0042, len(data))  # GMEM_MOVEABLE | GMEM_DDESHARE
+    api = _win32()
+    user32, kernel32 = api.user32, api.kernel32
+    data = (text.replace("\x00", "") + "\x00").encode("utf-16-le")  # a NUL would end it early
+    handle = kernel32.GlobalAlloc(0x0042, len(data))  # GMEM_MOVEABLE | GMEM_ZEROINIT
     if not handle:
         raise ClipboardError("could not allocate clipboard memory")
+    owner, ours = None, False
     try:
         pointer = kernel32.GlobalLock(handle)
         if not pointer:
             raise ClipboardError("could not lock clipboard memory")
-        ctypes.memmove(pointer, data, len(data))
-        kernel32.GlobalUnlock(handle)
-        if not user32.OpenClipboard(None):
-            raise ClipboardError("the clipboard is in use by another program; try again")
+        try:
+            ctypes.memmove(pointer, data, len(data))
+        finally:
+            kernel32.GlobalUnlock(handle)
+        owner, ours = _owner_window(api)
+        _open_clipboard(user32, owner)
         try:
             if not user32.EmptyClipboard():
                 raise ClipboardError("could not empty the clipboard")
-            if not user32.SetClipboardData(13, handle):  # CF_UNICODETEXT
+            if not user32.SetClipboardData(_CF_UNICODETEXT, handle):
                 raise ClipboardError("SetClipboardData failed")
             handle = None  # the clipboard owns the memory now
         finally:
@@ -222,15 +327,32 @@ def _windows_text_set(text: str) -> None:
     finally:
         if handle:
             kernel32.GlobalFree(handle)
+        if ours:
+            user32.DestroyWindow(owner)
 
 
 def _pipe(command: list[str], data: bytes) -> None:
+    """Feed ``data`` to a clipboard tool. These tools fork a server that keeps the
+    clipboard alive and may inherit our pipes, so nothing here waits for a pipe to
+    close: wl-copy's output goes to the null device, the others' errors to a file."""
+    import tempfile
+
+    quiet = command[0] == "wl-copy"
     try:
-        proc = subprocess.run(command, input=data, capture_output=True, timeout=10, check=False)
+        with tempfile.TemporaryFile() as errors:
+            proc = subprocess.run(
+                command,
+                input=data,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL if quiet else errors,
+                timeout=10,
+                check=False,
+            )
+            errors.seek(0)
+            detail = errors.read().decode("utf-8", errors="replace").strip().splitlines()
     except (OSError, subprocess.SubprocessError) as exc:
         raise ClipboardError(f"{command[0]} failed to start: {exc}") from exc
     if proc.returncode != 0:
-        detail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()
         raise ClipboardError(f"{command[0]} failed: {detail[0] if detail else 'no details'}")
 
 
@@ -266,40 +388,23 @@ def dib_to_png(dib: bytes) -> bytes:
 
 
 def _windows_png() -> bytes | None:
-    import ctypes
-    from ctypes import wintypes
-
-    windll: Any = getattr(ctypes, "windll")  # noqa: B009 - Windows only
-    user32, kernel32 = windll.user32, windll.kernel32
-    user32.GetClipboardData.restype = ctypes.c_void_p
-    user32.GetClipboardData.argtypes = [wintypes.UINT]
-    user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-    kernel32.GlobalSize.restype = ctypes.c_size_t
-    kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
+    api = _win32()
+    user32 = api.user32
     png_format = user32.RegisterClipboardFormatW("PNG")
-    if not user32.OpenClipboard(None):
-        raise ClipboardError("the clipboard is in use by another program; try again")
+    _open_clipboard(user32)
     try:
-        for fmt in (png_format, 8):  # 8 = CF_DIB
+        for fmt in (png_format, _CF_DIB):
             if not fmt or not user32.IsClipboardFormatAvailable(fmt):
                 continue
             handle = user32.GetClipboardData(fmt)
-            if not handle:
-                continue
-            pointer = kernel32.GlobalLock(handle)
-            if not pointer:
-                continue
-            try:
-                data = ctypes.string_at(pointer, kernel32.GlobalSize(handle))
-            finally:
-                kernel32.GlobalUnlock(handle)
-            return data if fmt == png_format else dib_to_png(data)
+            data = _read_global(api, handle) if handle else None
+            if data:
+                break
+        else:
+            return None
     finally:
         user32.CloseClipboard()
-    return None
+    return data if fmt == png_format else dib_to_png(data)
 
 
 def _run(command: list[str]) -> bytes | None:

@@ -914,9 +914,10 @@ def test_drag_selects_text_highlights_and_release_copies_plain_text(tmp_path: Pa
                 assert (0, 0) not in selected
                 t.mouse_handler(_mouse(5, 2, MouseEventType.MOUSE_UP, MouseButton.LEFT))
                 await eventually(lambda: copied)
-                # plain text, no frame glyphs, visual wraps of one line stay joined
-                assert copied == ["irst line here\n frame \nsecon"]
-                await eventually(lambda: any("copied 28 chars" in r for r in rendered_rows(ui)))
+                # plain text; box characters in the text are text (only what the chat
+                # itself marked as decoration is left out), wraps of one line stay joined
+                assert copied == ["irst line here\n╭─ frame ─╮\nsecon"]
+                await eventually(lambda: any("copied 32 chars" in r for r in rendered_rows(ui)))
 
     run_timed(go())
 

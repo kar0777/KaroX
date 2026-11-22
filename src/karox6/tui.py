@@ -888,14 +888,14 @@ class ChatApp:
 
     async def paste_image(self) -> None:
         """``/paste`` (Alt+V): keep the clipboard's picture for the next message."""
-        from karox6.clipboard import ClipboardError, grab_image
+        from karox6.clipboard import ClipboardError, grab_image, in_daemon_thread
 
         await self._ensure_session()
         number = len(self._pending_images) + 1
         stamp = time.strftime("%H%M%S")
         target = self.session.store.dir / "images" / f"clipboard-{stamp}-{number}.png"
         try:
-            path = await asyncio.to_thread(grab_image, target)
+            path = await in_daemon_thread(grab_image, target)
         except ClipboardError as exc:
             self.write(self.paint("yellow", f"  {exc}") + "\n")
             return
@@ -921,7 +921,7 @@ class ChatApp:
     async def _copy(self, arg: str) -> None:
         """``/copy``, ``/copy code``, ``/copy N``: an answer or its last code block
         onto the system clipboard (drag-selecting text copies any piece of it)."""
-        from karox6.clipboard import ClipboardError
+        from karox6.clipboard import ClipboardError, in_daemon_thread
 
         session = getattr(self, "session", None)
         answers = [
@@ -940,7 +940,7 @@ class ChatApp:
                 return
             what = "code block"
         else:
-            if low and not low.isdigit():
+            if low and not (low.isascii() and low.isdigit() and len(low) <= 9):
                 self.write("usage: /copy, /copy code or /copy N\n")
                 return
             n = int(low) if low else 1
@@ -953,7 +953,7 @@ class ChatApp:
             text = answers[-n]
             what = f"answer {n}" if n > 1 else "answer"
         try:
-            how = await asyncio.to_thread(self._copy_text, text)
+            how = await in_daemon_thread(self._copy_text, text)
         except ClipboardError as exc:
             self.write(self.paint("yellow", f"  {exc}") + "\n")
             return
@@ -2122,7 +2122,10 @@ def terminal_io(
     main = build_prompt_session(history=history, workspace=workspace, home=home)
     from karox6.tui_input import coalescing_input
 
-    main.app.input = coalescing_input(main.app.input)
+    merged = coalescing_input(main.app.input)
+    if merged is not main.app.input:
+        main.app.input = merged
+        main.app.ttimeoutlen = 0.12  # a merged paste is handed over this soon after its end
     answers: PromptSession[str] | None = None
 
     async def read_line(prompt: str) -> str:

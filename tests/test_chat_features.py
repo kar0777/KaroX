@@ -567,15 +567,44 @@ def test_pipe_reports_a_failed_tool(monkeypatch):
     reason="touches the real clipboard; KAROX_REAL_CLIPBOARD_TEST=1 runs it",
 )
 def test_the_real_clipboard_survives_copy_and_restore(tmp_path):
-    """The user's own clipboard text is read, replaced by a known text, verified and
-    put back — even when the check in the middle fails. The picture part is only
-    saved and restored when the platform lets us ask for it."""
+    """The user's own clipboard is saved whole (on Windows every memory format: text,
+    picture, files; elsewhere the text, and a clipboard holding a picture skips the
+    test, since no tool here can put it back), replaced by known texts, verified, and
+    put back in a ``finally``, so a failing check in the middle cannot lose it."""
+    import pickle
+    import sys
+
+    from clip_tools import restore, snapshot
+
+    sample = "karox6 clipboard test — привет"
+    if sys.platform == "win32":
+        api = clipboard._win32()
+        saved = snapshot(api)
+        (tmp_path / "clipboard-backup.pickle").write_bytes(pickle.dumps(saved))  # if all else fails
+        try:
+            clipboard.copy_text(sample)
+            assert clipboard.grab_text() == sample
+            long = "строка\n" * 5000  # a big block, and a text with a NUL in it
+            clipboard.copy_text(long)
+            assert clipboard.grab_text() == long
+            clipboard.copy_text("a\0b")
+            assert clipboard.grab_text() == "ab"
+        finally:
+            restore(api, saved)
+        assert dict(snapshot(api)) == dict(saved)
+        return
+    try:
+        clipboard.grab_image(tmp_path / "before.png")
+    except clipboard.ClipboardError:
+        pass
+    else:
+        pytest.skip("the clipboard holds a picture this platform could not put back")
     before = None
     with contextlib.suppress(clipboard.ClipboardError):
         before = clipboard.grab_text()
     try:
-        clipboard.copy_text("karox6 clipboard test — привет")
-        assert clipboard.grab_text() == "karox6 clipboard test — привет"
+        clipboard.copy_text(sample)
+        assert clipboard.grab_text() == sample
     finally:
         if before is not None:
             clipboard.copy_text(before)

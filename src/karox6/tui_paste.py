@@ -11,6 +11,8 @@ Pure stdlib, no prompt_toolkit: the unit tests drive it without a terminal.
 
 from __future__ import annotations
 
+import re
+
 MIN_LINES = 10  # a paste with more lines than this collapses to a placeholder
 MIN_BYTES = 4096  # and so does one with more bytes
 WARN_BYTES = 2 * 1024 * 1024  # pastes this large ask for a second Enter
@@ -32,7 +34,9 @@ def pasted_summary(data: str) -> str:
 
 
 class PasteChunks:
-    """The pasted payloads behind the placeholders currently in the input."""
+    """The pasted payloads behind the placeholders of the draft being typed. The
+    owner clears it whenever the draft ends (sent, cancelled), so a label typed later
+    cannot bring an old paste back."""
 
     def __init__(self) -> None:
         self._chunks: dict[str, str] = {}
@@ -42,8 +46,10 @@ class PasteChunks:
 
     def offer(self, data: str) -> str:
         """What goes into the input for this paste: the text itself when small,
-        else a placeholder whose payload is kept here."""
-        if data.count("\n") < MIN_LINES and len(data.encode("utf-8")) < MIN_BYTES:
+        else a placeholder whose payload is kept here. Text that spells out a label
+        already in the draft is kept behind a placeholder too, so it stays literal."""
+        small = data.count("\n") < MIN_LINES and len(data.encode("utf-8")) < MIN_BYTES
+        if small and not any(shown in data for shown in self._chunks):
             return data
         shown = f"[pasted {pasted_summary(data)}]"
         serial = 2
@@ -53,12 +59,18 @@ class PasteChunks:
         self._chunks[shown] = data
         return shown
 
+    def forget(self, shown: str) -> None:
+        """Drop the payload behind ``shown`` (a paste that grew replaces its label)."""
+        self._chunks.pop(shown, None)
+
     def expand(self, text: str) -> str:
-        """``text`` with every placeholder replaced by its payload (longest first,
-        so a numbered one is seen whole). A half-deleted placeholder stays literal."""
-        for shown in sorted(self._chunks, key=len, reverse=True):
-            text = text.replace(shown, self._chunks[shown])
-        return text
+        """``text`` with every placeholder replaced by its payload, in one pass: a
+        payload is never searched for further labels, so a pasted text that holds
+        one stays as pasted. A half-deleted placeholder stays literal."""
+        if not self._chunks:
+            return text
+        labels = sorted(self._chunks, key=len, reverse=True)
+        return re.sub("|".join(map(re.escape, labels)), lambda m: self._chunks[m.group()], text)
 
     def clear(self) -> None:
         self._chunks.clear()
