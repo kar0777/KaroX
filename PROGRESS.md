@@ -2300,3 +2300,9 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   calls on tasks valid in both are >= 15% lower AND solves >= dev42 - 1; then confirm on
   the Haiku 5.5 lane (no solve loss beyond 1, calls lower).
 
+- mab7 re-launched with dev48 (= dev47 + Fusion Opus review fixes: no finish before the extra
+  inputs pass, re-run checks when covered code changed, inventory says do not install, venv
+  and node_modules/.bin tools marked, eased effort ends with its turn). First mab7 (dev47)
+  cancelled. Runs: mab7 45058058840 (Dahl, same rule), hkcal 45058061581 (Haiku 5.5, dev42,
+  night 58-69, calibration). hk1 smoke (Haiku, 1 task): 30 steps, 95% cache reads, ~$0.08,
+  Haiku used only bash (29 calls, no read/edit).
