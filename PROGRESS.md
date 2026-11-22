@@ -1768,3 +1768,50 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   failed before the change.
   Also bench 6a4201d: the codex arm's bridged tools lose the `"strict": false` the bridge
   adds (devc3 runs on that commit).
+- devt2b result (run 44962894203, 23:40-01:20 UTC; trio, ReformBoss, disc 13-16, two
+  jobs, karox 6.0.0.dev36 / opencode v2.3.2 / DSH 0.2.2-rc.5; data and `trio_report.md` in
+  `karox6-bench-data/runs/devt2b`). 3 of 4 tasks valid (sentry-python-8185 void, see
+  above). Solved on the valid three: karox6 3, deepseek_harness 2, opencode_v2 1 (on all
+  four: 3 / 3 / 2). Usage on the valid three, karox6 / opencode_v2 / DSH: calls 213 / 397
+  / 176, input 19.6M / 39.4M / 13.5M, output 190k / 332k / 141k (reasoning 138k / 228k /
+  96k), agent time 38.7 / 66.1 / 28.5 min, cost-equivalent $0.234 / $0.414 / $0.172.
+  Requests: 1,048.
+- The registered devt2 as a whole (devt2 + devt2b: disc 13-17 and 20, dev36; 5 of 6
+  valid): solved karox6 4, deepseek_harness 4, opencode_v2 2; calls 361 / 577 / 366
+  (karox6 / opencode_v2 / DSH), output 339k / 460k / 288k, agent time 62.7 / 94.4 / 60.4
+  min, cost-equivalent $0.405 / $0.581 / $0.342.
+- All 18 registered tasks, with the note that goes with it: disc 1-12 ran karox
+  6.0.0.dev35, disc 13-17 and 20 ran 6.0.0.dev36 (same headless behaviour by the 20:58
+  entry, a different build); the other two CLIs are the same throughout. 17 of 18 valid.
+  | arm | solved (17 valid) | ok calls | input M | output k | reasoning k | agent min | cost-eq $ |
+  |---|---|---|---|---|---|---|---|
+  | karox6 | 10 | 957 | 70.2 | 748 | 528 | 139.0 | 0.907 |
+  | opencode_v2 | 10 | 1080 | 86.8 | 768 | 522 | 158.7 | 1.000 |
+  | deepseek_harness | 12 | 780 | 51.7 | 553 | 374 | 111.7 | 0.698 |
+  Reading by the registered rule (one attempt per task; a gap under 4 solved tasks is a
+  tie): the three are not separated on solved tasks; KaroX is not ahead of either. Against
+  OpenCode it solves the same number 9% cheaper and 12% quicker; against DSH it solves two
+  fewer, costs 30% more and takes 24% longer. The picture differs by task length: on the
+  short tasks (disc 1-12) KaroX is the most expensive of the three, on the longer ones
+  (13-17, 20) it makes the fewest calls after DSH and is 30% cheaper than OpenCode, whose
+  cost grows with its long runs (267 calls on sqllineage-866, 149 on sentry-python).
+  "KaroX beats OpenCode and DSH" is not shown; "KaroX is level with OpenCode and behind
+  DSH on cost" is what the 17 tasks say.
+- Requests since the reset: 1,575 + 565 + 1,048 + 1 (devc2) = 3,189, plus devc3 (running
+  since 01:21 UTC, run 44971059267, bench 6a4201d).
+- Before the compaction A/B (registered 18:50 UTC; hypothesis and rule fixed here, before
+  the run). Tag `devab1`: arms karox6 and karox6b side by side in one job (two requests
+  in flight), both on the dev36 wheel, karox6b with `--compact-at 170000`, disc 18
+  (koota-pair) then 19 (fastapi-implicit-head-options), ReformBoss, 1 attempt, chunk 2,
+  parallel 1. Hypothesis (from replaying saved runs with a 170k threshold, 18:30 entry:
+  11-20% less input in cached-equivalent tokens): the lower threshold costs less on tasks
+  whose context passes 170k and loses no solved task. Rule: the 170k threshold is a
+  candidate for the default only if, on the tasks where both trials are valid, karox6b
+  solves at least as many as karox6 and its cost-equivalent is at most 0.9 of karox6's;
+  otherwise it is not. Also read: compactions per arm, the cached share of the request
+  after each one, peak context, agent time. Two tasks and one attempt give a direction,
+  not a proof: the default (400k limit, compaction at 320k, the user's decision of
+  2026-11-17) is not changed tonight whatever comes out. Requests: ab2 needed 547 and 329
+  for these two tasks with two KaroX arms; 1,100 with a margin, about 1,750 are left.
+  Time: koota-pair runs to its 3,550 s limit, so about 95 minutes; it starts when devc3
+  ends and is not started after 02:00 UTC.
