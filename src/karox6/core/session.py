@@ -54,6 +54,7 @@ from karox6.core.store import (
     new_session_id,
 )
 from karox6.providers.base import (
+    UNAVAILABLE_STATUSES,
     Delta,
     ModelRequest,
     ModelResponse,
@@ -104,6 +105,7 @@ EMPTY_REPLY_NOTICE = (
     "now: call the next tool you need, or give your final answer if you are done."
 )
 MAX_EMPTY_REPLIES = 3  # per run; after that the run ends with the provider's error
+MAX_SERVER_SHRINKS = 2  # per run: requests cut down after a server error on every retry
 FINAL_CALL_STEPS = 30  # after the wrap-up notice, ask for the final answer
 WRAP_UP_NOTICE = (
     "This run has taken {steps} steps, and every further step re-sends the whole "
@@ -264,6 +266,7 @@ class Session:
         steps = 0
         truncations = 0
         empties = 0  # empty replies answered with EMPTY_REPLY_NOTICE
+        shrinks = 0  # requests made smaller after a server error that kept coming back
         reminded = 0  # wrap-up notices sent (a truncated step may skip the exact count)
         warned = False  # deadline notice sent
         reviewed = False  # the independent review ran (once per run)
@@ -286,7 +289,14 @@ class Session:
                     # The conversation outgrew what the provider accepts (our estimate was
                     # low, or the route's real window is smaller than configured): shrink
                     # it once and retry instead of losing the run.
-                    if exc.code != "context_window" or not await self._recover_overflow(emit):
+                    if exc.code == "context_window":
+                        recovered = await self._recover_overflow(emit)
+                    else:
+                        recovered = shrinks < MAX_SERVER_SHRINKS and self._shrink_for_server(
+                            exc, emit
+                        )
+                        shrinks += recovered
+                    if not recovered:
                         raise
                     response = await self._call_model(steps, started, emit)
                 if response is None:
@@ -1001,6 +1011,26 @@ class Session:
             # No usable checkpoint (e.g. the model spent its output on reasoning twice):
             # shrink without the model, or every next step would pay for two more tries.
             await self._drop_head(before, emit)
+
+    def _shrink_for_server(self, exc: ProviderError, emit: Callable[[ev.Event], None]) -> bool:
+        """A server error that came back on every retry while the server is not down (a
+        plain 5xx, not "unavailable", which is waited out): it fails on this request, and
+        the same request cannot do better. In devt2b one request got HTTP 500 thirty times
+        in 150 s while every other request on the key went through, and the run ended
+        after two steps. Cut the middle out of every big tool result, the newest included
+        (their spill files keep the whole text), so the caller can ask once more with a
+        different, smaller request. False when there is nothing to cut."""
+        if exc.code != "server" or exc.status in UNAVAILABLE_STATUSES:
+            return False
+        before = self.context_tokens()
+        removed = prune_tool_results(self.messages, keep_last=0)
+        if not removed:
+            return False
+        after = max(before - int(removed / 3.5), 0)
+        self._last_input_tokens, self._chars_since_measure = after, 0
+        self.store.reset(self.messages)
+        emit(ev.Compacted(mode="prune", tokens_before=before, tokens_after=after))
+        return True
 
     def _prune_for_compaction(self, before: int, emit: Callable[[ev.Event], None]) -> int:
         removed = prune_tool_results(self.messages)
