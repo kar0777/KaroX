@@ -1,6 +1,6 @@
 # Devin report (KaroX `devin/big`, bench `devin/bench`)
 
-Status: short shift of 2026-11-22, started 04:20:33 UTC (`date -u`), report closed 06:25 UTC.
+Status: short shift of 2026-11-22, started 04:20:33 UTC (`date -u`), report closed 06:31 UTC.
 Source version 6.0.0.dev39; ReformBoss was not used. Every run's rule, written before it,
 and its result are in `PROGRESS.md`; the night's full report is this file at d4e2d5c.
 
@@ -122,8 +122,7 @@ python scripts/analysis/dshcmp.py $R/devp0 $R/devp1 $R/devp2 --arms karox6,karox
 ```
 
 One run at a time on the lane (4 requests in flight per key). P2P regressions: each run's
-`HARD12_RESULTS`. Tasks 51 and 61 ship an AGENTS.md of their own with "Make the smallest
-change" (not the prompt's). dev38 against dev39 would isolate the order to add tests.
+`HARD12_RESULTS`. Tasks 51 and 61 ship their own AGENTS.md with "Make the smallest change".
 
 3-attempt comparison (trio; `<wheel>` = the A/B's winner). Never `attempts=3` here: one job
 would hold 9 trials in flight on a key that allows 4. One attempt per dispatch, the next
@@ -141,17 +140,19 @@ valid for dev37 only: `-f taskset=disc -f tasks=1,2,...,12 -f chunk=4`, 1,575 pe
 
 ## 5. Merge status
 
-`origin/karox6/main` (ee24034, fetched 06:10 UTC) is an ancestor of `devin/big`: a
-fast-forward of 46 commits, no conflict (`git merge-tree --write-tree origin/karox6/main
-devin/big` exits 0 with the tree of `devin/big`). Nothing was merged or pushed there.
-dev39 changes the default prompt before its A/B: merge after it, or revert both commits.
+`origin/karox6/main` (ee24034, fetched 06:31 UTC) is an ancestor of `devin/big`: a
+fast-forward of 48 commits, no conflict (`git merge-tree --write-tree origin/karox6/main
+devin/big` exits 0 with the tree of `devin/big`). Nothing was merged or pushed there. CI
+on `karox6/main` fails today at `uv sync --locked` (stale lock); `devin/big` carries the
+fixed lock (`uv lock --check` passes; CI does not run on `devin/*`). dev39 changes the
+default prompt before its A/B: merge after it, or revert both commits.
 
 ## 6. Not done, not verified
 
 - Whether dev39 solves more or costs less on the bench model: no such run was possible.
 - Found, not fixed (last night's chat start-up, Linux): Ctrl+C in the first 70 ms under
   the start-up frame, 1,260 starts: 25 exit -2, 5 lose the key, 1 traceback (cause and fix
-  in PROGRESS.md, 06:30); its test failed in one of three full Linux runs (~1 in 30).
+  in PROGRESS.md, 06:30); its test failed in one of three full Linux runs (~1 in 40).
 - An outage costs a bench trial 34 min, not KaroX's 600 s budget: the gateway retries too.
 - The night's open items stand (real provider APIs, macOS, bug 17, the compaction A/B).
 
@@ -166,5 +167,4 @@ pytest, Linux (WSL, 3.12.14)     1177 passed, 6 skipped in 71.83s (0:01:11)   (o
 git diff --check                 no output, exit 0
 python -m build --wheel          Successfully built karox6-6.0.0.dev39-py3-none-any.whl
 python scripts/perf_check.py     start 141.4 ms (<= 300.0), idle RSS 31.4 MiB (<= 80.0): OK
-replay.yml, dev39, 5 images      REPLAY PASSED / KAROX6 PASSED in each
 ```

@@ -2146,3 +2146,5 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   when the app takes the keyboard. Not done in this shift: it is start-up signal handling
   on POSIX, it needs both systems' suites and this stress run again, and 35 minutes were
   left. The test stays as it is and fails about once in thirty Linux runs until then.
+- 06:31 UTC, last correction and close: 31 failures of 1,260 interrupted starts is one in
+  forty, not thirty. Report closed; both branches pushed; the working trees are clean.
