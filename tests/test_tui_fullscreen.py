@@ -909,14 +909,14 @@ def test_drag_selects_text_highlights_and_release_copies_plain_text(tmp_path: Pa
                     for x in range(10)
                     if "class:selected" in screen.data_buffer[y][x].style
                 }
-                assert (0, 1) in selected and (2, 4) in selected and (0, 0) not in selected
+                assert (0, 1) in selected
+                assert (2, 4) in selected
+                assert (0, 0) not in selected
                 t.mouse_handler(_mouse(5, 2, MouseEventType.MOUSE_UP, MouseButton.LEFT))
                 await eventually(lambda: copied)
                 # plain text, no frame glyphs, visual wraps of one line stay joined
                 assert copied == ["irst line here\n frame \nsecon"]
-                await eventually(
-                    lambda: any("copied 28 chars" in r for r in rendered_rows(ui))
-                )
+                await eventually(lambda: any("copied 28 chars" in r for r in rendered_rows(ui)))
 
     run_timed(go())
 
@@ -1076,9 +1076,7 @@ def test_ctrl_v_pastes_clipboard_text_and_an_image_only_clipboard_attaches(
                 output=out,
                 complete_in_thread=False,
             )
-            app, provider = make_full_app(
-                tmp_path, [Turn(text="nice"), Turn(text="a cat")], ui
-            )
+            app, provider = make_full_app(tmp_path, [Turn(text="nice"), Turn(text="a cat")], ui)
             async with ui:
                 running = asyncio.create_task(app.run())
                 await eventually(lambda: ui.mode == "prompt")
@@ -1153,9 +1151,7 @@ def test_copy_command_writes_the_answer_through_the_clipboard_fn(tmp_path: Path)
                 keys.send_text("hi\r")
                 await eventually(lambda: "the answer" in ui.transcript.plain_text)
                 keys.send_text("/copy\r")
-                await eventually(
-                    lambda: "copied 10 chars (answer)" in ui.transcript.plain_text
-                )
+                await eventually(lambda: "copied 10 chars (answer)" in ui.transcript.plain_text)
                 assert copied == ["the answer"]
                 keys.send_text("/quit\r")
                 assert await asyncio.wait_for(running, 3) == 0

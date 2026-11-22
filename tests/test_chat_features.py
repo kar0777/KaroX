@@ -1,6 +1,7 @@
 """Chat features: /undo and /redo, /fork, /init, pictures, /mcp, the change preview."""
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -494,9 +495,7 @@ def test_copy_text_prefers_wl_copy_then_xclip_then_xsel(monkeypatch):
     monkeypatch.setattr(clipboard.shutil, "which", lambda name: name if name != "pbcopy" else None)
     monkeypatch.setattr(clipboard.sys, "platform", "linux")
     assert clipboard.copy_text("Привет") == "wl-copy"
-    monkeypatch.setattr(
-        clipboard.shutil, "which", lambda name: name if name in {"xsel"} else None
-    )
+    monkeypatch.setattr(clipboard.shutil, "which", lambda name: name if name in {"xsel"} else None)
     assert clipboard.copy_text("text") == "xsel"
     assert calls == [("wl-copy", "Привет".encode()), ("xsel", b"text")]
 
@@ -515,8 +514,9 @@ def test_osc52_carries_the_text_base64_for_the_terminal():
     import base64
 
     seq = clipboard.osc52("привет мир")
-    assert seq.startswith("\x1b]52;c;") and seq.endswith("\x07")
-    assert base64.b64decode(seq[7:-1]) == "привет мир".encode("utf-8")
+    assert seq.startswith("\x1b]52;c;")
+    assert seq.endswith("\x07")
+    assert base64.b64decode(seq[7:-1]) == "привет мир".encode()
 
 
 def test_grab_text_reads_the_available_tool(monkeypatch):
@@ -571,10 +571,8 @@ def test_the_real_clipboard_survives_copy_and_restore(tmp_path):
     put back — even when the check in the middle fails. The picture part is only
     saved and restored when the platform lets us ask for it."""
     before = None
-    try:
+    with contextlib.suppress(clipboard.ClipboardError):
         before = clipboard.grab_text()
-    except clipboard.ClipboardError:
-        pass  # the test still checks that writing works below
     try:
         clipboard.copy_text("karox6 clipboard test — привет")
         assert clipboard.grab_text() == "karox6 clipboard test — привет"
@@ -616,7 +614,8 @@ def test_copy_puts_the_last_answer_or_its_code_on_the_clipboard(tmp_path):
         copy_to_clipboard=lambda text: copied.append(text) or "fake",
     )
     assert copied == [answer, "print('hi')", "first answer"]
-    assert "copied" in term.text and "(code block)" in term.text
+    assert "copied" in term.text
+    assert "(code block)" in term.text
     assert "there is no answer 9 (only 2 so far)" in term.text
     assert "usage: /copy" in term.text
 
