@@ -2240,3 +2240,9 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   agent's own choice ("completed"). An overloaded or slow lane is recorded, not a failure
   of KaroX. Locally: the configured provider in `~/.karox6/config.toml` is ReformBoss, so
   no local chat with a live model (the user can run `karox6` -> `/setup` for another).
+- Mini A/B mab3 (pre-registered 2026-11-22, run 45032397280): dev42 (karox6) vs dev43
+  (karox6b: one prompt line "think briefly, never draft code in your reasoning: write it
+  once, in the edit or write call", ported from the old line's general cost rules; prompt
+  cap 600 -> 625 words). Dahl GLM-5.3-Flash, night_tasks 31-36 (held out, never read),
+  1 attempt. Rule: keep dev43 if it solves >= dev42 on valid tasks AND its output +
+  reasoning tokens are >= 15% lower; otherwise revert the line.
