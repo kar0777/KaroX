@@ -2125,3 +2125,24 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   Scratch, safe to delete: `%TEMP%\devin-shift`, `/tmp/dsh-src` (DSH's npm packages, read
   only), in WSL `~/devin-k6`. Nothing was merged, tagged or published; ReformBoss was not
   called; `D:\проекты\KaroX-6` was not touched.
+- 06:30 UTC, the Ctrl+C measurement a third time, and the cause of "exit -2" (this
+  replaces the guess in the 06:14 entry, "raised before `_chat`'s handler is in place",
+  which was wrong). Over 1,260 starts with Ctrl+C sent as the frame appears: 1,229 ended
+  with exit 0, 25 with exit -2, 5 lost the key, 1 printed a traceback. In the 25 the
+  handler did run: the terminal was put back, `_chat` caught KeyboardInterrupt and
+  returned 0 (the output ends with "coroutine '_chat_async' was never awaited ... return
+  0"), and the process was then killed by SIGINT all the same. CPython marks an interrupt
+  that passes through an `exec` of a string as unhandled and re-raises the signal when
+  the interpreter exits, caught or not; the standard library builds namedtuples and
+  dataclasses with such an `exec`, and the start-up imports are full of them. Shown apart
+  from KaroX (`python -m` of a five-line module, Python 3.12.14): interrupt inside
+  `exec("<source>")`, caught, `SystemExit(0)` -> the process ends with -2; the same with
+  `exec(compile(...))` -> 0. So three faults share one cause, a KeyboardInterrupt raised
+  wherever the imports happen to be: inside such an `exec` (exit -2 and a warning on the
+  user's screen, 2.0%), inside a callback that swallows it (the key is lost, 0.4%), inside
+  an extension module's import (a traceback, 0.1%). The fix for all three is not to raise
+  there: a SIGINT handler for the time between the frame and the app's first read that
+  puts the terminal back and ends the start itself, and gives the signal back to asyncio
+  when the app takes the keyboard. Not done in this shift: it is start-up signal handling
+  on POSIX, it needs both systems' suites and this stress run again, and 35 minutes were
+  left. The test stays as it is and fails about once in thirty Linux runs until then.

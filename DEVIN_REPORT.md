@@ -149,9 +149,9 @@ dev39 changes the default prompt before its A/B: merge after it, or revert both 
 ## 6. Not done, not verified
 
 - Whether dev39 solves more or costs less on the bench model: no such run was possible.
-- Found, not fixed (last night's chat start-up, Linux only): Ctrl+C in the first 70 ms
-  under the start-up frame: of 840 starts 20 ended with exit -2, 1 with a traceback and 2
-  lost the key; the test of that path failed in one of three full Linux runs.
+- Found, not fixed (last night's chat start-up, Linux): Ctrl+C in the first 70 ms under
+  the start-up frame, 1,260 starts: 25 exit -2, 5 lose the key, 1 traceback (cause and fix
+  in PROGRESS.md, 06:30); its test failed in one of three full Linux runs (~1 in 30).
 - An outage costs a bench trial 34 min, not KaroX's 600 s budget: the gateway retries too.
 - The night's open items stand (real provider APIs, macOS, bug 17, the compaction A/B).
 
