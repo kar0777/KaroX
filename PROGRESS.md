@@ -2277,3 +2277,11 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   shell wording; prompt unchanged). Dahl GLM, night_tasks 46-57 (12 held out), 1 attempt.
   Primary metric: successful model calls on tasks valid in both arms. Rule: keep dev45 if
   calls are >= 15% lower AND it solves >= dev42 - 1; a loss of 2+ solves rejects it.
+- dev45 review (Devin fusion-claude-opus-5-5-high + SWE-2): 3 P1 (a failed multi-edit could
+  say "already applied", empty edits rejected old-style calls, false "already applied" on
+  prefixes) + 5 P2; all fixed by agy Gemini 4 Neon as dev46 (steps/tools da9fd70).
+  mab5 (dev45) is therefore informative only. Decision run mab6 (run 45050085837): dev42 vs
+  dev46, same 12 tasks (night 46-57), same rule as mab5 (calls >= 15% lower on tasks valid
+  in both AND solves >= dev42 - 1). mab5+mab6 also give two dev42 samples per task.
+- dtrio44 (run 45041237551, Dahl, night 43-45, trio with dev44): 0/0/0 solved; ok calls
+  KaroX 172, DSH 181, OpenCode 164; input 5.5M / 6.2M / 5.1M (all failed, so all ran long).
