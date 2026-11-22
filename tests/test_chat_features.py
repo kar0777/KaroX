@@ -428,6 +428,43 @@ def test_multi_edit_stats_and_diff_preview(tmp_path):
     assert lines[at + 5] == "      5 + c = 30"
 
 
+def test_multi_edit_stringified_edits_stats_and_preview():
+    from karox6.tui import _edit_diff_stats
+
+    hunks = [
+        {"old_string": "a = 1", "new_string": "a = 10\na2 = 20"},
+        {"old_string": "b = 2\nc = 3", "new_string": "b = 200"},
+    ]
+    args = json.dumps(
+        {
+            "file_path": "app.py",
+            "old_string": "",
+            "new_string": "",
+            "edits": json.dumps(hunks),
+        }
+    )
+    assert _edit_diff_stats("edit", args) == (3, 3)
+    assert diff_preview("edit", args, {"lines": [2, 10]}) == [
+        ("-", "    2 - a = 1"),
+        ("+", "    2 + a = 10"),
+        ("+", "    3 + a2 = 20"),
+        ("-", "   10 - b = 2"),
+        ("-", "   11 - c = 3"),
+        ("+", "   10 + b = 200"),
+    ]
+    empty_str_edits = json.dumps(
+        {"file_path": "app.py", "old_string": "x = 1", "new_string": "x = 2", "edits": "[]"}
+    )
+    assert _edit_diff_stats("edit", empty_str_edits) == (1, 1)
+    assert diff_preview("edit", empty_str_edits, {"line": 3}) == [
+        ("-", "    3 - x = 1"),
+        ("+", "    3 + x = 2"),
+    ]
+    bad_str_edits = json.dumps({"file_path": "app.py", "edits": "{not json"})
+    assert _edit_diff_stats("edit", bad_str_edits) is None
+    assert diff_preview("edit", bad_str_edits, {}) == []
+
+
 # -- /mcp, hints ----------------------------------------------------------------------
 
 

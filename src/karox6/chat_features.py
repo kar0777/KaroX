@@ -53,6 +53,11 @@ def diff_preview(
         return []
     hunks: list[tuple[str, str, int | None]] = []
     edits = data.get("edits")
+    if isinstance(edits, str):
+        try:
+            edits = json.loads(edits)
+        except ValueError:
+            edits = None
     if isinstance(edits, list) and edits:
         raw_lines = meta.get("lines")
         line_list = raw_lines if isinstance(raw_lines, list) else []

@@ -393,6 +393,11 @@ def _edit_diff_stats(name: str, arguments: str) -> tuple[int, int] | None:
         return None
     if base == "edit":
         edits = data.get("edits")
+        if isinstance(edits, str):
+            try:
+                edits = json.loads(edits)
+            except ValueError:
+                edits = None
         if isinstance(edits, list) and edits:
             added = 0
             removed = 0

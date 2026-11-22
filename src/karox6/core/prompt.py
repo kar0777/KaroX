@@ -6,12 +6,14 @@ details live in the tool descriptions, as in DSH.
 
 from __future__ import annotations
 
+import functools
+import os
 import platform
 import re
 import shutil
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from karox6.tools.shell import ShellInfo
 
@@ -93,9 +95,9 @@ _LOCKFILES = (
 
 
 def project_inventory(workspace: Path, max_items: int = 12) -> list[str]:
-    """What the project declares at its top level: build files, script names, make
-    targets and a local virtualenv. Files are only read, nothing is run, and no command is
-    presented as "the" test command - the model still decides what to run."""
+    """What the project declares at its top level: build files, script names and make
+    targets. Files are only read, nothing is run, and no command is presented as "the"
+    test command - the model still decides what to run."""
     out: list[str] = []
 
     def text(name: str) -> str | None:
@@ -119,14 +121,6 @@ def project_inventory(workspace: Path, max_items: int = 12) -> list[str]:
         pytest_cfg = "[tool.pytest" in pyproject or text("pytest.ini") is not None
         note = "; pytest configured" if pytest_cfg else ""
         out.append(f"Python project files: {', '.join(py)}{note}")
-    for venv in (".venv", "venv"):
-        for exe in ("bin/python", "Scripts/python.exe"):
-            if (workspace / venv / exe).is_file():
-                out.append(f"Project virtualenv: {venv}/{exe}")
-                break
-        else:
-            continue
-        break
     package = text("package.json")
     if package is not None:
         import json
@@ -156,16 +150,22 @@ def project_inventory(workspace: Path, max_items: int = 12) -> list[str]:
 
 INTERPRETER_MAX_CHARS = 158  # leaves room for "- " so the bullet line stays <= 160
 _VENV_DIRS = (".venv", "venv")
-_VENV_PYTHONS_WIN = ("Scripts/python.exe", "Scripts/python", "bin/python", "bin/python3")
-_VENV_PYTHONS_POSIX = ("bin/python", "bin/python3", "Scripts/python.exe", "Scripts/python")
+_VENV_PYTHONS_WIN = ("Scripts/python.exe", "Scripts/python", "bin/python.exe")
+_VENV_PYTHONS_POSIX = ("bin/python", "bin/python3")
 _PYVENV_VERSION_RE = re.compile(r"(\d+(?:\.\d+)+(?:(?:a|b|rc)\d+)?)")
 
 
-def _cap_interpreter_line(line: str) -> str:
-    clean = " ".join(line.split())
-    if len(clean) <= INTERPRETER_MAX_CHARS:
-        return clean
-    return clean[: INTERPRETER_MAX_CHARS - 3] + "..."
+def _interpreter_line(path_text: str, note: str = "") -> str | None:
+    if "\n" in path_text or "\r" in path_text or "`" in path_text:
+        return None
+    base = f"Python interpreter: `{path_text}`"
+    if len(base) > INTERPRETER_MAX_CHARS:
+        return None
+    if note:
+        with_note = f"{base} ({note})"
+        if len(with_note) <= INTERPRETER_MAX_CHARS:
+            return with_note
+    return base
 
 
 def _venv_python_version(venv_dir: Path) -> str | None:
@@ -196,8 +196,9 @@ def _venv_python_version(venv_dir: Path) -> str | None:
 
 def python_interpreter(workspace: Path) -> str | None:
     """One-line description of the Python interpreter tests would run under: the project
-    virtualenv if present, otherwise ``python3``/``python`` on PATH. Omitted when nothing
-    is found."""
+    virtualenv if present, otherwise an activated ``VIRTUAL_ENV`` (Windows) or
+    ``python``/``python3`` on PATH. Omitted when nothing is found or the line would exceed
+    ``INTERPRETER_MAX_CHARS``."""
     is_windows = platform.system() == "Windows"
     candidates = _VENV_PYTHONS_WIN if is_windows else _VENV_PYTHONS_POSIX
     for venv in _VENV_DIRS:
@@ -205,9 +206,21 @@ def python_interpreter(workspace: Path) -> str | None:
         for exe in candidates:
             if (venv_dir / exe).is_file():
                 version = _venv_python_version(venv_dir)
-                ver = f" (Python {version})" if version else ""
-                return _cap_interpreter_line(f"Python interpreter: {venv}/{exe}{ver}")
-    for name in ("python3", "python"):
+                note = f"project virtualenv, Python {version}" if version else "project virtualenv"
+                return _interpreter_line(f"{venv}/{exe}", note)
+    if is_windows:
+        active_venv = os.environ.get("VIRTUAL_ENV", "").strip()
+        if active_venv:
+            active_dir = Path(active_venv)
+            for exe in _VENV_PYTHONS_WIN:
+                candidate = active_dir / exe
+                if candidate.is_file():
+                    shown = PureWindowsPath(str(candidate)).as_posix()
+                    version = _venv_python_version(active_dir)
+                    note = f"Python {version}" if version else ""
+                    return _interpreter_line(shown, note)
+    names = ("python", "python3") if is_windows else ("python3", "python")
+    for name in names:
         found = shutil.which(name)
         if not found:
             continue
@@ -217,7 +230,8 @@ def python_interpreter(workspace: Path) -> str | None:
             and not _answers_version(found)
         ):
             continue
-        return _cap_interpreter_line(f"Python interpreter: {found}")
+        shown = PureWindowsPath(found).as_posix() if is_windows else found
+        return _interpreter_line(shown)
     return None
 
 
@@ -245,6 +259,7 @@ def python_hint() -> str | None:
     return f"Python: not installed; {placeholder}"
 
 
+@functools.lru_cache(maxsize=16)
 def _answers_version(path: str) -> bool:
     try:
         proc = subprocess.run(

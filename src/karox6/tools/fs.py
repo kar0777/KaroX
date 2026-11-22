@@ -13,6 +13,7 @@ import asyncio
 import difflib
 import re
 import stat
+import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -281,13 +282,11 @@ class _AppliedHunk:
 
 
 def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
     if isinstance(value, str):
-        lower = value.strip().lower()
-        if lower == "true":
-            return True
-        if lower == "false":
-            return False
-    return bool(value)
+        return value.strip().lower() == "true"
+    return False
 
 
 def _multi_fail(msg: str, is_multi: bool) -> str:
@@ -374,6 +373,13 @@ def _preflight_hunks(
         new_n = hunk.new.replace("\r\n", "\n")
         result = apply_edit(current, old_n, new_n, hunk.replace_all)
         if isinstance(result, str):
+            if idx > 0 and result.startswith("old_string was not found") and old_n in text:
+                earlier = "edits[0]" if idx == 1 else f"edits[0..{idx - 1}]"
+                return _multi_fail(
+                    f"edits[{idx}] matched the original file but {earlier} already changed "
+                    "that text; merge the overlapping hunks.",
+                    is_multi,
+                )
             return _multi_fail(f"{prefix}{result.replace('{path}', shown)}", is_multi)
         next_text, count, how = result
         if unsure and how != "exactly":
@@ -404,7 +410,8 @@ class EditTool:
         "Edit an existing UTF-8 text file by replacing literal text. `old_string` must match "
         "exactly one place in the file (include enough surrounding lines to make it unique) "
         "unless `replace_all` is true; do not include the `N: ` line-number prefixes shown by "
-        "read. Use `edits` for several changes to one file in one call."
+        "read. Use `edits` for several changes to one file in one call; each edit applies to "
+        "the result of the previous ones."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -417,7 +424,8 @@ class EditTool:
                 "type": "array",
                 "description": (
                     "Ordered list of replacements in this file instead of "
-                    "old_string/new_string (all-or-nothing)."
+                    "old_string/new_string (all-or-nothing; each edit applies to the result "
+                    "of the previous ones)."
                 ),
                 "items": {
                     "type": "object",
@@ -541,8 +549,15 @@ class EditTool:
         snippet = _shown_text(changed_snippets(text_lf, updated_lf)) if has_targeted else ""
         copies = ""
         if ctx.copy_notes:
-            notes = [await _copies_note(ctx, path, s.old_n, s.new_n) for s in applied]
-            copies = "".join(n for n in notes if n)
+            deadline = time.monotonic() + ctx.wait_cap_s(TIME_BUDGET_S)
+            notes: list[str] = []
+            for s in applied:
+                if deadline - time.monotonic() < 0.2:
+                    break
+                note_part = await _copies_note(ctx, path, s.old_n, s.new_n, deadline=deadline)
+                if note_part:
+                    notes.append(note_part)
+            copies = "".join(notes)
         hunk_lines = [s.line for s in applied]
         meta = {
             "path": str(path),
@@ -559,13 +574,16 @@ class EditTool:
         )
 
 
-async def _copies_note(ctx: ToolContext, path: Path, old: str, new: str) -> str:
+async def _copies_note(
+    ctx: ToolContext, path: Path, old: str, new: str, *, deadline: float | None = None
+) -> str:
     """Other places that still hold the replaced code; never fails the edit."""
     try:
         path.relative_to(ctx.workspace)
     except ValueError:
         return ""
-    budget = ctx.wait_cap_s(TIME_BUDGET_S)  # never past the run's time limit
+    wanted = TIME_BUDGET_S if deadline is None else deadline - time.monotonic()
+    budget = ctx.wait_cap_s(wanted)  # never past the run's time limit
     if budget < 0.2:
         return ""
     try:
@@ -622,7 +640,7 @@ def changed_snippets(before: str, after: str, max_lines: int = SNIPPET_MAX_LINES
     if len(before_lines) > 10_000 or len(after_lines) > 10_000:
         return changed_snippet(before, after)
     groups = list(
-        difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=True).get_grouped_opcodes(
+        difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False).get_grouped_opcodes(
             SNIPPET_CONTEXT
         )
     )

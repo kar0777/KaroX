@@ -559,5 +559,194 @@ def test_edit_multi_hunk_mixed_line_endings(ctx):
     assert "mid4 = 4" not in result.content
 
 
+def test_edit_multi_hunk_overlapping_reports_earlier_edits_and_rolls_back(ctx):
+    path = ctx.workspace / "file"
+    original = "line1\nfoo = 1\nline3\n"
+    path.write_text(original)
+    read(ctx)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "foo = 1", "new_string": "bar = 1"},
+            {"old_string": "foo = 1\nline3", "new_string": "foo = 2\nline3"},
+        ],
+    )
+    assert result.is_error
+    assert "edits[1]" in result.content
+    assert "matched the original file" in result.content
+    assert "edits[0]" in result.content
+    assert "already changed" in result.content
+    assert "merge the overlapping hunks" in result.content
+    assert "No edits were applied" in result.content
+    assert path.read_text() == original
+
+    result3 = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "line1", "new_string": "LINE1"},
+            {"old_string": "foo = 1", "new_string": "bar = 1"},
+            {"old_string": "foo = 1\nline3", "new_string": "baz = 2\nline3"},
+        ],
+    )
+    assert result3.is_error
+    assert "edits[2]" in result3.content
+    assert "edits[0..1]" in result3.content
+    assert "merge the overlapping hunks" in result3.content
+    assert path.read_text() == original
+
+
+def test_edit_multi_hunk_replace_all_strict_bool(ctx):
+    path = ctx.workspace / "file"
+    original = "x = 1\nx = 1\n"
+    path.write_text(original)
+    read(ctx)
+    for falsy in ("no", "0", 1):
+        result = call(
+            EditTool(),
+            ctx,
+            file_path="file",
+            edits=[{"old_string": "x = 1", "new_string": "x = 2", "replace_all": falsy}],
+        )
+        assert result.is_error
+        assert "2 places" in result.content
+        assert path.read_text() == original
+
+    ok = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[{"old_string": "x = 1", "new_string": "x = 2", "replace_all": "true"}],
+    )
+    assert not ok.is_error
+    assert path.read_text() == "x = 2\nx = 2\n"
+
+
+def test_edit_multi_hunk_pure_crlf_and_bom(ctx):
+    path = ctx.workspace / "file"
+    path.write_bytes(b"a = 1\r\nb = 2\r\nc = 3\r\n")
+    read(ctx)
+    res_crlf = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "a = 1", "new_string": "a = 10"},
+            {"old_string": "c = 3", "new_string": "c = 30"},
+        ],
+    )
+    assert not res_crlf.is_error
+    assert path.read_bytes() == b"a = 10\r\nb = 2\r\nc = 30\r\n"
+
+    path.write_bytes(b"\xef\xbb\xbfa = 1\r\nb = 2\r\nc = 3\r\n")
+    read(ctx)
+    res_bom_crlf = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "a = 1", "new_string": "a = 10"},
+            {"old_string": "c = 3", "new_string": "c = 30"},
+        ],
+    )
+    assert not res_bom_crlf.is_error
+    assert path.read_bytes() == b"\xef\xbb\xbfa = 10\r\nb = 2\r\nc = 30\r\n"
+
+    path.write_bytes(b"\xef\xbb\xbfa = 1\nb = 2\nc = 3\n")
+    read(ctx)
+    res_bom_lf = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "a = 1", "new_string": "a = 10"},
+            {"old_string": "c = 3", "new_string": "c = 30"},
+        ],
+    )
+    assert not res_bom_lf.is_error
+    assert path.read_bytes() == b"\xef\xbb\xbfa = 10\nb = 2\nc = 30\n"
+
+
+def test_edit_multi_hunk_unread_later_fuzzy_hunk_fails_atomically(ctx):
+    path = ctx.workspace / "file"
+    original = "exact = 1\nfuzzy = 2  \nnext = 3  \n"
+    path.write_text(original)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "exact = 1", "new_string": "exact = 10"},
+            {"old_string": "fuzzy = 2\nnext = 3", "new_string": "fuzzy = 20\nnext = 30"},
+        ],
+    )
+    assert result.is_error
+    assert "edits[1]" in result.content
+    assert "has not been read" in result.content
+    assert "No edits were applied" in result.content
+    assert path.read_text() == original
+
+
+def test_edit_multi_hunk_copies_note_shares_one_deadline(ctx, monkeypatch):
+    import dataclasses
+
+    from karox6.tools import fs
+
+    path = ctx.workspace / "file.py"
+    path.write_text("a = 1\nb = 2\nc = 3\n")
+    call(ReadTool(), ctx, file_path="file.py")
+
+    now = [100.0]
+    seen_budgets: list[float] = []
+
+    def fake_monotonic() -> float:
+        return now[0]
+
+    def fake_find_copies(_ws, _path, _old, _new, *, budget_s):
+        seen_budgets.append(budget_s)
+        now[0] += fs.TIME_BUDGET_S  # first hunk exhausts the shared budget
+        return []
+
+    monkeypatch.setattr(fs.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(fs, "find_copies", fake_find_copies)
+
+    on_ctx = dataclasses.replace(ctx, copy_notes=True)
+    result = call(
+        EditTool(),
+        on_ctx,
+        file_path="file.py",
+        edits=[
+            {"old_string": "a = 1", "new_string": "a = 10"},
+            {"old_string": "b = 2", "new_string": "b = 20"},
+            {"old_string": "c = 3", "new_string": "c = 30"},
+        ],
+    )
+    assert not result.is_error
+    assert len(seen_budgets) == 1
+    assert seen_budgets[0] <= fs.TIME_BUDGET_S
+
+
+def test_edit_changed_snippets_large_file_autojunk_false():
+    from karox6.tools.fs import changed_snippets
+
+    lines = ["}" if i % 2 == 0 else "" for i in range(250)]
+    lines[10] = "target_one = 1"
+    lines[220] = "target_two = 2"
+    before = "\n".join(lines) + "\n"
+    after_lines = list(lines)
+    after_lines[10] = "target_one = 100"
+    after_lines[220] = "target_two = 200"
+    after = "\n".join(after_lines) + "\n"
+    snippet = changed_snippets(before, after)
+    assert "11: target_one = 100" in snippet
+    assert "221: target_two = 200" in snippet
+    assert "\n...\n" in snippet
+
+
 def test_edit_tool_description_mentions_edits():
     assert "`edits`" in EditTool.description
+    assert "previous ones" in EditTool.description
+    assert "previous ones" in EditTool.parameters["properties"]["edits"]["description"]
