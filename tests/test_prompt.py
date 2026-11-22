@@ -3,7 +3,8 @@
 In the saved comparison runs (same model, DSH's prompt has no such rules) KaroX's reasoning
 quoted "smallest general change" in 17 of 17 trials and "do not broaden a contract" in 9 of
 17, and in the tasks it lost it used them to leave out the neighbouring cases the hidden
-tests checked. These tests pin the wording that replaced those two sentences.
+tests checked. These tests pin the wording that replaced those two sentences and the order
+to add tests.
 """
 
 import asyncio
@@ -74,11 +75,14 @@ def test_checks_go_beyond_the_example_of_the_task():
     assert "not from your implementation" in verify
 
 
-def test_a_task_that_says_to_leave_tests_alone_is_obeyed():
+def test_no_standing_order_to_add_tests():
+    """The bench task says to leave its tests alone; "add a few focused tests" made KaroX
+    edit a test file in 13 of 17 trials all the same (DSH, without the order: 6)."""
     verify = _section("Verify")
-    assert "Unless the task says to leave tests alone, add a few focused tests" in verify
-    # The check of neighbouring inputs comes before the tests that record it.
-    assert verify.index("inputs the task did not spell out") < verify.index("add a few focused")
+    assert "Whether to add tests is the task's and the project's call" in verify
+    assert "distinctive names so they cannot collide" in verify
+    assert "Delete temporary scripts before finishing" in verify
+    assert not re.search(r"\badd (?:a few |some |focused )+tests\b", BASE_PROMPT, re.IGNORECASE)
 
 
 def test_prompt_names_no_project_library_or_test_runner():

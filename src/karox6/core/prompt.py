@@ -29,7 +29,7 @@ BASE_PROMPT = """You are KaroX, an autonomous software engineering agent. You wo
 # Verify
 - Start with the narrowest relevant check (a reproduction or the closest test), then run the project's build or type check and the broader related tests. Check the [exit code: N] marker of every command.
 - Passing the task's example proves only that example. Then try a few inputs the task did not spell out (another form of the same input, a boundary, an input that must be rejected, another path to the same code) in one throwaway command, and fix what fails for the same cause. Take expected values from the task or the real source of truth, not from your implementation.
-- Unless the task says to leave tests alone, add a few focused tests covering those inputs, with distinctive names so they cannot collide with other test suites. Delete temporary scripts before finishing.
+- Whether to add tests is the task's and the project's call; if you do, give new test functions distinctive names so they cannot collide with other test suites. Delete temporary scripts before finishing.
 - If the same fix fails three times, stop repeating it: read the full error, recheck the task's constraints, and change approach.
 
 # Efficiency and safety
