@@ -1998,3 +1998,36 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
     model and not as evidence: whether the reasoning still argues with the words
     "smallest" or "broaden" and whether a test file is edited. A lane that refuses or is
     saturated is recorded and not tried again.
+- Replay result (run 44986591414, 04:47-04:49 UTC, bench 182359d; artifacts in
+  `karox6-bench-data/runs/devr38`): PASS by the registered rule in 5 of 5 images. Each
+  job: `karox 6.0.0.dev38` installed in 3-6 s (the 3.11 image through uv's Python 3.12),
+  16 of 16 scripted turns ok, 10 tools advertised, one finish attempt, `run_finished`
+  "completed" after 17 steps with the snapshot of the changed file, and the prompt the
+  model received is dev38's: 599 words, sha256 e73cceec60d8, with the three new bullets in
+  the logged request and neither "smallest" nor "broaden" in the base prompt. One thing
+  the logged requests show for the A/B's reading: the scrapy repository (night tasks 51
+  and 61) ships an AGENTS.md whose own rule is "Make the smallest change that solves the
+  issue"; KaroX passes project instructions to the model, so "smallest" in a reasoning
+  on those two tasks is the project's rule and is not counted against dev38.
+- Bench d9130d9, prepared and not run: probe `scope1` (`probes/scope1`, built by
+  `scripts/build_scope_cases.py`, read by `scripts/analysis/scope_probe_read.py`). Twelve
+  dev-pool KaroX trials of the night are cut just before the first step that quoted
+  "smallest ... change" or "broaden" (steps 5 to 28; later quotes are about tidying a
+  diff), and each request exists twice: with the dev37 base prompt and with dev38's.
+  `replay_probe.py` samples the model's next step for each (it now keeps the reasoning).
+  Registered reading, before any run: a mechanism check, no decision rides on it. Per
+  prompt: samples that quote the removed rules (dev38: expected 0), samples that use the
+  new ones, samples that decide by "not asked / out of scope"; and, read by eye in the
+  five cases whose trial failed, whether the sampled step takes the neighbouring case
+  the recorded step dropped. 24 cases x 2 samples = 48 requests, about 1M input tokens
+  per sample round; it tells in a quarter of an hour whether the wording moves the
+  decision at all, before the A/B spends 2,100 requests. If dev38's samples decide as
+  dev37's do, the A/B is expected to show nothing and can be skipped.
+- Checks at bc7fb40 (code unchanged after it). Windows (Python 3.12.10): ruff check and
+  format clean (119 files), mypy clean (68 files), 1175 passed, 7 skipped in 176.00s,
+  `git diff --check` clean, wheel built. Linux (WSL Ubuntu, Python 3.12.14, ripgrep on
+  PATH): 1177 passed, 6 skipped in 71.19s; ruff and mypy clean.
+- Merge readiness: `origin/karox6/main` is still ee24034 (fetched 04:50 UTC) and is an
+  ancestor of `devin/big`, so the merge is a fast-forward with no conflict (`git
+  merge-tree --write-tree origin/karox6/main devin/big` exits 0 and prints the tree of
+  `devin/big`); nothing to resolve, nothing was pushed to `karox6/main`.
