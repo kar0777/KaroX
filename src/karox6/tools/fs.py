@@ -13,6 +13,7 @@ import asyncio
 import difflib
 import re
 import stat
+import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -86,6 +87,18 @@ class ReadTool:
     }
     read_only = True
 
+    def __init__(self, *, many_max_bytes: int = READ_MANY_MAX_BYTES) -> None:
+        self.many_max_bytes = many_max_bytes
+        if many_max_bytes != READ_MANY_MAX_BYTES:
+            self.description = (
+                "Read UTF-8 text files and return line-numbered content (`N: text`). Pass every "
+                "file you need in one call via `file_paths` (up to "
+                f"{READ_MAX_BYTES // 1024} KB per file, {many_max_bytes // 1024} KB total). "
+                "Read whole files or large sections rather than small slices; use `offset` and "
+                f"`limit` (default {READ_LIMIT}) only to continue in large files. A directory "
+                "path lists its entries. Use this tool, not shell commands like cat."
+            )
+
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         many = args.get("file_paths")
         if isinstance(many, list) and many and not args.get("file_path"):
@@ -95,7 +108,7 @@ class ReadTool:
                     "file_paths reads whole files.",
                     is_error=True,
                 )
-            return _read_many([str(p) for p in many], ctx)
+            return _read_many([str(p) for p in many], ctx, max_bytes=self.many_max_bytes)
         raw = str(args.get("file_path") or args.get("path") or "")
         if not raw:
             return ToolResult(
@@ -110,10 +123,12 @@ class ReadTool:
 READ_MAX_FILES = 20
 
 
-def _read_many(paths: list[str], ctx: ToolContext) -> ToolResult:
+def _read_many(
+    paths: list[str], ctx: ToolContext, max_bytes: int = READ_MANY_MAX_BYTES
+) -> ToolResult:
     parts: list[str] = []
     errors = 0
-    budget = READ_MANY_MAX_BYTES
+    budget = max_bytes
     skipped: list[str] = []
     for raw in paths[:READ_MAX_FILES]:
         if budget <= 0:
@@ -130,7 +145,7 @@ def _read_many(paths: list[str], ctx: ToolContext) -> ToolResult:
         )
         parts.append(
             f"(Not read - this call reads at most {READ_MAX_FILES} files and "
-            f"{READ_MANY_MAX_BYTES // 1024} KB: {names}. Read them in another call.)"
+            f"{max_bytes // 1024} KB: {names}. Read them in another call.)"
         )
     return ToolResult("\n\n".join(parts), is_error=errors == len(parts) and not skipped)
 
@@ -281,6 +296,7 @@ class _AppliedHunk:
     new_n: str
     count: int
     how: str
+    line: int | None
 
 
 def _parse_bool(value: Any) -> bool:
@@ -296,8 +312,13 @@ def _parse_bool(value: Any) -> bool:
 def _parse_edit_hunks(args: dict[str, Any]) -> tuple[list[_EditHunk], bool] | str:
     """Return ``(hunks, is_multi)`` or an error message."""
     raw_edits = args.get("edits")
-    has_single = args.get("old_string") is not None or args.get("new_string") is not None
-    if raw_edits is not None:
+    old_arg = args.get("old_string")
+    new_arg = args.get("new_string")
+    has_edits = raw_edits is not None and raw_edits != []
+    if has_edits:
+        has_single = (old_arg is not None and old_arg != "") or (
+            new_arg is not None and new_arg != ""
+        )
         if has_single:
             return "invalid arguments: pass either old_string/new_string or edits, not both."
         if not isinstance(raw_edits, list) or not raw_edits:
@@ -318,16 +339,12 @@ def _parse_edit_hunks(args: dict[str, Any]) -> tuple[list[_EditHunk], bool] | st
             hunks.append(_EditHunk(old, new, _parse_bool(item.get("replace_all"))))
         return hunks, True
 
-    if args.get("old_string") is None:
+    if old_arg is None:
         return "invalid arguments: missing required 'old_string' (or 'edits')."
-    if args.get("new_string") is None:
+    if new_arg is None:
         return "invalid arguments: missing required 'new_string' (or 'edits')."
     return (
-        [
-            _EditHunk(
-                str(args["old_string"]), str(args["new_string"]), bool(args.get("replace_all"))
-            )
-        ],
+        [_EditHunk(str(old_arg), str(new_arg), _parse_bool(args.get("replace_all")))],
         False,
     )
 
@@ -346,6 +363,13 @@ def _can_keep_mixed(raw: str, hunks: list[_EditHunk]) -> bool:
     return True
 
 
+def _multi_fail(msg: str, is_multi: bool) -> str:
+    if not is_multi:
+        return msg
+    sep = "\n" if "\n" in msg else " "
+    return f"{msg}{sep}No edits were applied; the file is unchanged."
+
+
 def _preflight_hunks(
     text: str,
     hunks: list[_EditHunk],
@@ -353,6 +377,7 @@ def _preflight_hunks(
     is_multi: bool,
     shown: str,
     unsure: str,
+    original_lf: str,
 ) -> tuple[str, list[_AppliedHunk]] | str:
     current = text
     applied: list[_AppliedHunk] = []
@@ -360,21 +385,35 @@ def _preflight_hunks(
         prefix = f"edits[{idx}]: " if is_multi else ""
         old_n = hunk.old.replace("\r\n", "\n")
         new_n = hunk.new.replace("\r\n", "\n")
-        result = apply_edit(current, old_n, new_n, hunk.replace_all)
+        result = apply_edit(
+            current,
+            old_n,
+            new_n,
+            hunk.replace_all,
+            hint_text=original_lf,
+            allow_already_applied=(not is_multi or idx == 0),
+        )
         if isinstance(result, str):
-            return f"{prefix}{result.replace('{path}', shown)}"
+            return _multi_fail(f"{prefix}{result.replace('{path}', shown)}", is_multi)
         next_text, count, how = result
         if unsure and how != "exactly":
-            return (
+            return _multi_fail(
                 f"{prefix}old_string matches {shown} only approximately ({how}) and the file "
-                f"{unsure}. Read it, then retry."
+                f"{unsure}. Read it, then retry.",
+                is_multi,
             )
         if unsure and count != 1:
-            return (
+            return _multi_fail(
                 f"{prefix}replace_all would change {count} places in {shown}, which "
-                f"{unsure}. Read it, then retry."
+                f"{unsure}. Read it, then retry.",
+                is_multi,
             )
-        applied.append(_AppliedHunk(old_n, new_n, count, how))
+        line = (
+            current.count("\n", 0, current.find(old_n)) + 1
+            if count == 1 and how == "exactly"
+            else None
+        )
+        applied.append(_AppliedHunk(old_n, new_n, count, how, line))
         current = next_text
     return current, applied
 
@@ -432,14 +471,14 @@ class EditTool:
         for idx, hunk in enumerate(hunks):
             prefix = f"edits[{idx}]: " if is_multi else ""
             if hunk.old == hunk.new:
-                return ToolResult(
-                    f"Error: {prefix}old_string and new_string are identical.", is_error=True
-                )
+                msg = _multi_fail(f"{prefix}old_string and new_string are identical.", is_multi)
+                return ToolResult(f"Error: {msg}", is_error=True)
             if hunk.old == "":
-                return ToolResult(
-                    f"Error: {prefix}old_string is empty. Quote the text to replace, or use write.",
-                    is_error=True,
+                msg = _multi_fail(
+                    f"{prefix}old_string is empty. Quote the text to replace, or use write.",
+                    is_multi,
                 )
+                return ToolResult(f"Error: {msg}", is_error=True)
         # An exact, unique old_string proves the agent knows the text it replaces, even if
         # it saw the file only through shell output or the file changed since its last
         # read (its own shell command, a formatter). Only a fuzzy match needs a fresh read.
@@ -467,8 +506,17 @@ class EditTool:
             text = raw
         else:
             text = raw.replace("\r\n", "\n") if crlfs else raw
+        text_lf = text.replace("\r\n", "\n")
 
-        preflight = _preflight_hunks(text, hunks, is_multi=is_multi, shown=shown, unsure=unsure)
+        preflight = await asyncio.to_thread(
+            _preflight_hunks,
+            text,
+            hunks,
+            is_multi=is_multi,
+            shown=shown,
+            unsure=unsure,
+            original_lf=text_lf,
+        )
         if isinstance(preflight, str):
             return ToolResult(f"Error: {_shown_text(preflight)}", is_error=True)
         updated, applied = preflight
@@ -488,12 +536,12 @@ class EditTool:
             step = applied[0]
             note = f" (matched {step.how})" if step.how != "exactly" else ""
             plural = "s" if step.count != 1 else ""
-            snippet = _shown_text(changed_snippet(text, updated_lf)) if step.count == 1 else ""
+            snippet = _shown_text(changed_snippet(text_lf, updated_lf)) if step.count == 1 else ""
             copies = await _copies_note(ctx, path, step.old_n, step.new_n) if ctx.copy_notes else ""
             meta: dict[str, Any] = {"path": str(path), "match": step.how}
-            if step.count == 1 and step.how == "exactly":
+            if step.line is not None:
                 # 1-based line where the replaced text began (the chat numbers its preview)
-                meta["line"] = text.count("\n", 0, text.find(step.old_n)) + 1
+                meta["line"] = step.line
             return ToolResult(
                 f"Edited {shown}: replaced {step.count} occurrence{plural}{note}.{snippet}{copies}",
                 meta=meta,
@@ -505,16 +553,20 @@ class EditTool:
         edits_word = "edit" if len(applied) == 1 else "edits"
         repl_word = "replacement" if total_count == 1 else "replacements"
         has_targeted = any(s.count == 1 for s in applied)
-        snippet = _shown_text(changed_snippets(text, updated_lf)) if has_targeted else ""
+        snippet = _shown_text(changed_snippets(text_lf, updated_lf)) if has_targeted else ""
         copies = ""
         if ctx.copy_notes:
             notes = [await _copies_note(ctx, path, s.old_n, s.new_n) for s in applied]
             copies = "".join(n for n in notes if n)
+        hunk_lines = [s.line for s in applied]
         meta = {
             "path": str(path),
             "edits": len(applied),
             "match": "exactly" if not fuzzy else "fuzzy",
         }
+        if any(ln is not None for ln in hunk_lines):
+            meta["lines"] = hunk_lines
+            meta["line"] = next(ln for ln in hunk_lines if ln is not None)
         return ToolResult(
             f"Edited {shown}: applied {len(applied)} {edits_word} "
             f"({total_count} {repl_word}){note}.{snippet}{copies}",
@@ -585,7 +637,7 @@ def changed_snippets(before: str, after: str, max_lines: int = SNIPPET_MAX_LINES
     if len(before_lines) > 10_000 or len(after_lines) > 10_000:
         return changed_snippet(before, after)
     groups = list(
-        difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False).get_grouped_opcodes(
+        difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=True).get_grouped_opcodes(
             SNIPPET_CONTEXT
         )
     )
@@ -622,7 +674,15 @@ def changed_snippets(before: str, after: str, max_lines: int = SNIPPET_MAX_LINES
 _LINE_PREFIX = re.compile(r"^\s*\d+: ?")
 
 
-def apply_edit(text: str, old: str, new: str, replace_all: bool) -> tuple[str, int, str] | str:
+def apply_edit(
+    text: str,
+    old: str,
+    new: str,
+    replace_all: bool,
+    *,
+    hint_text: str | None = None,
+    allow_already_applied: bool = True,
+) -> tuple[str, int, str] | str:
     """Return (new text, replacements, how) or an error message (``{path}`` placeholder)."""
     count = text.count(old)
     if count == 1 or (count > 1 and replace_all):
@@ -638,7 +698,12 @@ def apply_edit(text: str, old: str, new: str, replace_all: bool) -> tuple[str, i
         done = attempt(text, old, new)
         if done is not None:
             return done, 1, how
-    return _not_found(text, old, new)
+    return _not_found(
+        text if hint_text is None else hint_text,
+        old,
+        new,
+        allow_already_applied=allow_already_applied,
+    )
 
 
 def _match_lines(text: str, needle: str) -> list[int]:
@@ -746,6 +811,8 @@ _PUNCT = {
 
 
 def _norm_punct(line: str) -> str:
+    if line.isascii():
+        return line.rstrip()
     out = []
     for ch in line:
         if unicodedata.category(ch) == "Pd" or ch == "−":
@@ -774,19 +841,38 @@ _FALLBACKS: list[tuple[str, Callable[[str, str, str], str | None]]] = [
 MISS_MAX_LINES = 12
 MISS_MAX_LINE_CHARS = 200
 MISS_MIN_APPLIED_CHARS = 20
+MISS_MIN_LINE_CHARS = 4
+MISS_MAX_LINE_HITS = 5
+MISS_SIMILARITY_MAX_LINES = 5_000
+MISS_TIME_BUDGET_S = 0.25
 
 
 def _norm_loose(text: str) -> str:
     """Normalise quotes, dashes, and collapse whitespace for loose comparison."""
+    if text.isascii():
+        return " ".join(text.split())
     return " ".join(_norm_punct(text).split())
 
 
-def _closest_region(text: str, old: str) -> str | None:
+def _norm_compare(line: str) -> str:
+    """Normalise a single line for miss-hint comparison, capped to ``MISS_MAX_LINE_CHARS``."""
+    trimmed = line.lstrip()[: MISS_MAX_LINE_CHARS * 2]
+    return _norm_loose(trimmed)[:MISS_MAX_LINE_CHARS]
+
+
+def _closest_region(
+    text: str,
+    old: str,
+    *,
+    file_lines: list[str] | None = None,
+    budget_s: float = MISS_TIME_BUDGET_S,
+) -> str | None:
     """Locate the most similar region of ``text`` to ``old`` and return up to
     ``MISS_MAX_LINES`` numbered lines (each capped at ``MISS_MAX_LINE_CHARS`` chars)."""
-    file_lines = text.split("\n")
-    if len(file_lines) > 1 and file_lines[-1] == "":
-        file_lines.pop()
+    if file_lines is None:
+        file_lines = text.split("\n")
+        if len(file_lines) > 1 and file_lines[-1] == "":
+            file_lines.pop()
     if not file_lines:
         return None
     old_lines = old.split("\n")
@@ -794,11 +880,15 @@ def _closest_region(text: str, old: str) -> str | None:
         old_lines.pop()
     while old_lines and not old_lines[0].strip():
         old_lines.pop(0)
-    query = [(i, _norm_loose(ln)) for i, ln in enumerate(old_lines) if _norm_loose(ln)]
+    query: list[tuple[int, str]] = []
+    for i, ln in enumerate(old_lines):
+        norm = _norm_compare(ln)
+        if norm:
+            query.append((i, norm))
     if not query:
         return None
 
-    norm_file = [_norm_loose(ln) for ln in file_lines]
+    norm_file = [_norm_compare(ln) for ln in file_lines]
     positions: dict[str, list[int]] = {}
     for idx, norm in enumerate(norm_file):
         if norm:
@@ -806,8 +896,10 @@ def _closest_region(text: str, old: str) -> str | None:
 
     votes: dict[int, float] = {}
     for q_idx, q_norm in query:
+        if len(q_norm) < MISS_MIN_LINE_CHARS:
+            continue
         hits = positions.get(q_norm)
-        if not hits or len(hits) > 200:
+        if not hits or len(hits) > MISS_MAX_LINE_HITS:
             continue
         weight = 1.0 / len(hits)
         for f_idx in hits:
@@ -816,21 +908,37 @@ def _closest_region(text: str, old: str) -> str | None:
             votes[start - 1] = votes.get(start - 1, 0.0) + weight * 0.5
             votes[start + 1] = votes.get(start + 1, 0.0) + weight * 0.5
 
-    if not votes and len(norm_file) <= 5000:
-        for q_idx, q_norm in query[:8]:
+    best_vote = max(votes.values(), default=0.0)
+    if best_vote < 1.0 and len(norm_file) <= MISS_SIMILARITY_MAX_LINES:
+        deadline = time.monotonic() + budget_s
+        fuzzy_query = [(i, q) for i, q in query if len(q) >= MISS_MIN_LINE_CHARS][:8]
+        candidates = [
+            (f_norm, idxs)
+            for f_norm, idxs in positions.items()
+            if len(f_norm) >= MISS_MIN_LINE_CHARS and len(idxs) <= MISS_MAX_LINE_HITS
+        ]
+        for q_idx, q_norm in fuzzy_query:
+            if time.monotonic() >= deadline:
+                break
             q_len = len(q_norm)
-            for f_idx, f_norm in enumerate(norm_file):
-                if not f_norm:
+            matcher = difflib.SequenceMatcher(None, "", q_norm, autojunk=False)
+            for step, (f_norm, idxs) in enumerate(candidates):
+                if (step & 0xFF) == 0 and time.monotonic() >= deadline:
+                    break
+                if f_norm == q_norm:
                     continue
                 f_len = len(f_norm)
                 if min(q_len, f_len) * 2 < max(q_len, f_len):
                     continue
-                matcher = difflib.SequenceMatcher(None, q_norm, f_norm, autojunk=False)
-                if matcher.quick_ratio() >= 0.5:
-                    ratio = matcher.ratio()
-                    if ratio >= 0.5:
+                matcher.set_seq1(f_norm)
+                if matcher.real_quick_ratio() < 0.5 or matcher.quick_ratio() < 0.5:
+                    continue
+                ratio = matcher.ratio()
+                if ratio >= 0.5:
+                    weight = ratio / len(idxs)
+                    for f_idx in idxs:
                         start = f_idx - q_idx
-                        votes[start] = votes.get(start, 0.0) + ratio
+                        votes[start] = votes.get(start, 0.0) + weight
 
     if not votes:
         return None
@@ -859,28 +967,40 @@ def _closest_region(text: str, old: str) -> str | None:
     return "\n".join(out)
 
 
-def _not_found(text: str, old: str, new: str = "") -> str:
-    norm_new = _norm_loose(new) if new else ""
-    if len(norm_new) >= MISS_MIN_APPLIED_CHARS and norm_new in _norm_loose(text):
-        return (
-            "old_string was not found in {path}. "
-            "new_string is already in the file: this edit may already be applied."
-        )
-    first = next((ln.strip() for ln in old.split("\n") if ln.strip()), "")
+def _not_found(text: str, old: str, new: str = "", *, allow_already_applied: bool = True) -> str:
+    text_lf = text.replace("\r\n", "\n")
+    old_lf = old.replace("\r\n", "\n")
+    new_lf = new.replace("\r\n", "\n") if new else ""
+
+    applied_note = ""
+    if allow_already_applied and new_lf:
+        norm_new = _norm_loose(new_lf)
+        if (
+            len(norm_new) >= MISS_MIN_APPLIED_CHARS
+            and new_lf not in old_lf
+            and norm_new not in _norm_loose(old_lf)
+            and text_lf.count(new_lf) == 1
+        ):
+            applied_note = " new_string is already in the file: this edit may already be applied."
+
+    file_lines = text_lf.split("\n")
+    if len(file_lines) > 1 and file_lines[-1] == "":
+        file_lines.pop()
+
+    first = next((ln.strip() for ln in old_lf.split("\n") if ln.strip()), "")
     hint = ""
     if first:
-        lines = text.split("\n")
-        near = [i + 1 for i, ln in enumerate(lines) if first in ln][:5]
+        near = [i + 1 for i, ln in enumerate(file_lines) if first in ln][:5]
         if near:
             hint = (
                 f" Its first line occurs at line(s) {', '.join(map(str, near))}; "
                 "compare the following lines with the file."
             )
-    region = _closest_region(text, old)
+    region = _closest_region(text_lf, old_lf, file_lines=file_lines)
     if region:
-        return f"old_string was not found in {{path}}.{hint}\nClosest lines in {{path}}:\n{region}"
-    return (
-        "old_string was not found in {path}."
-        + hint
-        + " Read the file again and copy the exact text."
-    )
+        return (
+            f"old_string was not found in {{path}}.{applied_note}{hint}"
+            f"\nClosest lines in {{path}}:\n{region}"
+        )
+    tail = "" if applied_note else " Read the file again and copy the exact text."
+    return f"old_string was not found in {{path}}.{applied_note}{hint}{tail}"

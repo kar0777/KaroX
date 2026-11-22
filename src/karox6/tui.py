@@ -392,6 +392,22 @@ def _edit_diff_stats(name: str, arguments: str) -> tuple[int, int] | None:
     if not isinstance(data, dict):
         return None
     if base == "edit":
+        edits = data.get("edits")
+        if isinstance(edits, list) and edits:
+            added = 0
+            removed = 0
+            valid = False
+            for item in edits:
+                if not isinstance(item, dict):
+                    continue
+                old = item.get("old_string")
+                new = item.get("new_string")
+                if isinstance(old, str) and isinstance(new, str):
+                    removed += len(old.splitlines()) if old else 0
+                    added += len(new.splitlines()) if new else 0
+                    valid = True
+            if valid:
+                return added, removed
         old = data.get("old_string")
         new = data.get("new_string")
         if isinstance(old, str) and isinstance(new, str):

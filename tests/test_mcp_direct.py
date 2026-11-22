@@ -441,3 +441,21 @@ def test_cli_masks_its_own_secrets(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("KAROX_API_KEY", "Fake0api0key0value")
     assert main([*argv, "--no-redact"]) == 2
     assert servers[-1][0].redactor is None
+
+
+def test_direct_mode_multi_read_keeps_50kb_budget(tmp_path):
+    server, direct = make_server(tmp_path)
+    line = "x" * 99 + "\n"
+    (direct.root / "a.txt").write_text(line * 380)  # ~40 KB
+    (direct.root / "b.txt").write_text(line * 380)  # ~40 KB
+
+    async def go():
+        tools = {t["name"]: t for t in (await rpc(server, "tools/list"))["result"]["tools"]}
+        assert "50 kb total" in tools["read"]["description"].lower()
+        text, error = await call(server, "read", file_paths=["a.txt", "b.txt"])
+        assert not error
+        assert len(text.encode()) < 54 * 1024
+        assert "Use offset=" in text or "(Not read" in text
+        await direct.shutdown()
+
+    asyncio.run(go())

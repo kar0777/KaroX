@@ -365,6 +365,61 @@ def test_an_edit_shows_what_it_changed_under_its_line(tmp_path):
     assert lines[at + 2] == "      5 + print('hello')"
 
 
+def test_multi_edit_stats_and_diff_preview(tmp_path):
+    from karox6.tui import _edit_diff_stats
+
+    args = json.dumps(
+        {
+            "file_path": "app.py",
+            "old_string": "",
+            "new_string": "",
+            "edits": [
+                {"old_string": "a = 1", "new_string": "a = 10\na2 = 20"},
+                {"old_string": "b = 2\nc = 3", "new_string": "b = 200"},
+            ],
+        }
+    )
+    assert _edit_diff_stats("edit", args) == (3, 3)
+    assert diff_preview("edit", args, {"lines": [2, 10]}) == [
+        ("-", "    2 - a = 1"),
+        ("+", "    2 + a = 10"),
+        ("+", "    3 + a2 = 20"),
+        ("-", "   10 - b = 2"),
+        ("-", "   11 - c = 3"),
+        ("+", "   10 + b = 200"),
+    ]
+    assert diff_preview("edit", args, {}) == [
+        ("-", "  - a = 1"),
+        ("+", "  + a = 10"),
+        ("+", "  + a2 = 20"),
+        ("-", "  - b = 2"),
+        ("-", "  - c = 3"),
+        ("+", "  + b = 200"),
+    ]
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "app.py").write_text("a = 1\n\n\nb = 2\n", encoding="utf-8")
+    multi_edit = {
+        "file_path": "app.py",
+        "edits": [
+            {"old_string": "a = 1", "new_string": "a = 10"},
+            {"old_string": "b = 2", "new_string": "b = 20\nc = 30"},
+        ],
+    }
+    _, _, term, _ = chat(
+        tmp_path, [Turn(calls=[("edit", multi_edit)]), Turn(text="ok")], ["go", "/quit"]
+    )
+    lines = term.text.splitlines()
+    at = next(i for i, line in enumerate(lines) if "edit app.py" in line)
+    assert "+3 -2" in lines[at]
+    assert lines[at + 1] == "      1 - a = 1"
+    assert lines[at + 2] == "      1 + a = 10"
+    assert lines[at + 3] == "      4 - b = 2"
+    assert lines[at + 4] == "      4 + b = 20"
+    assert lines[at + 5] == "      5 + c = 30"
+
+
 # -- /mcp, hints ----------------------------------------------------------------------
 
 

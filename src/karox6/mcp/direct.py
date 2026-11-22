@@ -21,6 +21,7 @@ from karox6.core.session import GENERIC_TOOL_CAP
 from karox6.core.store import new_session_id
 from karox6.tools.base import ApprovalRequest, Tool, ToolArgsError, ToolContext, parse_arguments
 from karox6.tools.files import FileTracker
+from karox6.tools.fs import READ_MAX_BYTES, ReadTool
 from karox6.tools.jobs import JobManager
 from karox6.tools.registry import build_tools
 from karox6.tools.screen import ScreenshotTool
@@ -115,6 +116,8 @@ class DirectTools:
         self.tools: dict[str, Tool] = {
             t.name: t for t in build_tools(shell) if t.name in DIRECT_TOOLS
         }
+        # Keep MCP direct-mode multi-file reads within a 50 KB budget for client token limits.
+        self.tools["read"] = ReadTool(many_max_bytes=READ_MAX_BYTES)
         if screenshot:
             self.tools["screenshot"] = ScreenshotTool()
         self.shell_name = "bash" if shell.kind == "bash" else "pwsh"

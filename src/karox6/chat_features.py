@@ -51,27 +51,48 @@ def diff_preview(
         return []
     if not isinstance(data, dict):
         return []
-    old, new = data.get("old_string"), data.get("new_string")
-    if not isinstance(old, str) or not isinstance(new, str):
+    hunks: list[tuple[str, str, int | None]] = []
+    edits = data.get("edits")
+    if isinstance(edits, list) and edits:
+        raw_lines = meta.get("lines")
+        line_list = raw_lines if isinstance(raw_lines, list) else []
+        for idx, item in enumerate(edits):
+            if not isinstance(item, dict):
+                continue
+            old, new = item.get("old_string"), item.get("new_string")
+            if isinstance(old, str) and isinstance(new, str):
+                ln = (
+                    line_list[idx]
+                    if idx < len(line_list)
+                    else (meta.get("line") if len(edits) == 1 else None)
+                )
+                number = ln if isinstance(ln, int) and ln > 0 else None
+                hunks.append((old, new, number))
+    else:
+        old, new = data.get("old_string"), data.get("new_string")
+        if isinstance(old, str) and isinstance(new, str):
+            start = meta.get("line")
+            number = start if isinstance(start, int) and start > 0 else None
+            hunks.append((old, new, number))
+    if not hunks:
         return []
-    before, after = old.splitlines(), new.splitlines()
-    start = meta.get("line")
-    number = start if isinstance(start, int) and start > 0 else None
     out: list[tuple[str, str]] = []
     hidden = 0
-    matcher = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
-    for tag, a1, a2, b1, b2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        rows = [("-", a1 + i, before[a1 + i]) for i in range(a2 - a1)]
-        rows += [("+", b1 + i, after[b1 + i]) for i in range(b2 - b1)]
-        for kind, offset, text in rows:
-            if len(out) >= limit:
-                hidden += 1
+    for old, new, number in hunks:
+        before, after = old.splitlines(), new.splitlines()
+        matcher = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
+        for tag, a1, a2, b1, b2 in matcher.get_opcodes():
+            if tag == "equal":
                 continue
-            label = f"{number + offset:>5} " if number is not None else "  "
-            shown = clip_cells(_plain_text(text.expandtabs(4)), PREVIEW_WIDTH)
-            out.append((kind, f"{label}{kind} {shown}"))
+            rows = [("-", a1 + i, before[a1 + i]) for i in range(a2 - a1)]
+            rows += [("+", b1 + i, after[b1 + i]) for i in range(b2 - b1)]
+            for kind, offset, text in rows:
+                if len(out) >= limit:
+                    hidden += 1
+                    continue
+                label = f"{number + offset:>5} " if number is not None else "  "
+                shown = clip_cells(_plain_text(text.expandtabs(4)), PREVIEW_WIDTH)
+                out.append((kind, f"{label}{kind} {shown}"))
     if hidden:
         out.append(("…", f"  … {hidden} more changed line{'s' if hidden != 1 else ''} (/diff)"))
     return out

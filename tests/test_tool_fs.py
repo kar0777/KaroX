@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 
 import pytest
 
@@ -468,11 +469,68 @@ def test_edit_multi_hunk_failure_rolls_back_and_names_index(ctx):
     )
     assert result.is_error
     assert "edits[1]" in result.content
+    assert "No edits were applied; the file is unchanged." in result.content
     assert path.read_text() == original
 
 
+def test_edit_multi_hunk_miss_uses_original_text_and_never_claims_applied(ctx):
+    path = ctx.workspace / "file"
+    # Duplicate hunk: edits[0] changes alpha_value in memory, edits[1] then misses.
+    original = "alpha_value = compute_something(1)\nbeta_value = 2\n"
+    path.write_text(original)
+    read(ctx)
+    hunk = {
+        "old_string": "alpha_value = compute_something(1)",
+        "new_string": "alpha_value = compute_something(2)",
+    }
+    dup = call(EditTool(), ctx, file_path="file", edits=[hunk, hunk])
+    assert dup.is_error
+    assert "edits[1]" in dup.content
+    assert "already be applied" not in dup.content
+    assert "No edits were applied; the file is unchanged." in dup.content
+    assert path.read_text() == original
+
+    # edits[0] inserts 10 lines; edits[1] miss must show original line numbers and on-disk text.
+    lines = [f"item_{i} = calculate_value({i})" for i in range(1, 25)]
+    original2 = "\n".join(lines) + "\n"
+    path.write_text(original2)
+    read(ctx)
+    inserted = "\n".join(f"inserted_only_in_memory_{i} = {i}" for i in range(10))
+    shifted = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "item_1 = calculate_value(1)", "new_string": inserted},
+            {"old_string": "item_15 = calculate_value(999)", "new_string": "item_15 = 0"},
+        ],
+    )
+    assert shifted.is_error
+    assert "edits[1]" in shifted.content
+    assert "No edits were applied; the file is unchanged." in shifted.content
+    assert "15: item_15 = calculate_value(15)" in shifted.content
+    assert "25: " not in shifted.content
+    assert "inserted_only_in_memory_" not in shifted.content
+    assert path.read_text() == original2
+
+    # Per-hunk validation failure in multi-edit also reports the file is unchanged.
+    identical = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "item_1 = calculate_value(1)", "new_string": "item_1 = 0"},
+            {"old_string": "item_2", "new_string": "item_2"},
+        ],
+    )
+    assert identical.is_error
+    assert "No edits were applied; the file is unchanged." in identical.content
+    assert path.read_text() == original2
+
+
 def test_edit_multi_hunk_validation(ctx):
-    (ctx.workspace / "file").write_text("a\nb\n")
+    path = ctx.workspace / "file"
+    path.write_text("a\nb\n")
     read(ctx)
     assert call(EditTool(), ctx, file_path="file", edits=[]).is_error
     assert call(
@@ -486,6 +544,27 @@ def test_edit_multi_hunk_validation(ctx):
     bad = call(EditTool(), ctx, file_path="file", edits=[{"old_string": "a"}])
     assert bad.is_error
     assert "edits[0]" in bad.content
+
+
+def test_edit_schema_filled_empty_fields_accepted(ctx):
+    path = ctx.workspace / "file"
+    path.write_text("a\nb\n")
+    read(ctx)
+    # Single-edit call with empty edits=[] works.
+    single = call(EditTool(), ctx, file_path="file", old_string="a", new_string="A", edits=[])
+    assert not single.is_error
+    assert path.read_text() == "A\nb\n"
+    # Multi-edit call with empty-string old_string/new_string works.
+    multi = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        old_string="",
+        new_string="",
+        edits=[{"old_string": "b", "new_string": "B"}],
+    )
+    assert not multi.is_error
+    assert path.read_text() == "A\nB\n"
 
 
 def test_edit_not_found_returns_closest_numbered_lines(ctx):
@@ -515,20 +594,127 @@ def test_edit_not_found_returns_closest_numbered_lines(ctx):
 
 
 def test_edit_not_found_already_applied_note(ctx):
-    (ctx.workspace / "file").write_text(
-        "say(\u201chello \u2014 world\u201d)\nother = 1\n", encoding="utf-8"
+    path = ctx.workspace / "file"
+    path.write_text(
+        'say("hello - world, friend")\n'
+        "    log.debug('p=%s', p)\n"
+        "    return p\n"
+        "raise NotImplementedError()\n"
+        "raise NotImplementedError()\n"
+        "other = 1\n",
+        encoding="utf-8",
     )
     read(ctx)
-    # Normalised quotes/dashes/whitespace match new_string (>= 20 chars).
-    applied = edit(ctx, 'say("old message")', 'say("hello   -   world")')
+    # Exact unique LF match (>= 20 chars) not contained in old_string: notes already-applied
+    # AND still includes the closest lines.
+    applied = edit(ctx, 'say("hello - world, buddy")', 'say("hello - world, friend")')
     assert applied.is_error
     assert "new_string is already in the file: this edit may already be applied" in applied.content
+    assert "Closest lines in file:" in applied.content
+    assert '1: say("hello - world, friend")' in applied.content
+
+    # Non-exact (loose whitespace/punctuation) match must NOT claim already-applied.
+    loose = edit(ctx, 'say("old message")', 'say("hello   -   world, friend")')
+    assert loose.is_error
+    assert "already be applied" not in loose.content
+
+    # Trimming a trailing line: new_string is contained in old_string -> never already-applied.
+    trimmed = edit(ctx, "    log.debug('p=%s', p)\n    return  p", "    log.debug('p=%s', p)")
+    assert trimmed.is_error
+    assert "already be applied" not in trimmed.content
+    assert "Closest lines in file:" in trimmed.content
+
+    # Duplicate exact match in file (> 1 occurrence) must NOT claim already-applied.
+    dup = edit(ctx, "return NotImplemented", "raise NotImplementedError()")
+    assert dup.is_error
+    assert "already be applied" not in dup.content
 
     # Short new_string (< 20 chars) must not claim already-applied even when present.
     short = edit(ctx, "other = 999", "other = 1")
     assert short.is_error
     assert "already be applied" not in short.content
-    assert "2: other = 1" in short.content
+    assert "6: other = 1" in short.content
+
+
+def test_edit_not_found_ignores_common_lines_and_finds_right_function(ctx):
+    blocks = []
+    for i in range(100):
+        name = "add" if i == 75 else f"fn_{i}"
+        blocks.append(f"function {name}(a, b) {{\n  return a + b;\n}}")
+    (ctx.workspace / "file").write_text("\n".join(blocks) + "\n")
+    read(ctx)
+    result = edit(
+        ctx, "function add(a,b){\n  return a + b;\n}", "function add(a, b) {\n  return 0;\n}"
+    )
+    assert result.is_error
+    assert "Closest lines in file:" in result.content
+    assert "226: function add(a, b) {" in result.content
+
+
+def test_edit_not_found_large_file_is_fast(ctx):
+    # 5,000 unique long lines with no exact line hit: must finish well under 0.5 s.
+    lines = [
+        f"record_{i:04d} = process_payload(alpha_{i}, beta_{i}, " + ("x" * 260) + ")"
+        for i in range(5000)
+    ]
+    (ctx.workspace / "file").write_text("\n".join(lines) + "\n")
+    read(ctx)
+    old = "\n".join(
+        f"unmatched_query_line_{k} = different_call(z_{k}, " + ("y" * 240) + ")" for k in range(8)
+    )
+    started = time.perf_counter()
+    result = edit(ctx, old, "replacement = 1")
+    elapsed = time.perf_counter() - started
+    assert result.is_error
+    assert elapsed < 0.5, f"5,000-line miss took {elapsed:.3f}s"
+
+
+def test_edit_mixed_line_endings_snippets_and_large_changed_snippets(ctx):
+    from karox6.tools.fs import changed_snippets
+
+    path = ctx.workspace / "file"
+    # CRLF lines surrounding LF lines that are edited.
+    raw = (
+        b"header1 = 1\r\nheader2 = 2\r\n"
+        b"line_a = 10\nmid1 = 1\r\nmid2 = 2\r\nmid3 = 3\r\nmid4 = 4\r\n"
+        b"mid5 = 5\r\nmid6 = 6\r\nmid7 = 7\r\nmid8 = 8\r\n"
+        b"line_b = 20\ntail1 = 1\r\ntail2 = 2\r\n"
+    )
+    path.write_bytes(raw)
+    read(ctx)
+    result = call(
+        EditTool(),
+        ctx,
+        file_path="file",
+        edits=[
+            {"old_string": "line_a = 10", "new_string": "line_a = 100"},
+            {"old_string": "line_b = 20", "new_string": "line_b = 200"},
+        ],
+    )
+    assert not result.is_error
+    written = path.read_bytes()
+    assert b"header1 = 1\r\n" in written
+    assert b"mid4 = 4\r\n" in written
+    assert b"line_a = 100\n" in written
+    assert b"line_b = 200\n" in written
+    # Snippet must only show the edited regions (not untouched middle CRLF lines).
+    assert "3: line_a = 100" in result.content
+    assert "12: line_b = 200" in result.content
+    assert "mid4 = 4" not in result.content
+
+    # 10,000-line file with thousands of repeated blank / '}' lines must diff quickly.
+    big_before_lines = [
+        "}" if i % 3 == 0 else ("" if i % 3 == 1 else f"v_{i} = {i}") for i in range(10_000)
+    ]
+    big_after_lines = list(big_before_lines)
+    big_after_lines[50] = "v_50 = 500"
+    big_after_lines[9500] = "v_9500 = 95000"
+    t0 = time.perf_counter()
+    snip = changed_snippets("\n".join(big_before_lines) + "\n", "\n".join(big_after_lines) + "\n")
+    dt = time.perf_counter() - t0
+    assert dt < 0.5, f"changed_snippets took {dt:.3f}s"
+    assert "51: v_50 = 500" in snip
+    assert "9501: v_9500 = 95000" in snip
 
 
 def test_fs_tool_descriptions_mention_new_usage():
