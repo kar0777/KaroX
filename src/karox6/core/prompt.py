@@ -1,4 +1,4 @@
-"""System prompt: short (<= 625 words), general, no task- or library-specific rules.
+"""System prompt: short (<= 600 words), general, no task- or library-specific rules.
 
 Every rule here has to earn its place in an A/B run (DECISIONS.md D-021). Tool usage
 details live in the tool descriptions, as in DSH.
@@ -34,7 +34,6 @@ BASE_PROMPT = """You are KaroX, an autonomous software engineering agent. You wo
 
 # Efficiency and safety
 - Every step re-sends the whole conversation, so prefer fewer, fuller steps: issue independent read, grep and glob calls together, combine related shell commands, read whole relevant sections at once, and do not re-read a file just to confirm an edit that succeeded.
-- Think briefly and never draft code in your reasoning: write it once, in the edit or write call.
 - Economy never justifies a partial solution: work through recoverable errors and timeouts, and keep going after the context is summarised.
 - Solve the task from the project in front of you; do not hunt for a ready-made fix in package caches, other installed copies of the code, or unreachable git objects.
 - Never discard existing work (git reset --hard, checkout of files you did not change, clean) and do not commit unless the task asks for it.
