@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 _BULK_CHARS = 32  # more text than this in one batch is a paste, not typing
 _HOT_SECONDS = 0.1  # after a merged batch, text this soon after merges too
 _NEWLINE_KEYS = (Keys.ControlJ, Keys.ControlM)
+_END_MARK = "[201~"  # what ConPTY leaves of the paste-end marker
 
 
 def _press_char(press: KeyPress) -> str | None:
@@ -54,23 +55,25 @@ def merge_pasted_runs(keys: list[KeyPress], hot: bool) -> tuple[list[KeyPress], 
     """Merge each run of text presses that a paste would make into one
     ``BracketedPaste`` press. ``hot`` merges every text run (the tail of a paste
     still arriving); returns whether anything merged, so the caller keeps the
-    paste hot for the next batch."""
+    paste hot for the next batch. A paste-end marker closes the paste: what comes
+    after it (an Enter that submits) stays ordinary key presses."""
     out: list[KeyPress] = []
     run: list[KeyPress] = []
     merged = False
+    ended = False
 
-    def flush() -> None:
+    def flush(force: bool = False) -> None:
         nonlocal merged
         if not run:
             return
         ends = sum(p.key in _NEWLINE_KEYS for p in run)
         inside = ends - (1 if run[-1].key in _NEWLINE_KEYS else 0)
         chars = len(run) - ends
-        if hot or inside >= 2 or chars >= _BULK_CHARS:
+        if force or hot or inside >= 2 or chars >= _BULK_CHARS:
             data = "".join(_press_char(p) or "" for p in run)
             # ConPTY eats the markers except for a stray "[201~" tail it leaves
             # behind; a "[200~" head goes with it in case a console is kinder.
-            data = data.removeprefix("[200~").removesuffix("[201~")
+            data = data.removeprefix("[200~").removesuffix(_END_MARK)
             if data:
                 out.append(KeyPress(Keys.BracketedPaste, data))
                 merged = True
@@ -82,10 +85,15 @@ def merge_pasted_runs(keys: list[KeyPress], hot: bool) -> tuple[list[KeyPress], 
         if _press_char(press) is None:
             flush()
             out.append(press)
-        else:
-            run.append(press)
+            continue
+        run.append(press)
+        tail = "".join(_press_char(p) or "" for p in run[-len(_END_MARK) :])
+        if tail == _END_MARK:
+            flush(force=True)
+            hot = False  # the paste is over: the rest of the batch is typing
+            ended = True
     flush()
-    return out, merged
+    return out, merged and not ended
 
 
 class _CoalescingInput:

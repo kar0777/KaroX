@@ -124,6 +124,22 @@ def test_the_paste_tail_merges_while_hot_and_a_stray_marker_drops():
     assert out == []
 
 
+def test_an_enter_right_after_the_paste_end_marker_submits():
+    from prompt_toolkit.keys import Keys
+
+    from karox6.tui_input import merge_pasted_runs
+
+    # The marker arrives with the paste tail, an Enter in the same batch stays a key.
+    out, still_open = merge_pasted_runs(_presses("tail\n[201~\r"), hot=True)
+    assert not still_open
+    assert [p.key for p in out] == [Keys.BracketedPaste, Keys.ControlM]
+    assert out[0].data == "tail\n"
+    # A short paste tail that only the marker proves is still merged.
+    out, still_open = merge_pasted_runs(_presses("ab[201~"), hot=False)
+    assert not still_open
+    assert [(p.key, p.data) for p in out] == [(Keys.BracketedPaste, "ab")]
+
+
 def test_real_keys_split_a_paste_run_but_stay_keys():
     from prompt_toolkit.key_binding.key_processor import KeyPress
     from prompt_toolkit.keys import Keys
