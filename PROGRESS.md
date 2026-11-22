@@ -2306,3 +2306,7 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   cancelled. Runs: mab7 45058058840 (Dahl, same rule), hkcal 45058061581 (Haiku 5.5, dev42,
   night 58-69, calibration). hk1 smoke (Haiku, 1 task): 30 steps, 95% cache reads, ~$0.08,
   Haiku used only bash (29 calls, no read/edit).
+- htrio1 (run 45060704412, Haiku 5.5 anthropic lane, night 58-69, 1 attempt): solved KaroX dev48 7,
+  Claude Code 2.1.329 7, OpenCode 6 of 12. Calls 151 / 306 / 241; input 3.6M / 15.9M / 6.5M;
+  est. cost $0.15 / $0.35 / $0.19. hkcal (dev42, same tasks): 5 solved, 170 calls, 3.9M.
+  First trio where KaroX ties the best solve count at half the calls and a quarter of the input.
