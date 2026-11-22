@@ -1830,3 +1830,13 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   `reasoning.effort`, which the gateway replaces with the profile's, as for every arm.
 - 01:31 UTC, devab1 dispatched: run 44971868428 (bench 6a4201d, both arms on the dev36
   wheel, karox6b with `--compact-at 170000`), one job, disc 18 then 19.
+- 01:36 UTC, checks at 768b4d1 (code unchanged since 573ded0) and the dev37 wheel.
+  Windows: ruff check and format clean, mypy clean (68 files), 1166 passed, 7 skipped,
+  `git diff --check` clean, `scripts/perf_check.py` start 136.5 ms, idle RSS 31.3 MiB.
+  Linux (WSL Ubuntu, Python 3.12.14, ripgrep on PATH): 1168 passed, 6 skipped (the six
+  are Windows-only: job objects, GDI capture), ruff and mypy clean. Every test file also
+  passes when run alone, on both systems (46 files). `karox6-6.0.0.dev37-py3-none-any.whl`
+  built from 768b4d1 and installed into a fresh Linux venv: `karox run --json` with the
+  bench adapter's flags against a scripted model ran one shell call and ended
+  "completed". The wheel is in the bench (01872b1) and has not run in the bench images;
+  tonight's runs name dev35 or dev36. A dispatch that names no wheel takes dev37 from now.
