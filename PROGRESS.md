@@ -2285,3 +2285,10 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   in both AND solves >= dev42 - 1). mab5+mab6 also give two dev42 samples per task.
 - dtrio44 (run 45041237551, Dahl, night 43-45, trio with dev44): 0/0/0 solved; ok calls
   KaroX 172, DSH 181, OpenCode 164; input 5.5M / 6.2M / 5.1M (all failed, so all ran long).
+- mab6 result (run 45050085837, Dahl, night 46-57, dev42 vs dev46): 12/12 valid, solved 2 vs 2
+  (dev42 aqua-3283, dev46 markdown-1669, both nicegui-6485). Calls 639 vs 682 (+7%), input
+  30.4M vs 38.1M (+25%), model time 3.1 h vs 4.7 h. Rule (calls >= 15% lower) not met:
+  dev46 tool changes (steps/tools) NOT adopted. Tool shape is not the lever; next is dev47
+  (proportionate verification prompt, checker inventory, sticky eased effort) per the
+  2026-11-22 brainstorm (Fusion Opus, Gemini Neon, GPT-6.2 Sol all ranked the Verify ritual
+  in core/prompt.py first and advised against a bundled local model).
