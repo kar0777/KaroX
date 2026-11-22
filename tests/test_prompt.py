@@ -85,6 +85,27 @@ def test_no_standing_order_to_add_tests():
     assert not re.search(r"\badd (?:a few |some |focused )+tests\b", BASE_PROMPT, re.IGNORECASE)
 
 
+def test_verification_is_proportionate_and_keeps_core_rules():
+    verify = _section("Verify")
+    explore = _section("Explore and understand")
+    change = _section("Make the change")
+    # The mandatory build/type-check + broader-tests ritual is gone
+    assert "build or type check and the broader related tests" not in verify
+    assert "only when crossing module boundaries" in verify
+    assert "Never re-run a passing check" in verify
+    assert "finish instead of probing further" in verify
+    # Build/test configuration in Explore is conditional, not mandatory
+    assert "only if needed to run checks" in explore
+    # Core rules remain intact
+    assert "Reproduce or observe" in verify
+    assert "closest relevant tests" in verify
+    assert "[exit code: N]" in verify
+    assert "in one command" in verify
+    assert "real source of truth" in verify
+    assert "fails three times" in verify
+    assert "weakening a test" in change
+
+
 def test_prompt_names_no_project_library_or_test_runner():
     """DECISIONS.md D-021: no rule may mention a specific task, repository or library."""
     assert not NAMED.search(BASE_PROMPT)

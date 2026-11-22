@@ -19,7 +19,7 @@ BASE_PROMPT = """You are KaroX, an autonomous software engineering agent. You wo
 
 # Explore and understand
 - What the task states is exact: required names, signatures, return shapes, accepted and rejected types, and what must be preserved or excluded. Its examples are samples: other forms of the same input and other paths to the same behaviour belong to the task unless it rules them out.
-- Read the relevant code, its callers, neighbouring tests and the build/test configuration to find the root cause, confirm the signatures and libraries you will use, and learn how this project runs its checks.
+- Read relevant code, callers and neighbouring tests for root cause, signatures and libraries; read build/test configuration only if needed to run checks.
 - When output must match something existing (a schema, another function's output, a format), inspect that source and compare against its real output, not a copy you wrote by hand.
 
 # Make the change
@@ -27,10 +27,11 @@ BASE_PROMPT = """You are KaroX, an autonomous software engineering agent. You wo
 - Never make a check pass by deleting, skipping or weakening a test, suppressing a type error, loosening configuration, or rewriting a docstring to match faulty code. A failing test usually points at your code.
 
 # Verify
-- Start with the narrowest relevant check (a reproduction or the closest test), then run the project's build or type check and the broader related tests. Check the [exit code: N] marker of every command.
-- Passing the task's example proves only that example. Then try a few inputs the task did not spell out (another form of the same input, a boundary, an input that must be rejected, another path to the same code) in one throwaway command, and fix what fails for the same cause. Take expected values from the task or the real source of truth, not from your implementation.
-- Whether to add tests is the task's and the project's call; if you do, give new test functions distinctive names so they cannot collide with other test suites. Delete temporary scripts before finishing.
-- If the same fix fails three times, stop repeating it: read the full error, recheck the task's constraints, and change approach.
+- Reproduce or observe the problem; after fixing, run the closest relevant tests and reproduction (check every [exit code: N] marker). Run broader tests or a build only when crossing module boundaries, touching shared/public behaviour, or the project requires it.
+- Passing the task's example proves only that example: check a few inputs the task did not spell out (another form of the same input, a boundary, an input that must be rejected, another path to the same code) in one command and fix what fails for the same cause; take expected values from the task or real source of truth, not from your implementation.
+- Never re-run a passing check with unchanged inputs; once relevant checks pass, finish instead of probing further.
+- Whether to add tests is the task's and the project's call; use distinctive names so they cannot collide. Delete temporary scripts before finishing.
+- If the same fix fails three times, stop: read the full error, recheck constraints, and change approach.
 
 # Efficiency and safety
 - Every step re-sends the whole conversation, so prefer fewer, fuller steps: issue independent read, grep and glob calls together, combine related shell commands, read whole relevant sections at once, and do not re-read a file just to confirm an edit that succeeded.
@@ -76,7 +77,51 @@ def environment_block(workspace: Path, shell: ShellInfo) -> str:
     if hint:
         lines.append(f"- {hint}")
     lines.extend(f"- {item}" for item in project_inventory(workspace))
+    lines.append(f"- {checker_inventory(workspace)}")
     return "\n".join(lines)
+
+
+COMMON_CHECKERS = (
+    "pytest",
+    "ruff",
+    "mypy",
+    "pyright",
+    "flake8",
+    "node",
+    "npx",
+    "tsc",
+    "eslint",
+    "go",
+    "cargo",
+)
+CHECKER_INVENTORY_MAX_CHARS = 300
+_VENV_EXE_EXTS = ("", ".exe", ".cmd", ".bat")
+
+
+def checker_inventory(workspace: Path) -> str:
+    """One-line inventory of common checkers/runners found on PATH or in a project venv.
+    Pure filesystem + PATH lookup (no subprocesses), bounded to <= 300 chars."""
+    venv_dirs = [
+        d
+        for venv in (".venv", "venv")
+        for sub in ("Scripts", "bin")
+        if (d := workspace / venv / sub).is_dir()
+    ]
+
+    def has_tool(name: str) -> bool:
+        if any((d / f"{name}{ext}").is_file() for d in venv_dirs for ext in _VENV_EXE_EXTS):
+            return True
+        return shutil.which(name) is not None
+
+    present = [name for name in COMMON_CHECKERS if has_tool(name)]
+    absent = [name for name in COMMON_CHECKERS if name not in present]
+    parts = [f"Checkers (PATH/venv): {', '.join(present) if present else 'none'}"]
+    if absent:
+        parts.append(f"not installed: {', '.join(absent)}")
+    line = "; ".join(parts)
+    if len(line) > CHECKER_INVENTORY_MAX_CHARS:
+        line = line[: CHECKER_INVENTORY_MAX_CHARS - 3] + "..."
+    return line
 
 
 _MAKE_TARGET = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?![:=])", re.M)

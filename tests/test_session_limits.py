@@ -7,6 +7,7 @@ from karox6.context.compaction import COMPACTION_INSTRUCTION, PRUNE_MARKER
 from karox6.core import events as ev
 from karox6.core.messages import Message, ToolCall, Usage
 from karox6.core.session import (
+    EASED_EFFORT_STEPS,
     THINKING_CUT_NOTICE,
     TRUNCATION_NOTICE,
     Session,
@@ -52,25 +53,61 @@ def test_a_reply_cut_mid_text_keeps_the_write_shorter_notice(tmp_path):
     assert provider.requests[1].messages[-1].content == TRUNCATION_NOTICE
 
 
-def test_effort_is_eased_after_all_thinking_cuts_and_restored_by_a_reply(tmp_path):
+def test_effort_is_eased_for_fixed_window_then_restored(tmp_path):
+    # One thinking cut eases effort for EASED_EFFORT_STEPS (8) model steps, then restores it.
+    tool_turns = [
+        Turn(calls=[("glob", {"pattern": f"p{i}.none"})]) for i in range(EASED_EFFORT_STEPS)
+    ]
+    provider = ScriptedProvider([thinking_cut(), *tool_turns, Turn(text="done")])
+    session = Session(config(tmp_path, reasoning_effort="high"), provider)
+    events = run(session)
+    assert events[-1].status == "completed"
+    efforts = [r.reasoning_effort for r in provider.requests]
+    assert efforts == ["high", *(["medium"] * EASED_EFFORT_STEPS), "high"]
+    eased = [e.text for e in events if isinstance(e, ev.Notice) and e.kind == "effort"]
+    assert eased == [f"reasoning effort medium for the next {EASED_EFFORT_STEPS} steps"]
+
+
+def test_effort_steps_down_on_consecutive_cuts_and_restores_after_window(tmp_path):
     provider = ScriptedProvider(
-        [thinking_cut(), thinking_cut(), Turn(text="done"), Turn(text="again")]
+        [
+            thinking_cut(),
+            thinking_cut(),
+            *[Turn(calls=[("glob", {"pattern": f"q{i}.none"})]) for i in range(EASED_EFFORT_STEPS)],
+            Turn(text="done"),
+        ]
     )
     session = Session(config(tmp_path, reasoning_effort="max"), provider)
     events = run(session)
     assert events[-1].status == "completed"
-    assert [r.reasoning_effort for r in provider.requests] == ["max", "high", "medium"]
+    assert [r.reasoning_effort for r in provider.requests] == [
+        "max",
+        "high",
+        *(["medium"] * EASED_EFFORT_STEPS),
+        "max",
+    ]
     eased = [e.text for e in events if isinstance(e, ev.Notice) and e.kind == "effort"]
     assert eased == [
-        "reasoning effort high until a reply fits",
-        "reasoning effort medium until a reply fits",
+        f"reasoning effort high for the next {EASED_EFFORT_STEPS} steps",
+        f"reasoning effort medium for the next {EASED_EFFORT_STEPS} steps",
     ]
     # the effort notice is for the user only: the model got just the two cut notices
     kinds = [m.meta.get("kind") for m in session.messages if m.role == "user"]
     assert kinds == [None, "truncated", "truncated"]
-    # a reply came through: the next turn asks for the configured effort again
-    run(session, "more")
-    assert provider.requests[3].reasoning_effort == "max"
+
+
+def test_unconfigured_effort_stays_unset_across_sticky_window(tmp_path):
+    turns = [
+        thinking_cut(),
+        Turn(calls=[("glob", {"pattern": "a.none"})]),
+        Turn(text="done"),
+    ]
+    provider = ScriptedProvider(turns)
+    session = Session(config(tmp_path), provider)
+    events = run(session)
+    assert events[-1].status == "completed"
+    assert [r.reasoning_effort for r in provider.requests] == [None, None, None]
+    assert not [e for e in events if isinstance(e, ev.Notice) and e.kind == "effort"]
 
 
 def test_the_lowest_effort_is_not_lowered_further(tmp_path):

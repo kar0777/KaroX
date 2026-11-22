@@ -1,6 +1,14 @@
 import json
 
-from karox6.core.prompt import project_inventory
+from karox6.core import prompt as prompt_mod
+from karox6.core.prompt import (
+    CHECKER_INVENTORY_MAX_CHARS,
+    COMMON_CHECKERS,
+    checker_inventory,
+    environment_block,
+    project_inventory,
+)
+from karox6.tools.shell import detect_shell
 
 
 def test_inventory_lists_declared_project_facts(tmp_path):
@@ -41,3 +49,39 @@ def test_inventory_bounds_long_names(tmp_path):
     (tmp_path / "package.json").write_text(json.dumps({"scripts": {"x" * 100_000: "y"}}))
     (line,) = project_inventory(tmp_path)
     assert len(line) < 500
+
+
+def test_checker_inventory_reports_present_and_absent_tools(tmp_path, monkeypatch):
+    (tmp_path / ".venv" / "Scripts").mkdir(parents=True)
+    (tmp_path / ".venv" / "Scripts" / "pytest.exe").write_text("")
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "bin" / "ruff").write_text("")
+    on_path = {"go": "/usr/local/bin/go", "node": "/usr/bin/node"}
+    monkeypatch.setattr(prompt_mod.shutil, "which", on_path.get)
+
+    line = checker_inventory(tmp_path)
+    assert "\n" not in line
+    assert len(line) <= CHECKER_INVENTORY_MAX_CHARS
+    available_part, missing_part = line.split("; not installed: ")
+    assert available_part == "Checkers (PATH/venv): pytest, ruff, node, go"
+    for absent in ("mypy", "pyright", "flake8", "npx", "tsc", "eslint", "cargo"):
+        assert absent in missing_part
+    # Stable across calls (prefix caching)
+    assert checker_inventory(tmp_path) == line
+    env = environment_block(tmp_path, detect_shell())
+    assert f"- {line}" in env
+    assert environment_block(tmp_path, detect_shell()) == env
+
+
+def test_checker_inventory_handles_all_absent_and_all_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(prompt_mod.shutil, "which", lambda _name: None)
+    none_line = checker_inventory(tmp_path)
+    assert none_line.startswith("Checkers (PATH/venv): none; not installed: ")
+    assert all(tool in none_line for tool in COMMON_CHECKERS)
+    assert len(none_line) <= CHECKER_INVENTORY_MAX_CHARS
+
+    monkeypatch.setattr(prompt_mod.shutil, "which", lambda name: f"/bin/{name}")
+    all_line = checker_inventory(tmp_path)
+    assert "not installed" not in all_line
+    assert all(tool in all_line for tool in COMMON_CHECKERS)
+    assert len(all_line) <= CHECKER_INVENTORY_MAX_CHARS

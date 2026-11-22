@@ -94,8 +94,10 @@ THINKING_CUT_NOTICE = (
     "what you have already worked out, decide on the next single action, and take it now "
     "with a tool call (or give your answer). Keep your thinking for this step brief."
 )
-# Asked for after a reply that was all reasoning: one step lower than the configured effort.
+# Asked for after a reply that was all reasoning: one step lower than the configured effort,
+# held for EASED_EFFORT_STEPS model steps so a tight output limit does not cut the next step too.
 EASIER_EFFORT = {"max": "high", "xhigh": "high", "high": "medium", "medium": "low"}
+EASED_EFFORT_STEPS = 8
 # An empty reply (reasoning only, no text and no tool call) repeats when the same request
 # is sent again: some providers cache identical requests and replay the empty answer
 # (gtrio2: 11 of 24 KaroX runs died this way on Dahl while the retries came back in ~1 s
@@ -184,6 +186,7 @@ class Session:
         self._last_cached_tokens = 0  # of the last request that measured the context
         self._chars_since_measure = 0
         self._effort: str | None = None  # eased reasoning effort after an all-thinking cut
+        self._effort_steps = 0  # remaining model steps to hold self._effort
         self._deadline: float | None = None  # monotonic end of the current run
         self._learned_window: int | None = None  # from a context-window error
         if not self.resumed:
@@ -325,10 +328,11 @@ class Session:
                         self._ease_effort(emit)
                         self._notice("truncated", THINKING_CUT_NOTICE, emit)
                     else:
+                        self._tick_eased_effort()
                         self._notice("truncated", TRUNCATION_NOTICE, emit)
                     continue
                 truncations = 0  # the limit is on consecutive cut-off replies
-                self._effort = None  # a reply came through: back to the configured effort
+                self._tick_eased_effort()
                 if not message.tool_calls:
                     final_text = message.content
                     if response.finish_reason == "content_filter":
@@ -510,12 +514,27 @@ class Session:
 
     def _ease_effort(self, emit: Callable[[ev.Event], None]) -> None:
         """After a reply that spent the whole output limit on reasoning: ask for one step
-        less effort until a reply comes through. Only when an effort is configured (the
-        provider then accepts the field); a gateway that pins the effort ignores it."""
+        less effort for the next ``EASED_EFFORT_STEPS`` model steps. Only when an effort is
+        configured (the provider then accepts the field); a gateway that pins the effort
+        ignores it."""
         easier = EASIER_EFFORT.get(self._effort or self.config.reasoning_effort or "")
         if easier is not None:
             self._effort = easier
-            emit(ev.Notice(kind="effort", text=f"reasoning effort {easier} until a reply fits"))
+            self._effort_steps = EASED_EFFORT_STEPS
+            emit(
+                ev.Notice(
+                    kind="effort",
+                    text=f"reasoning effort {easier} for the next {EASED_EFFORT_STEPS} steps",
+                )
+            )
+        elif self._effort is not None:
+            self._effort_steps = EASED_EFFORT_STEPS
+
+    def _tick_eased_effort(self) -> None:
+        if self._effort_steps > 0:
+            self._effort_steps -= 1
+            if self._effort_steps == 0:
+                self._effort = None
 
     def _replay_view(self, messages: list[Message]) -> list[Message]:
         """Drop reasoning the provider should not see again (``replay_reasoning`` policy)."""
@@ -883,6 +902,7 @@ class Session:
         self._last_input_tokens = 0
         self._last_cached_tokens = 0
         self._effort = None
+        self._effort_steps = 0
         if provider_changed:
             for message in self.messages:
                 message.extra = {}
