@@ -2363,3 +2363,12 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   none; 37 by neither). Weekly Pass allowance ($2.50) ran out on the last 2 tasks (47, 70; both
   arms same outcome there). Clean 47: 11 vs 10. Output tokens 1.24M vs 0.53M (KaroX 2.3x).
   KaroX = Claude Code on solves; no longer cheaper on output.
+- dev53 (finish gate + progress guard; Neon + Fusion review) mine53 (Haiku, 25 mine x4, run 45160173878):
+  solves 29/100 vs dev42 31/100 attempts (9 vs 8 tasks), p=0.94 -> not adopted for solves. Gate fired 92/100,
+  changed 0 verdicts (verified by Neon). Org concurrency limit: 28-33% gateway retries, 0 attempts ended by them.
+  Council round 3 (unanimous): stop chasing solve rate on this pool (both CLIs fail the same tasks; ~half need PR
+  context); make cost/speed KaroX's edge.
+- dev54 = progress guard only (finish gate off) + danger.py fix (shell redirections were parsed as rm targets:
+  `rm -rf x 2>/dev/null` asked approval for /dev/null). cost54 (run 45181003432, 8 mine tasks, 1 att, parallel 4,
+  pre-registered bench/prereg_dev54.md): all 4 stable tasks solved; output tokens 0.42x dev42 (151k vs 363k
+  mean). ADOPTED: merged into karox6/main as the new base.
