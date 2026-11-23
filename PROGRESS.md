@@ -2350,3 +2350,16 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   NOT adopted. With hab4 (-9%) the baseline tool's call effect is noise-level, not a win.
   Base stays dev42. Side note: agy's global MCP servers (threejs devtools -> Chrome :9222,
   playwright) started on every helper run; parked out of mcpServers with the user's consent.
+- Strategy council (agy Neon, Codex gpt-6.2-sol, Devin Fusion): 12-task A/Bs are blind (dev42 alone
+  11-13/24); the -15%-calls rule is the wrong gate (use solves + $); interviews are hypotheses;
+  pre-register a mine/frozen split. Failure audit of 288 dev-set attempts (Neon): 0/146 failures
+  decided by interview complaints (missing deps, test command, exit-code masking, edit friction);
+  114/146 wrong_fix; 5 dev tasks never solved by anyone; montepy fails on a pre-existing
+  Hypothesis flake.
+- Split pre-registered (cae1ed7, bench/night_holdout_split.json: mine 25 / frozen 24). All 49 were
+  gold-validated at build (data/validation_slim.jsonl valid=true).
+- Token Harbor lane (Agent Pass, Haiku 5.5 via tokenharbor.ai): hold49 (run 45136669090,
+  dev42 vs Claude Code, 49 held-out, 1 att): solved 12 vs 11 (only KaroX: conan-20449; only CC:
+  none; 37 by neither). Weekly Pass allowance ($2.50) ran out on the last 2 tasks (47, 70; both
+  arms same outcome there). Clean 47: 11 vs 10. Output tokens 1.24M vs 0.53M (KaroX 2.3x).
+  KaroX = Claude Code on solves; no longer cheaper on output.
