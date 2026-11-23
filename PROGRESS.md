@@ -2390,3 +2390,6 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   dev54, both native provider, 8 mine tasks, 1 att. dev54 4/8, median wall 96 s, $0.116; dev55 3/8 (lost
   isort-2750 again), 125 s, $0.132. NOT ADOPTED. Note dev54 itself moved 117 s -> 96 s between runs: 8-task
   single-attempt wall medians are too noisy to detect <25% speed changes; prompt nudges did not shorten tool time.
+- dev56 (merged): --provider defaults to the native Anthropic Messages provider for claude-* models when base_url
+  is unset or exactly https://api.anthropic.com (else openai-chat; explicit flag/env/config still win). Reason:
+  native54 (-53% output). Fusion review fixed /v1 base URLs and proxy-path matching. dev55 not merged.
