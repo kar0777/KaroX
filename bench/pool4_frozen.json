@@ -1,0 +1,32 @@
+{
+ "created": "2026-11-24",
+ "rule": "pool4 = all 24 RED/GREEN-valid candidates of scripts/collect_fresh.py run 2 (same window 2026-11-11..23, same filters, earlier pools' candidates excluded). FROZEN like pool3; pool3+pool4 (67 tasks) may be used together as one blind pool; at most 2 pre-registered comparisons on the union, pool3 comparison 1 counts as one.",
+ "bench_commit": "60e3ed08a40150a083d1f6582b497610954d37ea",
+ "hard12_tasks_tree": "73794467653dbdb2651971166d7a384d636d1465",
+ "ids": {
+  "117": "crossgl-crosstl-4433",
+  "118": "nesquena-hermes-webui-9092",
+  "119": "crossgl-crosstl-4919",
+  "120": "deepset-ai-haystack-13746",
+  "121": "conan-io-conan-20539",
+  "122": "conan-io-conan-20518",
+  "123": "apache-iceberg-python-4384",
+  "124": "nesquena-hermes-webui-9051",
+  "125": "unit8co-darts-3382",
+  "126": "apache-iceberg-python-4305",
+  "127": "unit8co-darts-3353",
+  "128": "a2aproject-a2a-python-1456",
+  "129": "deepset-ai-haystack-13424",
+  "130": "pydicom-pydicom-2392",
+  "131": "sqlfluff-sqlfluff-9085",
+  "132": "uxarray-uxarray-1861",
+  "133": "graphistry-pygraphistry-2302",
+  "134": "ag2ai-faststream-3362",
+  "135": "getmoto-moto-10297",
+  "136": "graphistry-pygraphistry-2352",
+  "137": "pydicom-pydicom-2423",
+  "138": "zauberzeug-nicegui-6509",
+  "139": "pycqa-isort-2789",
+  "140": "pycqa-isort-2674"
+ }
+}
