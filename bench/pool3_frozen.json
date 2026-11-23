@@ -47,5 +47,6 @@
   "114": "gammapy-gammapy-7014",
   "115": "python-wheel-build-fromager-1459",
   "116": "open-telemetry-opentelemetry-python-5724"
- }
+ },
+ "grader_fix_2026_11_24": "devin/bench commit after 7cc5983: test.sh restores hidden test files one by one (batch checkout was a no-op when a new file was listed). Affects 4 pool3 tasks' graders; in pool3a the only trials touching protected existing tests were briefcase-3155 and sqlfluff-8849, both arms, all reward 0, so the verdict cannot change by more than a symmetric flip."
 }

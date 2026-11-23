@@ -2409,3 +2409,14 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   $ 0.433 vs 0.712 (0.61x); median wall 135 s vs 141 s (0.96x); calls 588 vs 793; input 13.5M vs 34.5M; output
   372k vs 466k; 0 gateway errors, 0 exceptions. VERDICT per rule: Claude Code wins (solves more). KaroX is now
   clearly cheaper (-39%) and not slower on fresh tasks; the remaining gap is solve rate.
+- Council 8 (Codex + Neon, 2026-11-24 night): skip paid solve screens for now. Power: a +3/43 effect is ~18%
+  detectable on 43 tasks, ~5% on 25; ~95-160 independent tasks needed. Neon's mine failure taxonomy: 42%
+  incomplete fixes (sibling paths), wrong interpretation, wrong API names; KaroX edits existing tests in 43% of
+  runs (CC 28%); Traceback with exit 0 in 59% of runs (`;` chains). Candidate kept for later: "preserve existing
+  tests, put new coverage in a separate file" prompt line (no screen yet).
+- Grader bug fixed (bench devin/bench): `git checkout <base> -- $TEST_FILES` aborted entirely when TEST_FILES
+  listed a new file, so agent edits to existing hidden-test files survived grading (11 of 117 tasks). Now one by
+  one. Audit of saved runs: affected trials were all reward 0 (pool3a: both arms on the same 2 tasks), so no
+  verdict changes.
+- pool4: same collector/window/filters, excluding pool3 candidates: 55 candidates -> validation (free GHA) to
+  grow the blind pool toward the ~90+ tasks needed for power.
