@@ -79,8 +79,9 @@ def test_no_standing_order_to_add_tests():
     """The bench task says to leave its tests alone; "add a few focused tests" made KaroX
     edit a test file in 13 of 17 trials all the same (DSH, without the order: 6)."""
     verify = _section("Verify")
-    assert "Whether to add tests is the task's and the project's call" in verify
-    assert "distinctive names so they cannot collide" in verify
+    assert "Adding tests is the task's and project's call" in verify
+    assert "use a new test file, distinctive names" in verify
+    assert "keep existing tests and fixtures unless the task changes them" in verify
     assert "Delete temporary scripts before finishing" in verify
     assert not re.search(r"\badd (?:a few |some |focused )+tests\b", BASE_PROMPT, re.IGNORECASE)
 
