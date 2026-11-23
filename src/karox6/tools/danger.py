@@ -15,8 +15,8 @@ from __future__ import annotations
 import ntpath
 import posixpath
 import re
-import shlex
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -62,23 +62,117 @@ def _basename(value: str) -> str:
     return re.sub(r"\.(?:exe|cmd|bat)$", "", name)
 
 
-def _tokens(text: str) -> list[str]:
-    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>\n")
-    lexer.whitespace_split = True
-    lexer.whitespace = " \t\r"
-    lexer.escape = ""
-    lexer.commenters = ""
-    try:
-        tokens = list(lexer)
-        result: list[str] = []
-        for token in tokens:
-            if re.fullmatch(r"[;&|()\n]+", token):
-                result.extend(re.findall(r"&&|\|\||[;&|()\n]", token))
+@dataclass(frozen=True, slots=True)
+class _Token:
+    kind: Literal["word", "sep", "redir"]
+    value: str
+
+
+_REDIR_OPS = ("&>>", "&>", "<<<", "<<-", "<<", "<&", "<>", ">>", ">&", ">|", "<", ">")
+_FD_REDIR_OPS = ("<<<", "<<-", "<<", "<&", "<>", ">>", ">&", ">|", "<", ">")
+_PWSH_ALL_REDIR_OPS = (">>", ">&", ">")
+_OUTPUT_REDIR_OPS = {">", ">>", ">|", "<>", "&>", "&>>", ">&"}
+
+
+def _match_prefix(text: str, pos: int, prefixes: tuple[str, ...]) -> str | None:
+    for op in prefixes:
+        if text.startswith(op, pos):
+            return op
+    return None
+
+
+def _tokenize(text: str, shell: str = "bash") -> list[_Token]:
+    tokens: list[_Token] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in " \t\r":
+            i += 1
+            continue
+        if ch == "\n":
+            tokens.append(_Token("sep", "\n"))
+            i += 1
+            continue
+        if text.startswith(("&&", "||"), i):
+            tokens.append(_Token("sep", text[i : i + 2]))
+            i += 2
+            continue
+        if shell == "bash" and text.startswith("|&", i):
+            tokens.append(_Token("sep", "|"))
+            i += 2
+            continue
+        if op := _match_prefix(text, i, _REDIR_OPS):
+            tokens.append(_Token("redir", op))
+            i += len(op)
+            continue
+        if ch in ";|&()":
+            tokens.append(_Token("sep", ch))
+            i += 1
+            continue
+        after_redir = bool(tokens) and tokens[-1].kind == "redir"
+        if not after_redir and ch.isdigit():
+            j = i
+            while j < n and text[j].isdigit():
+                j += 1
+            if op := _match_prefix(text, j, _FD_REDIR_OPS):
+                tokens.append(_Token("redir", op))
+                i = j + len(op)
+                continue
+        if (
+            not after_redir
+            and shell == "pwsh"
+            and ch == "*"
+            and (op := _match_prefix(text, i + 1, _PWSH_ALL_REDIR_OPS))
+        ):
+            tokens.append(_Token("redir", op))
+            i += 1 + len(op)
+            continue
+        buf: list[str] = []
+        while i < n:
+            c = text[i]
+            if c in " \t\r\n;|&()<>":
+                break
+            if c in "'\"":
+                i += 1
+                end = text.find(c, i)
+                if end < 0:
+                    buf.append(text[i:])
+                    i = n
+                else:
+                    buf.append(text[i:end])
+                    i = end + 1
             else:
-                result.append(token)
-        return result
-    except ValueError:
-        return re.findall(r"&&|\|\||>>|[;&|()<>]|[^\s;&|()<>]+", text)
+                buf.append(c)
+                i += 1
+        tokens.append(_Token("word", "".join(buf)))
+    return tokens
+
+
+def _split_redirections(segment: list[_Token]) -> tuple[list[str], list[str], list[str]]:
+    """Separate command arguments from redirection operators and their targets.
+
+    Returns ``(args, output_targets, herestrings)``.
+    """
+    args: list[str] = []
+    outputs: list[str] = []
+    herestrings: list[str] = []
+    i = 0
+    while i < len(segment):
+        tok = segment[i]
+        if tok.kind == "redir":
+            if i + 1 < len(segment) and segment[i + 1].kind == "word":
+                target = segment[i + 1].value
+                if tok.value in _OUTPUT_REDIR_OPS:
+                    outputs.append(target)
+                elif tok.value == "<<<":
+                    herestrings.append(target)
+                i += 2
+            else:
+                i += 1
+        else:
+            args.append(tok.value)
+            i += 1
+    return args, outputs, herestrings
 
 
 def _substitutions(text: str, shell: str) -> list[str]:
@@ -199,26 +293,29 @@ class _Checker:
             found = self.scan(inner, shell, cwd, depth + 1) if inner.strip() else None
             if found:
                 return found
-        tokens = _tokens(text)
-        segments: list[tuple[list[str], str]] = []
-        part: list[str] = []
+        tokens = _tokenize(text, shell)
+        segments: list[tuple[list[_Token], str]] = []
+        part: list[_Token] = []
         separator = ""
         for token in tokens:
-            if token in {";", "&&", "||", "|", "&", "(", ")", "\n"}:
+            if token.kind == "sep":
                 if part:
                     segments.append((part, separator))
                     part = []
-                separator = token
+                separator = token.value
             else:
                 part.append(token)
         if part:
             segments.append((part, separator))
         producer: list[str] = []
         current = cwd
-        for args, sep in segments:
+        for raw, sep in segments:
             if sep != "|":
                 producer = []
-            found = self.simple(args, shell, current, depth, producer)
+            args, outputs, herestrings = _split_redirections(raw)
+            found = self.simple(
+                args, shell, current, depth, producer, outputs=outputs, herestrings=herestrings
+            )
             if found:
                 return found
             if args and _basename(args[0]) == "cd" and len(args) > 1:
@@ -227,19 +324,33 @@ class _Checker:
         return None
 
     def simple(
-        self, args: list[str], shell: str, cwd: str, depth: int, producer: list[str]
+        self,
+        args: list[str],
+        shell: str,
+        cwd: str,
+        depth: int,
+        producer: list[str],
+        *,
+        outputs: Sequence[str] = (),
+        herestrings: Sequence[str] = (),
     ) -> DangerMatch | None:
         if not args:
+            if any(_DEVICE.match(t) for t in outputs):
+                return _match("redirect.block-device", "disk device")
             return None
         args = args[:]
         while args and _ASSIGN.match(args[0]):
             args.pop(0)
         if not args:
+            if any(_DEVICE.match(t) for t in outputs):
+                return _match("redirect.block-device", "disk device")
             return None
         if shell == "bash" and "\\" in args[0] and depth < 8:
             # Unquoted, bash drops the backslashes (r\m is rm); quoted, it is a Windows path.
             unescaped = [args[0].replace("\\", ""), *args[1:]]
-            found = self.simple(unescaped, shell, cwd, depth + 1, producer)
+            found = self.simple(
+                unescaped, shell, cwd, depth + 1, producer, outputs=outputs, herestrings=herestrings
+            )
             if found:
                 return found
         name = _basename(args[0])
@@ -298,7 +409,13 @@ class _Checker:
                 args = [*args[index:], *targets]
             else:
                 args = args[index:]
-            return self.simple(args, shell, cwd, depth + 1, []) if depth < 8 else None
+            return (
+                self.simple(
+                    args, shell, cwd, depth + 1, [], outputs=outputs, herestrings=herestrings
+                )
+                if depth < 8
+                else None
+            )
         if name in {"bash", "sh", "zsh", "dash", "ksh", "pwsh", "powershell", "cmd"}:
             for i, arg in enumerate(args[1:], 1):
                 if arg.lower() in {"-c", "-lc", "-command", "/c"} and i + 1 < len(args):
@@ -418,10 +535,9 @@ class _Checker:
             or name in {"diskpart", "format-volume", "clear-disk", "initialize-disk"}
         ):
             return _match("disk.erase", "disk")
-        if any(
-            args[i] in {">", ">>"} and i + 1 < len(args) and _DEVICE.match(args[i + 1])
-            for i in range(len(args))
-        ) or (name == "tee" and any(_DEVICE.match(a) for a in args[1:])):
+        if any(_DEVICE.match(t) for t in outputs) or (
+            name == "tee" and any(_DEVICE.match(a) for a in args[1:])
+        ):
             return _match("redirect.block-device", "disk device")
         if name == "git" and "push" in args[1:]:
             index = args.index("push")
@@ -435,6 +551,7 @@ class _Checker:
                 return _match("git.push-force", "remote repository")
         if name in _DATABASES and (
             _SQL.search(" ".join(args[1:]))
+            or _SQL.search(" ".join(herestrings))
             or (
                 producer
                 and _basename(producer[0]) in {"echo", "printf"}

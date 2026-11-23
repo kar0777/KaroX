@@ -137,7 +137,7 @@ def test_finish_gate_fires_once_with_lists_and_store_record(tmp_path: Path) -> N
             Turn(text="verified final answer"),
         ]
     )
-    cfg = SessionConfig(model="m", workspace=ws, home=tmp_path / "home")
+    cfg = SessionConfig(model="m", workspace=ws, home=tmp_path / "home", finish_gate=True)
     session = Session(cfg, provider)
     events = run(session)
     done = finished(events)
@@ -206,7 +206,9 @@ def test_finish_gate_lists_modified_existing_tests_and_caps_changed_files(tmp_pa
     )
 
     provider = ScriptedProvider([Turn(calls=edits), Turn(text="first"), Turn(text="second")])
-    session = Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "home"), provider)
+    session = Session(
+        SessionConfig(model="m", workspace=ws, home=tmp_path / "home", finish_gate=True), provider
+    )
     events = run(session)
     gate_notices = [e for e in events if isinstance(e, ev.Notice) and e.kind == "finish_gate"]
     assert len(gate_notices) == 1
@@ -240,7 +242,12 @@ def test_finish_gate_dirty_tree_excludes_preexisting_user_test_edits(tmp_path: P
             Turn(text="final"),
         ]
     )
-    events = run(Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "h1"), provider))
+    events = run(
+        Session(
+            SessionConfig(model="m", workspace=ws, home=tmp_path / "h1", finish_gate=True),
+            provider,
+        )
+    )
     gate_notices = [e for e in events if isinstance(e, ev.Notice) and e.kind == "finish_gate"]
     assert len(gate_notices) == 1
     msg = gate_notices[0].text
@@ -267,7 +274,12 @@ def test_finish_gate_dirty_tree_excludes_preexisting_user_test_edits(tmp_path: P
             Turn(text="final2"),
         ]
     )
-    events2 = run(Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "h2"), provider2))
+    events2 = run(
+        Session(
+            SessionConfig(model="m", workspace=ws, home=tmp_path / "h2", finish_gate=True),
+            provider2,
+        )
+    )
     gate_notices2 = [e for e in events2 if isinstance(e, ev.Notice) and e.kind == "finish_gate"]
     assert len(gate_notices2) == 1
     assert "Existing test files you modified: tests/test_app.py." in gate_notices2[0].text
@@ -279,7 +291,11 @@ def test_finish_gate_does_not_fire_without_changes_or_outside_git(tmp_path: Path
     ws = make_repo(tmp_path, files={"app.py": "x = 1\n", ".gitignore": "ignored.log\n"})
     (ws / "ignored.log").write_text("noise\n", encoding="utf-8")
     provider = ScriptedProvider([Turn(text="nothing to change")])
-    events = run(Session(SessionConfig(model="m", workspace=ws, home=ws / "home"), provider))
+    events = run(
+        Session(
+            SessionConfig(model="m", workspace=ws, home=ws / "home", finish_gate=True), provider
+        )
+    )
     assert finished(events).final_text == "nothing to change"
     assert len(provider.requests) == 1
     assert not [e for e in events if isinstance(e, ev.Notice) and e.kind == "finish_gate"]
@@ -288,7 +304,10 @@ def test_finish_gate_does_not_fire_without_changes_or_outside_git(tmp_path: Path
     (ws / "app.py").write_text("x = 2\n", encoding="utf-8")
     provider_pre = ScriptedProvider([Turn(text="read-only answer")])
     events_pre = run(
-        Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "h_pre"), provider_pre)
+        Session(
+            SessionConfig(model="m", workspace=ws, home=tmp_path / "h_pre", finish_gate=True),
+            provider_pre,
+        )
     )
     assert finished(events_pre).final_text == "read-only answer"
     assert len(provider_pre.requests) == 1
@@ -301,7 +320,10 @@ def test_finish_gate_does_not_fire_without_changes_or_outside_git(tmp_path: Path
         [Turn(calls=[("write", {"file_path": "a.py", "content": "x = 1\n"})]), Turn(text="done")]
     )
     events2 = run(
-        Session(SessionConfig(model="m", workspace=plain, home=tmp_path / "h2"), provider2)
+        Session(
+            SessionConfig(model="m", workspace=plain, home=tmp_path / "h2", finish_gate=True),
+            provider2,
+        )
     )
     assert finished(events2).final_text == "done"
     assert len(provider2.requests) == 2
@@ -325,7 +347,12 @@ def test_finish_gate_skips_length_and_content_filter(tmp_path: Path) -> None:
             Turn(text="blocked", finish_reason="content_filter"),
         ]
     )
-    events = run(Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "home"), provider))
+    events = run(
+        Session(
+            SessionConfig(model="m", workspace=ws, home=tmp_path / "home", finish_gate=True),
+            provider,
+        )
+    )
     done = finished(events)
     assert done.status == "error"
     assert "content_filter" in done.reason
@@ -354,7 +381,9 @@ def test_finish_gate_skips_subagents_and_read_only_sessions(tmp_path: Path) -> N
         ]
     )
     parent = Session(
-        SessionConfig(model="m", workspace=ws, home=tmp_path / "home", subagents=True),
+        SessionConfig(
+            model="m", workspace=ws, home=tmp_path / "home", subagents=True, finish_gate=True
+        ),
         provider,
     )
     events = run(parent)
@@ -366,7 +395,7 @@ def test_finish_gate_skips_subagents_and_read_only_sessions(tmp_path: Path) -> N
     # Read-only session with only read-only tools also skips finish gate.
     ro_provider = ScriptedProvider([Turn(text="read only done")])
     ro_session = Session(
-        SessionConfig(model="m", workspace=ws, home=tmp_path / "home-ro"),
+        SessionConfig(model="m", workspace=ws, home=tmp_path / "home-ro", finish_gate=True),
         ro_provider,
         tools=[ReadTool()],
     )
@@ -379,7 +408,7 @@ def test_finish_gate_skips_subagents_and_read_only_sessions(tmp_path: Path) -> N
 def test_finish_gate_repl_fires_once_per_run_and_drops_store_reparse(tmp_path: Path) -> None:
     ws = make_repo(tmp_path)
     home = tmp_path / "home"
-    cfg = SessionConfig(model="m", workspace=ws, home=home)
+    cfg = SessionConfig(model="m", workspace=ws, home=home, finish_gate=True)
     assert not hasattr(SessionStore, "has_finish_gate")
 
     provider = ScriptedProvider(
@@ -451,7 +480,9 @@ def test_finish_gate_8_step_cap_tools_less_turn_and_gate_text_fallback(tmp_path:
         Turn(text="final cap summary"),  # step 10: tools-less turn
     ]
     provider = ScriptedProvider(turns)
-    session = Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "h1"), provider)
+    session = Session(
+        SessionConfig(model="m", workspace=ws, home=tmp_path / "h1", finish_gate=True), provider
+    )
     events = run(session)
     done = finished(events)
     assert done.status == "completed"
@@ -482,7 +513,9 @@ def test_finish_gate_8_step_cap_tools_less_turn_and_gate_text_fallback(tmp_path:
         ],
     ]
     provider2 = ScriptedProvider(turns2)
-    session2 = Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "h2"), provider2)
+    session2 = Session(
+        SessionConfig(model="m", workspace=ws, home=tmp_path / "h2", finish_gate=True), provider2
+    )
     events2 = run(session2)
     done2 = finished(events2)
     assert done2.status == "completed"
@@ -513,7 +546,9 @@ def test_finish_gate_skips_near_step_limit_and_deadline_and_preserves_gate_text(
     )
     events_step = run(
         Session(
-            SessionConfig(model="m", workspace=ws, home=tmp_path / "h1", max_steps=3),
+            SessionConfig(
+                model="m", workspace=ws, home=tmp_path / "h1", max_steps=3, finish_gate=True
+            ),
             p_step,
         )
     )
@@ -539,7 +574,9 @@ def test_finish_gate_skips_near_step_limit_and_deadline_and_preserves_gate_text(
     )
     events_time = run(
         Session(
-            SessionConfig(model="m", workspace=ws, home=tmp_path / "h2", max_seconds=60.0),
+            SessionConfig(
+                model="m", workspace=ws, home=tmp_path / "h2", max_seconds=60.0, finish_gate=True
+            ),
             p_time,
         )
     )
@@ -568,7 +605,9 @@ def test_finish_gate_skips_near_step_limit_and_deadline_and_preserves_gate_text(
     )
     events_limit = run(
         Session(
-            SessionConfig(model="m", workspace=ws, home=tmp_path / "h3", max_steps=4),
+            SessionConfig(
+                model="m", workspace=ws, home=tmp_path / "h3", max_steps=4, finish_gate=True
+            ),
             p_limit,
         )
     )
@@ -593,7 +632,9 @@ def test_finish_gate_skips_near_step_limit_and_deadline_and_preserves_gate_text(
         ]
     )
     sess_dl = Session(
-        SessionConfig(model="m", workspace=ws, home=tmp_path / "h4", max_seconds=300.0),
+        SessionConfig(
+            model="m", workspace=ws, home=tmp_path / "h4", max_seconds=300.0, finish_gate=True
+        ),
         p_dl,
     )
     real_call = sess_dl._call_model
@@ -654,6 +695,7 @@ def test_finish_gate_does_not_rearm_after_midrun_compaction(tmp_path: Path) -> N
         workspace=ws,
         home=tmp_path / "home",
         compact_at_tokens=4000,
+        finish_gate=True,
         progress_guard=False,
     )
     session = Session(cfg, provider)
@@ -682,7 +724,8 @@ def test_finish_gate_flag_off_matches_old_behaviour(tmp_path: Path) -> None:
             Turn(text="done"),
         ]
     )
-    cfg = SessionConfig(model="m", workspace=ws, home=tmp_path / "home", finish_gate=False)
+    cfg = SessionConfig(model="m", workspace=ws, home=tmp_path / "home")
+    assert cfg.finish_gate is False
     events = run(Session(cfg, provider))
     assert finished(events).final_text == "done"
     assert len(provider.requests) == 2
@@ -704,7 +747,12 @@ def test_repo_with_no_head_supports_finish_gate_and_progress_guard(tmp_path: Pat
             Turn(text="verified"),
         ]
     )
-    events = run(Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "home"), provider))
+    events = run(
+        Session(
+            SessionConfig(model="m", workspace=ws, home=tmp_path / "home", finish_gate=True),
+            provider,
+        )
+    )
     done = finished(events)
     assert done.status == "completed"
     assert done.final_text == "verified"
@@ -809,7 +857,7 @@ def test_home_inside_workspace_and_backslash_ignore_entries(tmp_path: Path) -> N
     # workspace progress (progress guard still fires at step 12) and must NOT trigger finish_gate.
     turns = [Turn(calls=[("glob", {"pattern": f"k{i}*"})]) for i in range(13)] + [Turn(text="done")]
     provider = ScriptedProvider(turns)
-    cfg = SessionConfig(model="m", workspace=ws, home=home)
+    cfg = SessionConfig(model="m", workspace=ws, home=home, finish_gate=True)
     events = run(Session(cfg, provider))
     assert finished(events).final_text == "done"
     pg_notices = [e for e in events if isinstance(e, ev.Notice) and e.kind == "progress_guard"]
@@ -1002,35 +1050,41 @@ def test_progress_guard_flag_off_matches_old_behaviour(tmp_path: Path) -> None:
 # -- CLI and config flags -----------------------------------------------------------------
 
 
-def test_flags_default_on_and_cli_config_switchable(
+def test_flags_defaults_and_cli_config_switchable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("KAROX_HOME", str(tmp_path))
-    # Defaults ON
+    # Defaults: finish_gate OFF, progress_guard ON
+    default_cfg = SessionConfig(model="m")
+    assert default_cfg.finish_gate is False
+    assert default_cfg.progress_guard is True
+
     args = cli._parser().parse_args(["run", "--model", "m", "task"])
     cfg = cli._session_config(args, tmp_path, tmp_path / "home", stream_deltas=False)
-    assert cfg.finish_gate is True
+    assert cfg.finish_gate is False
     assert cfg.progress_guard is True
 
-    # CLI flags switch them OFF
-    args_off = cli._parser().parse_args(
-        ["run", "--model", "m", "--no-finish-gate", "--no-progress-guard", "task"]
+    # CLI flags toggle both
+    args_toggled = cli._parser().parse_args(
+        ["run", "--model", "m", "--finish-gate", "--no-progress-guard", "task"]
     )
-    cfg_off = cli._session_config(args_off, tmp_path, tmp_path / "home", stream_deltas=False)
-    assert cfg_off.finish_gate is False
-    assert cfg_off.progress_guard is False
+    cfg_toggled = cli._session_config(
+        args_toggled, tmp_path, tmp_path / "home", stream_deltas=False
+    )
+    assert cfg_toggled.finish_gate is True
+    assert cfg_toggled.progress_guard is False
 
-    # config.toml switches them OFF, and CLI flags can turn them back ON
+    # config.toml switches both, and CLI flags can override them back
     (tmp_path / "config.toml").write_text(
-        "finish_gate = false\nprogress_guard = false\n", encoding="utf-8"
+        "finish_gate = true\nprogress_guard = false\n", encoding="utf-8"
     )
     settings = load_settings()
-    assert settings == {"finish_gate": False, "progress_guard": False}
+    assert settings == {"finish_gate": True, "progress_guard": False}
     args_cfg = cli._parser(settings).parse_args(["run", "--model", "m", "task"])
-    assert args_cfg.finish_gate is False
+    assert args_cfg.finish_gate is True
     assert args_cfg.progress_guard is False
     args_override = cli._parser(settings).parse_args(
-        ["run", "--model", "m", "--finish-gate", "--progress-guard", "task"]
+        ["run", "--model", "m", "--no-finish-gate", "--progress-guard", "task"]
     )
-    assert args_override.finish_gate is True
+    assert args_override.finish_gate is False
     assert args_override.progress_guard is True

@@ -306,3 +306,129 @@ def test_powershell_safe() -> None:
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf tests/__pycache__ 2>/dev/null",
+        "rm -rf /tmp/x 2>/dev/null; true",
+        "rm -rf build 2>/dev/null",
+        "rm -rf build 2> /dev/null",
+        "rm -rf build 2>>/dev/null",
+        "rm -rf build 2>> /dev/null",
+        "rm -rf build >/dev/null",
+        "rm -rf build > /dev/null",
+        "rm -rf build >>/dev/null",
+        "rm -rf build >> /dev/null",
+        "rm -rf build </dev/null",
+        "rm -rf build < /dev/null",
+        "rm -rf build &>/dev/null",
+        "rm -rf build &> /dev/null",
+        "rm -rf build &>>/dev/null",
+        "rm -rf build &>> /dev/null",
+        "rm -rf build 2>&1",
+        "rm -rf build 2>& 1",
+        "rm -rf build >&2",
+        "rm -rf build >& 2",
+        "rm -rf build 0<&3",
+        "rm -rf build 0<& 3",
+        "rm -rf build 1>&2 2>/dev/null",
+        "rm -rf build >/dev/null 2>&1",
+        "rm -rf build 2>&-",
+        "rm -rf build >|/dev/null",
+        "rm -rf build 3<>/dev/null",
+        "rm -rf build <<<word",
+        "rm -rf build <<< word",
+        "rm -rf build <<</",
+        "rm -rf build <<< /",
+        "rm -rf build >/etc/out",
+        "rm -rf build </etc/passwd",
+        "2>/dev/null rm -rf build",
+        "sudo rm -rf build 2>/dev/null",
+        "find . -name '*.pyc' -delete 2>/dev/null",
+        "find . -exec rm -rf build {} \\; 2>/dev/null",
+        "fdisk -l 2>/dev/null",
+        "parted -l 2> /dev/null",
+        "git push origin feature 2>/dev/null",
+        "git push origin feature > +log",
+        'psql -c "SELECT 1" > "drop database.log"',
+        'cmd /c "rd /s build 2>nul"',
+        'cmd /c "rd /s build 2> .git"',
+        "head -c 512 < /dev/sda",
+    ],
+)
+def test_redirections_are_not_arguments_safe(command: str) -> None:
+    assert check_command(command, cwd=CWD, workspace=CWD, home=HOME) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "rule"),
+    [
+        ("rm -rf / 2>/dev/null", "rm.recursive-force-root-or-home"),
+        ("rm -rf / 2> /dev/null", "rm.recursive-force-root-or-home"),
+        ("rm -rf ~ >/dev/null", "rm.recursive-force-root-or-home"),
+        ("rm -rf ~ &>/dev/null", "rm.recursive-force-root-or-home"),
+        ("rm -rf .. 2>&1", "rm.recursive-force-cwd-self"),
+        ("rm -rf .. 2>& 1", "rm.recursive-force-cwd-self"),
+        ("2>/dev/null rm -rf /", "rm.recursive-force-root-or-home"),
+        ("rm 2>/dev/null -rf /", "rm.recursive-force-root-or-home"),
+        ("rm -rf *>/dev/null", "rm.recursive-force-cwd-self"),
+        ("rm -rf />/dev/null", "rm.recursive-force-root-or-home"),
+        ("rm -rf ~>/dev/null", "rm.recursive-force-root-or-home"),
+        ("rm -rf ..>/dev/null", "rm.recursive-force-cwd-self"),
+        ('rm -rf / <<< "safe"', "rm.recursive-force-root-or-home"),
+        ('rm -rf build 2>"" /', "rm.recursive-force-root-or-home"),
+        ("cd / 2>/dev/null && rm -rf *", "rm.recursive-force-root-or-home"),
+        ("2>/dev/null cd / && rm -rf *", "rm.recursive-force-root-or-home"),
+        ("find / -delete 2>/dev/null", "find.delete-root-or-home"),
+        ("fdisk /dev/sda 2>/dev/null", "mkfs.device"),
+        ("git push -f origin main 2>/dev/null", "git.push-force"),
+        ("echo x >/dev/sda", "redirect.block-device"),
+        ("echo x 2>/dev/sda", "redirect.block-device"),
+        ("echo x &>/dev/sda", "redirect.block-device"),
+        ("echo x &>>/dev/nvme0n1", "redirect.block-device"),
+        (">/dev/sda", "redirect.block-device"),
+        ('psql <<<"DROP DATABASE x"', "sql.drop-database"),
+        ('sudo psql <<< "DROP DATABASE x"', "sql.drop-database"),
+        ('cmd /c "rd /s C:/ 2>nul"', "cmd.recursive-delete-root-or-home"),
+    ],
+)
+def test_redirections_preserve_real_detections(command: str, rule: str) -> None:
+    result = check_command(command, cwd=CWD, workspace=CWD, home=HOME)
+    assert result is not None, command
+    assert result.rule == rule
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Remove-Item -Recurse x 2>$null",
+        "Remove-Item -Recurse x 2> $null",
+        "Remove-Item -Recurse x *>$null",
+        "Remove-Item -Recurse x *> $null",
+        "Remove-Item -Recurse x *>&1",
+        "Remove-Item -Recurse x 2>&1",
+        "Remove-Item -Recurse x > .git",
+        "Remove-Item -Recurse x 2> C:/",
+        "Remove-Item -Recurse x 3>>C:/log.txt",
+    ],
+)
+def test_powershell_redirections_safe(command: str) -> None:
+    assert check_command(command, shell="pwsh", cwd=CWD, workspace=CWD, home=HOME) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "rule"),
+    [
+        ("Remove-Item -Recurse C:/ 2>$null", "powershell.remove-item-root-or-home"),
+        ("Remove-Item -Recurse ~ *>$null", "powershell.remove-item-root-or-home"),
+        ("Remove-Item -Recurse * 2>$null", "powershell.remove-item-cwd-self"),
+        ("Remove-Item -Recurse * > out.txt", "powershell.remove-item-cwd-self"),
+        ("Remove-Item -Recurse .git 2>$null", "powershell.remove-item-git-metadata"),
+    ],
+)
+def test_powershell_redirections_dangerous(command: str, rule: str) -> None:
+    result = check_command(command, shell="pwsh", cwd=CWD, workspace=CWD, home=HOME)
+    assert result is not None, command
+    assert result.rule == rule

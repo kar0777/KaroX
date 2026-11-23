@@ -425,8 +425,8 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
     p.add_argument(
         "--finish-gate",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="check changes once before finishing in a git repo (default: on)",
+        default=False,
+        help="check changes once before finishing in a git repo (default: off)",
     )
     p.add_argument(
         "--progress-guard",
