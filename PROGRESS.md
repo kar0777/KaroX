@@ -2378,3 +2378,10 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   8 tasks, 1 att, parallel 4): output/call 1211 -> 724 (Claude Code ~759), total output 185k -> 88k (-53%),
   input 5.1M -> 3.1M, calls 153 -> 121; solves 4 vs 3 (native lost isort-2750 by a wrong fix after a normal
   13-step run; isort also failed 1/4 for dev53 in mine53, likely noise; confirm on frozen).
+- final24 (run 45195346792, frozen 24 tasks, candidate 1 of 2, pre-registered bench/prereg_final_frozen.md):
+  KaroX dev54 native provider vs Claude Code 2.1.329, Haiku 5.5, 1 att, parallel 6. All 404 KaroX calls were
+  anthropic_messages; 0 gateway errors. Solved KaroX 4/24 vs Claude Code 5/24 (only difference: conan-20449).
+  $ (audit, interview excluded): 0.449 vs 0.474 (0.95x). Median agent wall/task 155 s vs 99 s (1.57x).
+  Calls 404 vs 474; output 363k vs 347k; input 13.4M vs 20.9M. One KaroX infra error: crosstl-4294 hit the
+  3430 s time limit (Claude Code also ran 1812 s there). VERDICT per pre-registration: Claude Code wins (solves
+  more). Frozen trajectories stay unread; one frozen candidate left.
