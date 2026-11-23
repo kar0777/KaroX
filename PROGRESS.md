@@ -2343,3 +2343,10 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   NOT met: not adopted; best call reduction of dev47-51. Interviews (48): baseline used in 10/24
   dev51 sessions, all 10 called it useful; marker barely noticed; top remaining complaint:
   missing tools/deps unknown up front (33/48).
+- dev52 (steps/dev52 66f1b67 = dev51 + env preflight: configured checkers available/not found
+  with location, declared test/dev packages missing from .venv read from site-packages, nothing
+  executed; Neon + Fusion review). hab5 (run 45128870728, Haiku, dev42 vs dev52, 2 att): 11 vs 10
+  of 24 (5 vs 4 tasks), calls 304 vs 358 (+18%), input 5.9M vs 8.2M. baseline used 25x.
+  NOT adopted. With hab4 (-9%) the baseline tool's call effect is noise-level, not a win.
+  Base stays dev42. Side note: agy's global MCP servers (threejs devtools -> Chrome :9222,
+  playwright) started on every helper run; parked out of mcpServers with the user's consent.
