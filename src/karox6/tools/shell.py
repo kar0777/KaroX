@@ -19,10 +19,11 @@ from typing import Any, Literal
 from karox6.context.spill import limit_output
 from karox6.tools.base import ApprovalRequest, ToolContext, ToolResult
 from karox6.tools.danger import check_command
-from karox6.tools.proc import ProcessRun
+from karox6.tools.proc import ProcessRun, silence_note
 
 DEFAULT_TIMEOUT_MS = 120_000
-MAX_TIMEOUT_MS = 600_000
+MAX_TIMEOUT_MS = 120_000
+ELAPSED_MARKER_MIN_S = 5.0
 INLINE_CHARS = 30_000
 
 ENV_OVERRIDES = {
@@ -249,23 +250,27 @@ class ShellTool:
             raise
         text, _complete = run.output_text()
         if finished:
-            marker = f"[exit code: {run.returncode}]"
+            elapsed = run.elapsed_s
+            took = f"; {elapsed:.1f} s" if elapsed >= ELAPSED_MARKER_MIN_S else ""
+            marker = f"[exit code: {run.returncode}{took}]"
             meta: dict[str, Any] = {"exit_code": run.returncode}
             if run.active:  # a process it started (`server &`) still writes to the output
                 job = ctx.jobs.register(run)
                 job.read_offset = run.total_bytes
+                silence = silence_note(run)
                 marker = (
-                    f"[exit code: {run.returncode}; a process it started is still running and "
-                    f"writing to this output: background job {job.id}. Use job_output to "
-                    "read it, job_kill to stop it.]"
+                    f"[exit code: {run.returncode}{took}; a process it started is still running "
+                    f"and writing to this output: background job {job.id}{silence}. Use "
+                    "job_output to read it, job_kill to stop it.]"
                 )
                 meta["job_id"] = job.id
         else:
             job = ctx.jobs.register(run)
             job.read_offset = run.total_bytes
+            silence = silence_note(run)
             marker = (
-                f"[still running after {int(waited_s * 1000)} ms; moved to background job "
-                f"{job.id}. "
+                f"[still running after {int(waited_s * 1000)} ms{silence}; moved to background "
+                f"job {job.id}. "
                 "Use job_output to read more output or wait for it, job_kill to stop it.]"
             )
             meta = {"job_id": job.id, "timed_out": True}

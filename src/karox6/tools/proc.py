@@ -17,6 +17,7 @@ from karox6.lifetime import bind_to_karox, join_karox_job
 
 HEAD_CAP = 64 * 1024
 TAIL_CAP = 64 * 1024
+SILENCE_THRESHOLD_S = 90.0
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 
 
@@ -34,6 +35,9 @@ class ProcessRun:
         self.log_path = log_path
         self.command = command
         self.started = time.monotonic()
+        self.last_output = self.started
+        self.finished_at: float | None = None
+        self.waited_s = 0.0
         self.total_bytes = 0
         self.head = bytearray()
         self.tail = bytearray()
@@ -72,6 +76,7 @@ class ProcessRun:
                 chunk = await stream.read(65536)
                 if not chunk:
                     break
+                self.last_output = time.monotonic()
                 self.total_bytes += len(chunk)
                 with contextlib.suppress(OSError, ValueError):
                     self._log.write(chunk)
@@ -85,6 +90,12 @@ class ProcessRun:
         finally:
             with contextlib.suppress(OSError):
                 self._log.close()
+            try:
+                if self.proc.returncode is None:
+                    with contextlib.suppress(Exception):
+                        await self.proc.wait()
+            finally:
+                self.finished_at = time.monotonic()
 
     @property
     def pid(self) -> int:
@@ -96,7 +107,13 @@ class ProcessRun:
 
     @property
     def elapsed_s(self) -> float:
-        return time.monotonic() - self.started
+        end = self.finished_at if self.finished_at is not None else time.monotonic()
+        return max(0.0, end - self.started)
+
+    @property
+    def silent_s(self) -> float:
+        end = self.finished_at if self.finished_at is not None else time.monotonic()
+        return max(0.0, end - self.last_output)
 
     async def wait(self, timeout_s: float | None) -> bool:
         """Wait for exit; True when the process exited within ``timeout_s``.
@@ -105,14 +122,18 @@ class ProcessRun:
         keeps the pipe open (``server &``) must not block the call: the reader keeps
         logging in the background.
         """
+        began = time.monotonic()
         try:
-            await asyncio.wait_for(self.exited(), timeout_s)
-        except TimeoutError:
-            return False
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(self.reader), 2.0)
-        self._release()
-        return True
+            try:
+                await asyncio.wait_for(self.exited(), timeout_s)
+            except TimeoutError:
+                return False
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(self.reader), 2.0)
+            self._release()
+            return True
+        finally:
+            self.waited_s += max(0.0, time.monotonic() - began)
 
     @property
     def active(self) -> bool:
@@ -190,7 +211,20 @@ class ProcessRun:
             self.reader.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self.reader
+        if self.finished_at is None:
+            self.finished_at = time.monotonic()
         self._release()
+
+
+def silence_note(run: ProcessRun, *, threshold_s: float | None = None) -> str:
+    """Return ' (no output for N s)' when a running process has been quiet long enough."""
+    limit = SILENCE_THRESHOLD_S if threshold_s is None else threshold_s
+    if not run.active:
+        return ""
+    silent = run.silent_s
+    if silent < limit:
+        return ""
+    return f" (no output for {silent:.0f} s)"
 
 
 def kill_tree(pid: int) -> None:

@@ -410,3 +410,259 @@ def test_command_wait_cap_turns_a_long_wait_into_a_job(ctx):
         assert "later" in output.content
 
     asyncio.run(scenario())
+
+
+def test_foreground_max_timeout_is_120s_and_clamped(ctx, monkeypatch):
+    from karox6.tools import shell as shell_module
+
+    assert shell_module.DEFAULT_TIMEOUT_MS == 120_000
+    assert shell_module.MAX_TIMEOUT_MS == 120_000
+    tool = ShellTool(ctx.shell)
+    assert "120000" in tool.description
+    assert "600000" not in tool.description
+    assert "120000" in tool.parameters["properties"]["timeout"]["description"]
+    assert "600000" not in tool.parameters["properties"]["timeout"]["description"]
+
+    monkeypatch.setattr(shell_module, "MAX_TIMEOUT_MS", 1_000)
+
+    async def scenario():
+        began = time.monotonic()
+        result = await ShellTool(ctx.shell).run(
+            {"command": python("import time; time.sleep(30)"), "timeout": 600_000}, ctx
+        )
+        took = time.monotonic() - began
+        assert took < 2.5
+        assert result.meta["timed_out"]
+        job = ctx.jobs.get(result.meta["job_id"])
+        assert job is not None
+        assert job.run.active
+        await JobKillTool().run({"job_id": job.id}, ctx)
+
+    asyncio.run(scenario())
+
+
+def test_job_output_wait_bounds(ctx, monkeypatch):
+    from karox6.tools import jobs as jobs_module
+
+    assert jobs_module.DEFAULT_WAIT_MS == 30_000
+    assert jobs_module.MAX_WAIT_MS == 90_000
+    assert "30000" in JobOutputTool.description
+    assert "90000" in JobOutputTool.description
+    assert "600000" not in JobOutputTool.description
+
+    monkeypatch.setattr(jobs_module, "MAX_WAIT_MS", 300)
+
+    async def scenario():
+        started = await ShellTool(ctx.shell).run(
+            {"command": python("import time; time.sleep(30)"), "run_in_background": True}, ctx
+        )
+        job_id = started.meta["job_id"]
+        began = time.monotonic()
+        res = await JobOutputTool().run({"job_id": job_id, "wait": True, "timeout": 600_000}, ctx)
+        took = time.monotonic() - began
+        assert took < 1.5
+        assert "running" in res.content
+        await JobKillTool().run({"job_id": job_id}, ctx)
+
+    asyncio.run(scenario())
+
+
+def test_wait_budget_counts_foreground_and_job_output_and_stops_waiting(ctx, monkeypatch):
+    import re
+
+    from karox6.tools import jobs as jobs_module
+
+    assert jobs_module.WAIT_BUDGET_S == 300.0
+    monkeypatch.setattr(jobs_module, "WAIT_BUDGET_S", 1.3)
+
+    async def scenario():
+        # Foreground wait takes ~1.0 s (counted toward the 1.3 s budget).
+        cmd = python(
+            "import time\n"
+            "for i in range(60):\n"
+            "    print(f'tick-{i}', flush=True)\n"
+            "    time.sleep(0.25)\n"
+        )
+        fg = await ShellTool(ctx.shell).run({"command": cmd, "timeout": 1_000}, ctx)
+        assert fg.meta["timed_out"]
+        job_id = fg.meta["job_id"]
+        job = ctx.jobs.get(job_id)
+        assert job is not None
+        assert job.run.waited_s >= 0.9
+
+        # First job_output wait is capped to the remaining ~0.3 s, not 10 s.
+        try:
+            began = time.monotonic()
+            first = await JobOutputTool().run(
+                {"job_id": job_id, "wait": True, "timeout": 10_000}, ctx
+            )
+            assert time.monotonic() - began < 1.5
+            assert job.run.waited_s >= 1.2
+            assert first.meta.get("wait_budget_exhausted") is True
+
+            # Wait briefly so new unread output arrives, then call job_output(wait=True) again:
+            # budget is used up, so it returns immediately with status, age, unread tail, and note.
+            await asyncio.sleep(0.35)
+            began = time.monotonic()
+            second = await JobOutputTool().run(
+                {"job_id": job_id, "wait": True, "timeout": 10_000}, ctx
+            )
+            assert time.monotonic() - began < 0.25
+            assert second.meta.get("wait_budget_exhausted") is True
+            assert "tick-" in second.content
+            assert "running" in second.content
+            assert re.search(
+                r"This job has already been waited on for \d+ s in total \(running \d+ s\)\. "
+                r"Keep working on something else and check it later with job_output, or stop it "
+                r"with job_kill if it is no longer needed\.",
+                second.content,
+            )
+
+            # Calls without wait/timeout keep current semantics (no budget-exhausted refusal).
+            peek = await JobOutputTool().run({"job_id": job_id}, ctx)
+            assert "wait_budget_exhausted" not in peek.meta
+            assert "This job has already been waited on" not in peek.content
+            assert "running" in peek.content
+        finally:
+            await JobKillTool().run({"job_id": job_id}, ctx)
+
+    asyncio.run(scenario())
+
+
+def test_job_output_respects_session_deadline(ctx):
+    async def scenario():
+        started = await ShellTool(ctx.shell).run(
+            {"command": python("import time; time.sleep(30)"), "run_in_background": True}, ctx
+        )
+        job_id = started.meta["job_id"]
+        ctx.deadline = time.monotonic() + 0.3
+        began = time.monotonic()
+        res = await JobOutputTool().run({"job_id": job_id, "wait": True, "timeout": 30_000}, ctx)
+        assert time.monotonic() - began < 1.5
+        assert "wait_budget_exhausted" not in res.meta
+        assert "running" in res.content
+        await JobKillTool().run({"job_id": job_id}, ctx)
+
+    asyncio.run(scenario())
+
+
+def test_silence_signal_tracks_chunks_without_newline_and_marks_quiet_jobs(ctx, monkeypatch):
+    import re
+
+    from karox6.tools import proc as proc_module
+
+    assert proc_module.SILENCE_THRESHOLD_S == 90.0
+    monkeypatch.setattr(proc_module, "SILENCE_THRESHOLD_S", 0.5)
+
+    async def scenario():
+        # Silent foreground command waits its full 1.0 s timeout (no early return) and gets
+        # the silence signal in both the backgrounding notice and subsequent job_output.
+        began = time.monotonic()
+        fg = await ShellTool(ctx.shell).run(
+            {"command": python("import time; time.sleep(30)"), "timeout": 1_000}, ctx
+        )
+        assert time.monotonic() - began >= 0.9
+        assert fg.meta["timed_out"]
+        assert re.search(r"\(no output for \d+ s\)", fg.content), fg.content
+
+        job_id = fg.meta["job_id"]
+        out = await JobOutputTool().run({"job_id": job_id}, ctx)
+        assert re.search(r"\(no output for \d+ s\)", out.content), out.content
+        await JobKillTool().run({"job_id": job_id}, ctx)
+
+        # A process emitting bytes without newlines resets the silence timer.
+        noisy = await ShellTool(ctx.shell).run(
+            {
+                "command": python(
+                    "import sys, time\n"
+                    "for _ in range(40):\n"
+                    "    sys.stdout.write('.')\n"
+                    "    sys.stdout.flush()\n"
+                    "    time.sleep(0.12)\n"
+                ),
+                "run_in_background": True,
+            },
+            ctx,
+        )
+        noisy_id = noisy.meta["job_id"]
+        noisy_job = ctx.jobs.get(noisy_id)
+        for _ in range(500):  # wait for the first byte: interpreter start-up is slow on CI
+            if noisy_job.run.total_bytes:
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.3)
+        noisy_out = await JobOutputTool().run({"job_id": noisy_id}, ctx)
+        assert "." in noisy_out.content
+        assert "(no output for " not in noisy_out.content
+        await JobKillTool().run({"job_id": noisy_id}, ctx)
+
+    asyncio.run(scenario())
+
+
+def test_elapsed_time_foreground_and_background(ctx, monkeypatch):
+    import re
+
+    from karox6.core import digest
+    from karox6.core import events as ev
+    from karox6.tools import shell as shell_module
+    from karox6.tui import _EXIT_LINE
+
+    assert shell_module.ELAPSED_MARKER_MIN_S == 5.0
+
+    # Fast command (< 5 s) keeps plain "[exit code: N]".
+    fast = shell(ctx, command="exit 0")
+    assert fast.content.endswith("[exit code: 0]")
+
+    # Foreground command >= threshold gets "[exit code: N; X.X s]".
+    monkeypatch.setattr(shell_module, "ELAPSED_MARKER_MIN_S", 0.2)
+    slow = shell(ctx, command=python("import time; time.sleep(0.35); print('ok')"))
+    assert re.search(r"\[exit code: 0; \d+\.\d s\]$", slow.content), slow.content
+
+    # Existing parsers still recognize the extended exit marker.
+    marker_line = slow.content.splitlines()[-1]
+    assert digest._EXIT_MARKER.match(marker_line)
+    assert _EXIT_LINE.match(marker_line)
+    event = ev.ToolFinished(
+        call_id="c1",
+        name="bash",
+        output=slow.content,
+        is_error=False,
+        duration_ms=350,
+        meta=slow.meta,
+    )
+    assert digest.outcome(event) == "exit 0 · ok"
+
+    # Background job finish shows total run time in both job_output and drain_finished notice,
+    # and freezes elapsed_s after exit.
+    async def scenario():
+        j1 = await ShellTool(ctx.shell).run(
+            {
+                "command": python("import time; time.sleep(0.3); print('bg1')"),
+                "run_in_background": True,
+            },
+            ctx,
+        )
+        out1 = await JobOutputTool().run({"job_id": j1.meta["job_id"], "wait": True}, ctx)
+        assert "bg1" in out1.content
+        assert re.search(r"\[job \d+: exited with code 0; \d+\.\d s\]", out1.content), out1.content
+
+        j2 = await ShellTool(ctx.shell).run(
+            {
+                "command": python("import time; time.sleep(0.3); print('bg2')"),
+                "run_in_background": True,
+            },
+            ctx,
+        )
+        job2 = ctx.jobs.get(j2.meta["job_id"])
+        assert job2 is not None
+        assert await job2.run.wait(10)
+        frozen = job2.run.elapsed_s
+        await asyncio.sleep(0.3)
+        assert job2.run.elapsed_s == frozen
+        notes = ctx.jobs.drain_finished()
+        assert len(notes) == 1
+        assert re.search(
+            r"\[background job \d+ finished \(exited with code 0; \d+\.\d s\):", notes[0]
+        ), notes[0]
+
+    asyncio.run(scenario())

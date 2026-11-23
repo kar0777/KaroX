@@ -10,9 +10,12 @@ from typing import Any
 
 from karox6.context.spill import limit_output
 from karox6.tools.base import ToolContext, ToolResult
-from karox6.tools.proc import ProcessRun, clean_text
+from karox6.tools.proc import ProcessRun, clean_text, silence_note
 
 READ_CAP_CHARS = 30_000
+DEFAULT_WAIT_MS = 30_000
+MAX_WAIT_MS = 90_000
+WAIT_BUDGET_S = 300.0
 
 
 @dataclass(slots=True)
@@ -65,9 +68,11 @@ class JobManager:
             job.notified = True
             if job.killed_by_model:
                 continue
+            elapsed = _elapsed_s(job.run)
+            took = f"; {elapsed:.1f} s" if elapsed is not None else ""
             notes.append(
-                f"[background job {job.id} finished ({job.status}): {_short(job.run.command)}."
-                f"{_unread_tail(job)}]"
+                f"[background job {job.id} finished ({job.status}{took}): "
+                f"{_short(job.run.command)}.{_unread_tail(job)}]"
             )
         return notes
 
@@ -135,13 +140,41 @@ def _short(command: str, limit: int = 80) -> str:
     return one if len(one) <= limit else one[: limit - 3] + "..."
 
 
+def _elapsed_s(run: ProcessRun) -> float | None:
+    value = getattr(run, "elapsed_s", None)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _budget_exhausted(run: ProcessRun) -> bool:
+    """True when the process's blocking-wait budget is used up (absorbing ~ms timer jitter)."""
+    return WAIT_BUDGET_S - run.waited_s <= min(0.05, WAIT_BUDGET_S * 0.05)
+
+
+def _budget_note(job: Job) -> str:
+    return (
+        f"This job has already been waited on for {job.run.waited_s:.0f} s in total "
+        f"(running {job.run.elapsed_s:.0f} s). Keep working on something else and check it "
+        "later with job_output, or stop it with job_kill if it is no longer needed."
+    )
+
+
+def _job_status_line(job: Job) -> str:
+    elapsed = _elapsed_s(job.run)
+    if job.run.active:
+        age = f"; {elapsed:.0f} s" if elapsed is not None else ""
+        silence = silence_note(job.run)
+        return f"[job {job.id}: {job.status}{age}{silence}]"
+    took = f"; {elapsed:.1f} s" if elapsed is not None else ""
+    return f"[job {job.id}: {job.status}{took}]"
+
+
 class JobOutputTool:
     name = "job_output"
     description = (
         "Read a background job's new output since the previous read, plus its status. "
         "Set wait: true (or a timeout) to block until the job finishes or the timeout (ms, "
-        "default 30000, max 600000) passes, instead of polling; use it only when you are "
-        "genuinely blocked on the job."
+        f"default {DEFAULT_WAIT_MS}, max {MAX_WAIT_MS}) passes, instead of polling; use it "
+        "only when you are genuinely blocked on the job."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -164,16 +197,31 @@ class JobOutputTool:
         # A timeout means the caller wants to wait: 56 of 90 bench calls passed one without
         # wait: true and came straight back, then polled again and again.
         wants_wait = args.get("wait") is not False and bool(args.get("wait") or args.get("timeout"))
+        budget_note = ""
         if wants_wait and job.run.returncode is None:
-            timeout_ms = min(max(int(args.get("timeout") or 30_000), 1), 600_000)
-            await job.run.wait(ctx.wait_cap_s(timeout_ms / 1000))
+            if _budget_exhausted(job.run):
+                tail = _unread_tail(job).strip()
+                return ToolResult(
+                    f"{tail}\n{_budget_note(job)}\n{_job_status_line(job)}",
+                    meta={
+                        "job_id": job.id,
+                        "status": job.status,
+                        "wait_budget_exhausted": True,
+                    },
+                )
+            remaining = max(WAIT_BUDGET_S - job.run.waited_s, 0.0)
+            timeout_ms = min(max(int(args.get("timeout") or DEFAULT_WAIT_MS), 1), MAX_WAIT_MS)
+            await job.run.wait(ctx.wait_cap_s(min(timeout_ms / 1000, remaining)))
+            if job.run.returncode is None and _budget_exhausted(job.run):
+                budget_note = f"\n{_budget_note(job)}"
         text = await ctx.jobs.read_new(job, ctx.spill_dir)
         if job.run.returncode is not None:
             job.notified = True
         body = text if text.strip() else "(no new output)"
-        return ToolResult(
-            f"{body}\n[job {job.id}: {job.status}]", meta={"job_id": job.id, "status": job.status}
-        )
+        meta: dict[str, Any] = {"job_id": job.id, "status": job.status}
+        if budget_note:
+            meta["wait_budget_exhausted"] = True
+        return ToolResult(f"{body}{budget_note}\n{_job_status_line(job)}", meta=meta)
 
 
 class JobListTool:
