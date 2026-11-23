@@ -179,10 +179,22 @@ def review_prompt(user_turns: list[str], diff: str, files: list[str]) -> str:
 
 def git_diff(workspace: Path, files: list[str]) -> str:
     """The change as a diff: tracked files against HEAD, new files in full."""
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"}
     try:
         tracked = subprocess.run(
-            ["git", "diff", "HEAD", "--", *files],
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "HEAD",
+                "--",
+                *files,
+            ],
             cwd=workspace,
+            env=env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,

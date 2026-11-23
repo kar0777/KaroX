@@ -31,7 +31,16 @@ from karox6.context.compaction import (
 from karox6.context.spill import limit_output
 from karox6.core import events as ev
 from karox6.core.config import SessionConfig as SessionConfig  # noqa: PLC0414
-from karox6.core.loopguard import LoopGuard
+from karox6.core.loopguard import (
+    FINISH_GATE_CAP_NOTICE,
+    FINISH_GATE_MAX_STEPS,
+    FINISH_GATE_MIN_SECONDS,
+    FINISH_GATE_MIN_STEPS,
+    LoopGuard,
+    ProgressGuard,
+    WorkspaceMonitor,
+    finish_gate_message,
+)
 from karox6.core.messages import IMAGE_TOKENS, Message, ToolCall, Usage
 from karox6.core.prompt import build_system_prompt
 from karox6.core.review import (
@@ -203,7 +212,11 @@ class Session:
         self, prompt: str, images: list[dict[str, str]] | None = None
     ) -> AsyncGenerator[ev.Event, None]:
         """Run one user turn; yields events until (and including) ``RunFinished``.
-        ``images`` are pictures attached to the prompt (``core.messages.Message.images``)."""
+        ``images`` are pictures attached to the prompt (``core.messages.Message.images``).
+
+        Each ``run()`` call is one user task (including in the REPL): when ``finish_gate``
+        is enabled, it fires at most once per ``run()`` call and never re-arms during that
+        run (even after compaction)."""
         queue: asyncio.Queue[ev.Event | None] = asyncio.Queue()
 
         def emit(event: ev.Event) -> None:
@@ -270,6 +283,24 @@ class Session:
         reminded = 0  # wrap-up notices sent (a truncated step may skip the exact count)
         warned = False  # deadline notice sent
         reviewed = False  # the independent review ran (once per run)
+        # Finish gate fires at most once per run() call (per user task) and never re-arms
+        # within a run, even if compaction summarizes away the notice.
+        gate_fired = False
+        gate_cap: int | None = None  # max step after finish_gate fires
+        gate_cap_notified = False
+        gate_text = ""  # pre-gate answer preserved across every exit path
+        start_output_tokens = self.usage.output_tokens
+        need_monitor = self.config.progress_guard or (
+            self.config.finish_gate and not self.config.review and not self._is_read_only()
+        )
+        monitor: WorkspaceMonitor | None = None
+        progress_guard: ProgressGuard | None = None
+        if need_monitor:
+            monitor = WorkspaceMonitor(self.workspace, self.files.ignore, self.files.changed_files)
+            start_diff_hash = await asyncio.to_thread(monitor.initialize)
+            if self.config.progress_guard and not monitor.disabled:
+                progress_guard = ProgressGuard()
+                progress_guard.reset(start_diff_hash, self.files.read_count, 0)
         status, reason, final_text = "completed", "", ""
         try:
             while True:
@@ -277,10 +308,19 @@ class Session:
                 if limit:
                     status, reason = "limit", limit
                     break
+                if gate_cap is not None and steps >= gate_cap:
+                    reason = "finish_gate cap"
+                    break
                 await self._maybe_compact(emit)
+                cap_final = gate_cap is not None and steps == gate_cap - 1
+                if cap_final and not gate_cap_notified:
+                    self._notice("finish_gate_cap", FINISH_GATE_CAP_NOTICE, emit)
+                    gate_cap_notified = True
                 steps += 1
                 try:
-                    response = await self._call_model(steps, started, emit)
+                    response = await self._call_model(
+                        steps, started, emit, allow_tools=not cap_final
+                    )
                 except ProviderError as exc:
                     if exc.code == "empty_response" and empties < MAX_EMPTY_REPLIES:
                         empties += 1
@@ -298,7 +338,9 @@ class Session:
                         shrinks += recovered
                     if not recovered:
                         raise
-                    response = await self._call_model(steps, started, emit)
+                    response = await self._call_model(
+                        steps, started, emit, allow_tools=not cap_final
+                    )
                 if response is None:
                     status, reason = "limit", f"time limit {self.config.max_seconds:.0f}s"
                     break
@@ -312,6 +354,13 @@ class Session:
                         finish_reason=response.finish_reason,
                     )
                 )
+                if cap_final:
+                    if response.finish_reason == "content_filter":
+                        status, reason = "error", "the provider stopped the reply (content_filter)"
+                    else:
+                        final_text = message.content if not message.tool_calls else ""
+                        reason = "finish_gate cap"
+                    break
                 if response.finish_reason == "length":
                     truncations += 1
                     if truncations > 3:
@@ -342,11 +391,51 @@ class Session:
                             self._notice("review", review_notice(found), emit)
                             final_text = ""
                             continue
+                    if (
+                        self.config.finish_gate
+                        and not self.config.review
+                        and not gate_fired
+                        and gate_cap is None
+                        and monitor is not None
+                        and not self._is_read_only()
+                        and self._has_finish_gate_budget(steps, started)
+                    ):
+                        changes = await asyncio.to_thread(monitor.changes_since_start)
+                        if changes is not None:
+                            gate_fired = True
+                            gate_text = message.content
+                            gate_cap = steps + FINISH_GATE_MAX_STEPS
+                            self.store.append(
+                                "finish_gate",
+                                fired=True,
+                                step=steps,
+                                files=changes.changed,
+                            )
+                            self._notice(
+                                "finish_gate",
+                                finish_gate_message(changes.changed, changes.modified_tests),
+                                emit,
+                            )
+                            final_text = ""
+                            continue
                     break
                 stop = await self._run_calls(message.tool_calls, ctx, emit)
                 if stop:
                     status, reason = "loop", stop
                     break
+                if progress_guard is not None and monitor is not None and gate_cap is None:
+                    diff_hash = await asyncio.to_thread(monitor.diff_hash)
+                    if monitor.disabled:
+                        progress_guard = None
+                    else:
+                        progress_notice = progress_guard.observe(
+                            steps,
+                            diff_hash,
+                            self.files.read_count,
+                            self.usage.output_tokens - start_output_tokens,
+                        )
+                        if progress_notice is not None:
+                            self._notice("progress_guard", progress_notice, emit)
                 if steps in self.config.step_notices:
                     self._notice("step", self.config.step_notices[steps], emit)
                 if not warned and self._deadline_near(started):
@@ -384,6 +473,7 @@ class Session:
                         step=steps,
                         status=status,
                     )
+            final_text = final_text or gate_text
             finished = ev.RunFinished(
                 status=status,
                 reason=reason,
@@ -398,6 +488,19 @@ class Session:
             with contextlib.suppress(Exception):
                 self.store.append("event", event=finished.to_dict())
             emit(finished)
+
+    def _is_read_only(self) -> bool:
+        return bool(self.tools) and all(t.read_only for t in self.tools)
+
+    def _has_finish_gate_budget(self, steps: int, started: float) -> bool:
+        """True when at least 2 steps and 90 s remain for the post-finish check."""
+        cfg = self.config
+        if cfg.max_steps is not None and cfg.max_steps - steps < FINISH_GATE_MIN_STEPS:
+            return False
+        return not (
+            cfg.max_seconds is not None
+            and cfg.max_seconds - (time.monotonic() - started) < FINISH_GATE_MIN_SECONDS
+        )
 
     def _deadline_near(self, started: float) -> bool:
         cfg = self.config
@@ -421,9 +524,14 @@ class Session:
         return None
 
     async def _call_model(
-        self, step: int, started: float, emit: Callable[[ev.Event], None]
+        self,
+        step: int,
+        started: float,
+        emit: Callable[[ev.Event], None],
+        *,
+        allow_tools: bool = True,
     ) -> ModelResponse | None:
-        request = self._request()
+        request = self._request(allow_tools=allow_tools)
         timing = _CallTiming()
 
         def on_delta(delta: Delta) -> None:
@@ -495,13 +603,13 @@ class Session:
             )
         )
 
-    def _request(self) -> ModelRequest:
+    def _request(self, *, allow_tools: bool = True) -> ModelRequest:
         messages = self._replay_view(self.messages)
         return ModelRequest(
             model=self.config.model,
             system=self.system_prompt,
             messages=messages,
-            tools=tool_specs(self.tools),
+            tools=tool_specs(self.tools) if allow_tools else [],
             max_output_tokens=self.config.max_output_tokens,
             temperature=self.config.temperature,
             reasoning_effort=self._effort or self.config.reasoning_effort,
@@ -705,6 +813,8 @@ class Session:
         config = replace(
             cfg,
             subagents=False,
+            finish_gate=False,
+            progress_guard=False,
             snapshot_on_finish=False,
             stream_deltas=False,
             max_steps=min(cfg.max_steps or SUBAGENT_MAX_STEPS, SUBAGENT_MAX_STEPS),
@@ -786,6 +896,8 @@ class Session:
             cfg,
             subagents=False,
             review=False,
+            finish_gate=False,
+            progress_guard=False,
             snapshot_on_finish=False,
             stream_deltas=False,
             max_steps=REVIEW_MAX_STEPS,

@@ -36,6 +36,7 @@ class LoadedSession:
     messages: list[Message] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     cost_usd: float = 0.0
+    finish_gate_fired: bool = False
 
 
 class SessionStore:
@@ -84,6 +85,8 @@ class SessionStore:
             elif kind == "usage":
                 loaded.usage.add(Usage.from_dict(record.get("usage") or {}))
                 loaded.cost_usd += float(record.get("cost_usd") or 0.0)
+            elif kind == "finish_gate" and record.get("fired"):
+                loaded.finish_gate_fired = True
         # A crash between an assistant tool call and its results leaves dangling calls:
         # answer them (outcome unknown) so providers accept the history. The results that did
         # arrive stay: their effects (edited files) are on disk either way.

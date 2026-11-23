@@ -24,6 +24,7 @@ class FileTracker:
     workspace: Path
     ignore: tuple[str, ...] = ()  # workspace-relative dirs never reported (KaroX's own home)
     _seen: dict[str, tuple[int, int]] = field(default_factory=dict)
+    _read: set[str] = field(default_factory=set)
     _written: set[str] = field(default_factory=set)
     _git_baseline: set[str] | None = None
 
@@ -41,6 +42,15 @@ class FileTracker:
             self._seen.pop(self._key(path), None)
             return
         self._seen[self._key(path)] = (st.st_mtime_ns, st.st_size)
+
+    def record_read(self, path: Path) -> None:
+        """Record that ``path`` was read (tracks first-time reads per session)."""
+        self._read.add(self._key(path))
+
+    @property
+    def read_count(self) -> int:
+        """Number of distinct files read in this session."""
+        return len(self._read)
 
     def record_write(self, path: Path, *, observe: bool = True) -> None:
         """``observe=False``: the tool changed a file it has no full picture of (an edit of
@@ -88,10 +98,15 @@ class FileTracker:
                 out.add(path.relative_to(self.workspace).as_posix())
             except ValueError:
                 out.add(path.as_posix())
+        ignore = tuple(d.replace("\\", "/").strip("/") for d in self.ignore if d)
         return sorted(
             p
             for p in out
-            if not is_generated(p) and not any(p == d or p.startswith(d + "/") for d in self.ignore)
+            if not is_generated(p)
+            and not any(
+                p.replace("\\", "/") == d or p.replace("\\", "/").startswith(d + "/")
+                for d in ignore
+            )
         )
 
     def _was_written(self, rel: str) -> bool:
