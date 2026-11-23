@@ -2393,3 +2393,8 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
 - dev56 (merged): --provider defaults to the native Anthropic Messages provider for claude-* models when base_url
   is unset or exactly https://api.anthropic.com (else openai-chat; explicit flag/env/config still win). Reason:
   native54 (-53% output). Fusion review fixed /v1 base URLs and proxy-path matching. dev55 not merged.
+- wait30 (run 45239384119, pre-registered bench/prereg_wait30.md): dev56 vs dev56 + --command-wait-cap 30,
+  12 mine tasks x 2 att, native provider. Tool seconds (merged intervals) geo ratio B/A 1.04 [95% CI 0.75-1.65],
+  wall 1.02 [0.82-1.34]; solved attempts 12 vs 13 of 24; $ 0.267 vs 0.317 (1.19x), calls 339 vs 392. NOT ADOPTED.
+  Observed (mine): pydicom-2421 burns 1900-2450 s of tool time in both arms by waiting again and again (600 s
+  job_output waits, a sleep 500) on a slow/hung full test run; that pattern, not the foreground cap, is the lever.
