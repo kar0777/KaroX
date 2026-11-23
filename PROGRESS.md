@@ -2398,3 +2398,9 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   wall 1.02 [0.82-1.34]; solved attempts 12 vs 13 of 24; $ 0.267 vs 0.317 (1.19x), calls 339 vs 392. NOT ADOPTED.
   Observed (mine): pydicom-2421 burns 1900-2450 s of tool time in both arms by waiting again and again (600 s
   job_output waits, a sleep 500) on a slow/hung full test run; that pattern, not the foreground cap, is the lever.
+- wait57 (run 45258587765, pre-registered bench/prereg_dev57.md): dev56 vs dev57 (bounded blocking waits:
+  120 s foreground, 90 s per job_output, 300 s budget per process), 6 mine tasks x 2 att. Summed tool s
+  3493 vs 3805 (1.09x), geo tool 1.08 [0.92-1.21], wall 1.08; solved 5 vs 6 of 12; $ 0.121 vs 0.137 (1.13x).
+  NOT ADOPTED (steps/dev57 kept). The budget fired in 3 trials, but the model then backgrounded with nohup and
+  polled with `sleep 100/115/118` just under the cap; pydicom's long waits come from a slow/hung full suite.
+  Council stop rule hit (two harness speed A/Bs without tool_s <= 0.85x): stop harness speed tuning.
