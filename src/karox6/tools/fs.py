@@ -163,6 +163,7 @@ def _read_file(
             0,
         )
     ctx.files.observe(path)
+    ctx.files.record_read(path)
     lines = _decode(data).replace("\r\n", "\n").split("\n")
     if lines and lines[-1] == "":
         lines.pop()

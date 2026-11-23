@@ -43,6 +43,8 @@ class SessionConfig:
     wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)
     deadline_notice_s: int | None = None  # warn this long before max_seconds (off until A/B)
     review: bool = False  # independent review before finishing (core/review.py; off until A/B)
+    finish_gate: bool = True  # pre-finish self-check once when git workspace has changes
+    progress_guard: bool = True  # wrap-up notice after prolonged steps without progress
     step_notices: dict[int, str] = field(default_factory=dict)  # step -> notice (the review)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 

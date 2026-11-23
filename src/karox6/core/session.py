@@ -31,7 +31,14 @@ from karox6.context.compaction import (
 from karox6.context.spill import limit_output
 from karox6.core import events as ev
 from karox6.core.config import SessionConfig as SessionConfig  # noqa: PLC0414
-from karox6.core.loopguard import LoopGuard
+from karox6.core.loopguard import (
+    FINISH_GATE_MAX_STEPS,
+    LoopGuard,
+    ProgressGuard,
+    finish_gate_message,
+    git_changes,
+    workspace_diff_hash,
+)
 from karox6.core.messages import IMAGE_TOKENS, Message, ToolCall, Usage
 from karox6.core.prompt import build_system_prompt
 from karox6.core.review import (
@@ -139,6 +146,7 @@ class Session:
         messages: list[Message] | None = None,
         usage: Usage | None = None,
         cost_usd: float = 0.0,
+        finish_gate_fired: bool = False,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -186,6 +194,11 @@ class Session:
         self._effort: str | None = None  # eased reasoning effort after an all-thinking cut
         self._deadline: float | None = None  # monotonic end of the current run
         self._learned_window: int | None = None  # from a context-window error
+        self._finish_gate_fired = (
+            finish_gate_fired
+            or any(m.meta.get("kind") == "finish_gate" for m in self.messages)
+            or (self.resumed and self.store.has_finish_gate())
+        )
         if not self.resumed:
             self.store.append(
                 "meta",
@@ -270,12 +283,32 @@ class Session:
         reminded = 0  # wrap-up notices sent (a truncated step may skip the exact count)
         warned = False  # deadline notice sent
         reviewed = False  # the independent review ran (once per run)
+        gate_cap: int | None = None  # max step after finish_gate fires
+        last_assistant_text = ""
+        start_output_tokens = self.usage.output_tokens
+        need_diff_hash = self.config.progress_guard or (
+            self.config.finish_gate
+            and not self.config.review
+            and not self._finish_gate_fired
+            and not self._is_read_only()
+        )
+        start_diff_hash: str | None = None
+        if need_diff_hash:
+            start_diff_hash = await asyncio.to_thread(
+                workspace_diff_hash, self.workspace, self.files.ignore, self.files.changed_files
+            )
+        progress_guard = ProgressGuard() if self.config.progress_guard else None
+        if progress_guard is not None and start_diff_hash is not None:
+            progress_guard.reset(start_diff_hash, self.files.read_count)
         status, reason, final_text = "completed", "", ""
         try:
             while True:
                 limit = self._limit_reached(steps, started)
                 if limit:
                     status, reason = "limit", limit
+                    break
+                if gate_cap is not None and steps >= gate_cap:
+                    final_text = final_text or last_assistant_text
                     break
                 await self._maybe_compact(emit)
                 steps += 1
@@ -303,6 +336,8 @@ class Session:
                     status, reason = "limit", f"time limit {self.config.max_seconds:.0f}s"
                     break
                 message = response.message
+                if message.content:
+                    last_assistant_text = message.content
                 self._append(message)
                 emit(
                     ev.AssistantMessage(
@@ -342,11 +377,58 @@ class Session:
                             self._notice("review", review_notice(found), emit)
                             final_text = ""
                             continue
+                    if (
+                        self.config.finish_gate
+                        and not self.config.review
+                        and not self._finish_gate_fired
+                        and not self._is_read_only()
+                    ):
+                        current_hash = await asyncio.to_thread(
+                            workspace_diff_hash,
+                            self.workspace,
+                            self.files.ignore,
+                            self.files.changed_files,
+                        )
+                        if start_diff_hash is not None and current_hash != start_diff_hash:
+                            changes = await asyncio.to_thread(
+                                git_changes, self.workspace, self.files.ignore
+                            )
+                            if changes is not None:
+                                self._finish_gate_fired = True
+                                gate_cap = steps + FINISH_GATE_MAX_STEPS
+                                self.store.append(
+                                    "finish_gate",
+                                    fired=True,
+                                    step=steps,
+                                    files=changes.changed,
+                                )
+                                self._notice(
+                                    "finish_gate",
+                                    finish_gate_message(changes.changed, changes.modified_tests),
+                                    emit,
+                                )
+                                final_text = ""
+                                continue
                     break
                 stop = await self._run_calls(message.tool_calls, ctx, emit)
                 if stop:
                     status, reason = "loop", stop
                     break
+                if progress_guard is not None and gate_cap is None:
+                    diff_hash = await asyncio.to_thread(
+                        workspace_diff_hash,
+                        self.workspace,
+                        self.files.ignore,
+                        self.files.changed_files,
+                    )
+                    progress_notice = progress_guard.observe(
+                        steps,
+                        diff_hash,
+                        self.files.read_count,
+                        self.usage.output_tokens - start_output_tokens,
+                    )
+                    if progress_notice is not None:
+                        self._notice("progress_guard", progress_notice, emit)
                 if steps in self.config.step_notices:
                     self._notice("step", self.config.step_notices[steps], emit)
                 if not warned and self._deadline_near(started):
@@ -398,6 +480,9 @@ class Session:
             with contextlib.suppress(Exception):
                 self.store.append("event", event=finished.to_dict())
             emit(finished)
+
+    def _is_read_only(self) -> bool:
+        return bool(self.tools) and all(t.read_only for t in self.tools)
 
     def _deadline_near(self, started: float) -> bool:
         cfg = self.config
@@ -705,6 +790,8 @@ class Session:
         config = replace(
             cfg,
             subagents=False,
+            finish_gate=False,
+            progress_guard=False,
             snapshot_on_finish=False,
             stream_deltas=False,
             max_steps=min(cfg.max_steps or SUBAGENT_MAX_STEPS, SUBAGENT_MAX_STEPS),
@@ -786,6 +873,8 @@ class Session:
             cfg,
             subagents=False,
             review=False,
+            finish_gate=False,
+            progress_guard=False,
             snapshot_on_finish=False,
             stream_deltas=False,
             max_steps=REVIEW_MAX_STEPS,
@@ -847,6 +936,7 @@ class Session:
         )
         self._last_input_tokens = self._last_cached_tokens = 0
         self._chars_since_measure = 0
+        self._finish_gate_fired = any(m.meta.get("kind") == "finish_gate" for m in self.messages)
 
     def note_for_model(self, kind: str, text: str) -> None:
         """Add a harness note to the conversation between turns (the model reads it with

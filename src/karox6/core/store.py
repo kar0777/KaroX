@@ -36,6 +36,7 @@ class LoadedSession:
     messages: list[Message] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     cost_usd: float = 0.0
+    finish_gate_fired: bool = False
 
 
 class SessionStore:
@@ -58,6 +59,25 @@ class SessionStore:
 
     def reset(self, messages: list[Message]) -> None:
         self.append("reset", messages=[m.to_dict() for m in messages])
+
+    def has_finish_gate(self) -> bool:
+        """True if this session log already recorded a fired ``finish_gate`` event."""
+        if not self.path.is_file():
+            return False
+        try:
+            text = self.path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        for line in text.split("\n"):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("kind") == "finish_gate" and record.get("fired"):
+                return True
+        return False
 
     @staticmethod
     def load(home: Path, session_id: str) -> LoadedSession:
@@ -84,6 +104,8 @@ class SessionStore:
             elif kind == "usage":
                 loaded.usage.add(Usage.from_dict(record.get("usage") or {}))
                 loaded.cost_usd += float(record.get("cost_usd") or 0.0)
+            elif kind == "finish_gate" and record.get("fired"):
+                loaded.finish_gate_fired = True
         # A crash between an assistant tool call and its results leaves dangling calls:
         # answer them (outcome unknown) so providers accept the history. The results that did
         # arrive stay: their effects (edited files) are on disk either way.
@@ -207,6 +229,7 @@ def resume_kwargs(
         "messages": loaded.messages,
         "usage": loaded.usage,
         "cost_usd": loaded.cost_usd,
+        "finish_gate_fired": loaded.finish_gate_fired,
     }
 
 
