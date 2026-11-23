@@ -2404,3 +2404,8 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   NOT ADOPTED (steps/dev57 kept). The budget fired in 3 trials, but the model then backgrounded with nohup and
   polled with `sleep 100/115/118` just under the cap; pydicom's long waits come from a slow/hung full suite.
   Council stop rule hit (two harness speed A/Bs without tool_s <= 0.85x): stop harness speed tuning.
+- pool3a (run 45263491094, pre-registered bench/prereg_pool3_1.md, pool3 comparison 1 of 2, 43 fresh tasks never
+  seen by any agent): KaroX dev56 11/43 vs Claude Code 14/43 (discordant 1 vs 4, one-sided sign p=0.19);
+  $ 0.433 vs 0.712 (0.61x); median wall 135 s vs 141 s (0.96x); calls 588 vs 793; input 13.5M vs 34.5M; output
+  372k vs 466k; 0 gateway errors, 0 exceptions. VERDICT per rule: Claude Code wins (solves more). KaroX is now
+  clearly cheaper (-39%) and not slower on fresh tasks; the remaining gap is solve rate.
