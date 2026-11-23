@@ -2385,3 +2385,8 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   Calls 404 vs 474; output 363k vs 347k; input 13.4M vs 20.9M. One KaroX infra error: crosstl-4294 hit the
   3430 s time limit (Claude Code also ran 1812 s there). VERDICT per pre-registration: Claude Code wins (solves
   more). Frozen trajectories stay unread; one frozen candidate left.
+- speed55 (run 45214725000, pre-registered bench/prereg_dev55.md): dev55 = Verify/Efficiency prompt wording for
+  speed (targeted checks, one full suite at the end, job_output not sleep, no repo copies; Fusion-reviewed) vs
+  dev54, both native provider, 8 mine tasks, 1 att. dev54 4/8, median wall 96 s, $0.116; dev55 3/8 (lost
+  isort-2750 again), 125 s, $0.132. NOT ADOPTED. Note dev54 itself moved 117 s -> 96 s between runs: 8-task
+  single-attempt wall medians are too noisy to detect <25% speed changes; prompt nudges did not shorten tool time.
