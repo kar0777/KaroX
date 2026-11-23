@@ -2372,3 +2372,9 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   `rm -rf x 2>/dev/null` asked approval for /dev/null). cost54 (run 45181003432, 8 mine tasks, 1 att, parallel 4,
   pre-registered bench/prereg_dev54.md): all 4 stable tasks solved; output tokens 0.42x dev42 (151k vs 363k
   mean). ADOPTED: merged into karox6/main as the new base.
+- Gateway audit: KaroX and Claude Code both get the model-default thinking (gateway strips thinking params),
+  cache hit 88-94% vs 93%. Difference: KaroX spoke OpenAI-chat (thinking blocks lose signatures in translation),
+  Claude Code native /v1/messages. native54 (run 45190926627, dev54 openai-chat vs dev54 --provider anthropic,
+  8 tasks, 1 att, parallel 4): output/call 1211 -> 724 (Claude Code ~759), total output 185k -> 88k (-53%),
+  input 5.1M -> 3.1M, calls 153 -> 121; solves 4 vs 3 (native lost isort-2750 by a wrong fix after a normal
+  13-step run; isort also failed 1/4 for dev53 in mine53, likely noise; confirm on frozen).
