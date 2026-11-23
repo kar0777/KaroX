@@ -2420,3 +2420,9 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   verdict changes.
 - pool4: same collector/window/filters, excluding pool3 candidates: 55 candidates -> validation (free GHA) to
   grow the blind pool toward the ~90+ tasks needed for power.
+- pool4 built: 24 valid of 55 (night ids 117-140), manifest bench/pool4_frozen.json. Blind pool now 67 tasks
+  (pool3 + pool4); one comparison used (pool3a).
+- steps/dev58 prepared, NOT screened: Verify sentence now "Adding tests is the task's and project's call; if you
+  do, use a new test file, distinctive names; keep existing tests and fixtures unless the task changes them."
+  (600 words). Waits for a council-approved screen.
+- Spend 2026-11-23 (audit prices): final24 0.92, speed55 0.25, wait30 0.58, wait57 0.26, pool3a 1.15 = ~$3.2.
