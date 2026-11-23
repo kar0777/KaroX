@@ -207,9 +207,13 @@ def format_exit_marker(
         sig = returncode - 128
         marker = f"{marker} (128+{sig}, likely signal {sig})"
     if pipestatus and len(pipestatus) > 1:
-        # Ignore SIGPIPE (141) in non-last stages (e.g. `yes | head -n 1`).
+        # Ignore SIGPIPE (141) in non-last stages unless pipefail made the pipeline exit non-zero.
         non_last_fail = any(code not in (0, 141) for code in pipestatus[:-1])
-        if non_last_fail or pipestatus[-1] != 0:
+        if (
+            non_last_fail
+            or pipestatus[-1] != 0
+            or (returncode is not None and returncode != pipestatus[-1])
+        ):
             joined = " ".join(str(code) for code in pipestatus)
             return f"{marker} [pipeline exit codes: {joined}]", pipestatus
     return marker, None

@@ -2,6 +2,7 @@ import asyncio
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -389,6 +390,9 @@ def test_baseline_refuses_package_install_commands(tmp_path, cmd):
         "conda list",
         "pipx list",
         "pip list",
+        "pipenv run pytest",
+        "pipenv graph",
+        "prisma validate",
         "python setup.py --version",
         "pytest -k install",
         "echo 'npm install'",
@@ -396,6 +400,46 @@ def test_baseline_refuses_package_install_commands(tmp_path, cmd):
 )
 def test_baseline_allows_non_install_commands(cmd):
     assert baseline_mod._package_install_command(cmd) is None
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "prisma generate",
+        "prisma --schema ./prisma/schema.prisma generate",
+        "npx vitest",
+        "npm exec -- vitest",
+        "pnpm dlx prisma",
+        "bunx tsc",
+        "yarn dlx create-app",
+        "pip-sync",
+        "pip-sync requirements.txt",
+        "pipenv install",
+        "pipenv --python 3.12 install",
+        "pipenv sync",
+        "pipenv update",
+        "pipenv uninstall pytest",
+    ],
+)
+def test_baseline_refuses_generators_runners_and_pipenv_before_starting(tmp_path, monkeypatch, cmd):
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    ctx = _make_ctx(tmp_path, ws)
+
+    def fail_sync(*args, **kwargs):
+        raise AssertionError("must refuse before running any git or child process")
+
+    async def fail_start(*args, **kwargs):
+        raise AssertionError("ProcessRun.start must not be called")
+
+    monkeypatch.setattr(baseline_mod.ProcessRun, "start", fail_start)
+    monkeypatch.setattr(baseline_mod, "_prepare_checkout", fail_sync)
+    monkeypatch.setattr(baseline_mod, "_validate_repo", fail_sync)
+    monkeypatch.setattr(baseline_mod.subprocess, "run", fail_sync)
+
+    res = _run_baseline(ctx, command=cmd)
+    assert res.is_error, f"expected refusal for {cmd!r}, got: {res.content}"
+    assert "package installation" in res.content.lower()
 
 
 def test_baseline_subdirectory_cwd_matches_workspace(tmp_path):
@@ -889,3 +933,274 @@ def test_baseline_registered_in_main_tools():
     assert "baseline" in tools
     assert "temporary checkout of HEAD" in tools["baseline"].description
     assert "git stash" in tools["baseline"].description
+    assert "node_modules is the live one from your working tree, not HEAD's" in (
+        tools["baseline"].description
+    )
+    assert "node_modules is the live one from your working tree, not HEAD's" in BASELINE_HEADER
+
+
+def test_baseline_cleanup_readonly_dir_with_outward_symlink_keeps_target_mode(
+    tmp_path, monkeypatch
+):
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_bytes(b"precious\n")
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "keep.txt").write_bytes(b"dir-precious\n")
+
+    ro_file_mode = 0o444 if sys.platform != "win32" else stat.S_IREAD
+    ro_dir_mode = 0o555 if sys.platform != "win32" else stat.S_IREAD
+    os.chmod(outside_file, ro_file_mode)
+    os.chmod(outside_dir, ro_dir_mode)
+    file_mode_before = stat.S_IMODE(outside_file.stat().st_mode)
+    dir_mode_before = stat.S_IMODE(outside_dir.stat().st_mode)
+
+    temp_root = tmp_path / "temp_cleanup"
+    ro_sub = temp_root / "ro_sub"
+    ro_sub.mkdir(parents=True)
+    inner_ro = ro_sub / "inner.txt"
+    inner_ro.write_bytes(b"inner\n")
+    os.chmod(inner_ro, ro_file_mode)
+
+    file_symlink_created = False
+    file_link = ro_sub / "link_to_file"
+    try:
+        os.symlink(outside_file, file_link)
+        file_symlink_created = True
+    except OSError:
+        pass
+
+    dir_link = ro_sub / "link_to_dir"
+    try:
+        os.symlink(outside_dir, dir_link, target_is_directory=True)
+    except OSError:
+        _create_dir_link(outside_dir, dir_link)
+
+    os.chmod(ro_sub, ro_dir_mode)
+    try:
+        assert baseline_mod._cleanup_temp_dir(temp_root) is True
+        assert not temp_root.exists()
+        assert stat.S_IMODE(outside_file.stat().st_mode) == file_mode_before
+        assert stat.S_IMODE(outside_dir.stat().st_mode) == dir_mode_before
+        assert outside_file.read_bytes() == b"precious\n"
+        assert (outside_dir / "keep.txt").read_bytes() == b"dir-precious\n"
+
+        # Directly exercise _handle_remove_readonly on a link to guarantee chmod is never called.
+        direct_dir = tmp_path / "direct_link_test"
+        direct_dir.mkdir()
+        direct_link = direct_dir / "dlink"
+        if file_symlink_created:
+            os.symlink(outside_file, direct_link)
+            remove_fn = os.unlink
+        else:
+            _create_dir_link(outside_dir, direct_link)
+            remove_fn = os.rmdir
+
+        chmod_targets: list[Path] = []
+        real_chmod = os.chmod
+
+        def spy_chmod(path, mode, *args, **kwargs):
+            chmod_targets.append(Path(path))
+            return real_chmod(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(os, "chmod", spy_chmod)
+        baseline_mod._handle_remove_readonly(
+            remove_fn, str(direct_link), PermissionError("ro"), root=direct_dir
+        )
+        assert not baseline_mod._is_link(direct_link)
+        assert direct_link not in chmod_targets
+        assert stat.S_IMODE(outside_file.stat().st_mode) == file_mode_before
+        assert stat.S_IMODE(outside_dir.stat().st_mode) == dir_mode_before
+
+        # Verify _make_writable ORs bits instead of overwriting mode.
+        script_file = direct_dir / "script.sh"
+        script_file.write_bytes(b"#!/bin/sh\n")
+        os.chmod(script_file, 0o555 if sys.platform != "win32" else stat.S_IREAD)
+        expected_mode = stat.S_IMODE(os.lstat(script_file).st_mode) | stat.S_IWUSR
+        seen_modes: list[int] = []
+
+        def capture_mode(path, mode, *args, **kwargs):
+            seen_modes.append(mode)
+            return real_chmod(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(os, "chmod", capture_mode)
+        baseline_mod._make_writable(script_file)
+        assert seen_modes == [expected_mode]
+    finally:
+        if ro_sub.exists():
+            os.chmod(ro_sub, 0o700)
+        os.chmod(outside_file, 0o600)
+        os.chmod(outside_dir, 0o700)
+
+
+def test_baseline_does_not_kill_after_normal_exit(tmp_path, monkeypatch):
+    ws = tmp_path / "repo"
+    _init_repo(ws)
+    ctx = _make_ctx(tmp_path, ws)
+
+    kill_calls = 0
+    cancel_kill_calls = 0
+    real_kill = baseline_mod.ProcessRun.kill
+    real_kill_on_cancel = baseline_mod.ProcessRun.kill_on_cancel
+
+    async def spy_kill(self):
+        nonlocal kill_calls
+        kill_calls += 1
+        return await real_kill(self)
+
+    async def spy_kill_on_cancel(self):
+        nonlocal cancel_kill_calls
+        cancel_kill_calls += 1
+        return await real_kill_on_cancel(self)
+
+    monkeypatch.setattr(baseline_mod.ProcessRun, "kill", spy_kill)
+    monkeypatch.setattr(baseline_mod.ProcessRun, "kill_on_cancel", spy_kill_on_cancel)
+
+    res = _run_baseline(ctx, command="echo normal-exit")
+    assert not res.is_error, res.content
+    assert res.meta["exit_code"] == 0
+    assert "normal-exit" in res.content
+    assert kill_calls == 0
+    assert cancel_kill_calls == 0
+
+
+def test_baseline_removes_origin_after_checkout_and_copies_longpaths(tmp_path, monkeypatch):
+    ws = tmp_path / "repo"
+    _init_repo(ws)
+    assert _git(ws, "config", "core.longpaths", "true").returncode == 0
+    ctx = _make_ctx(tmp_path, ws)
+
+    real_git = baseline_mod._git
+    calls: list[tuple[str, ...]] = []
+
+    def spy_git(cwd: Path, *args: str):
+        calls.append(args)
+        return real_git(cwd, *args)
+
+    monkeypatch.setattr(baseline_mod, "_git", spy_git)
+    res = _run_baseline(
+        ctx,
+        command=_python(
+            "import subprocess; "
+            "out = subprocess.run("
+            "['git', 'remote', '-v'], capture_output=True, text=True, check=True"
+            "); "
+            "assert out.stdout.strip() == '', out.stdout; "
+            "print('NO_REMOTES')"
+        ),
+    )
+    assert not res.is_error, res.content
+    assert "NO_REMOTES" in res.content
+
+    checkout_indices = [i for i, args in enumerate(calls) if "checkout" in args]
+    rm_origin_indices = [
+        i for i, args in enumerate(calls) if args[-3:] == ("remote", "remove", "origin")
+    ]
+    assert checkout_indices
+    assert rm_origin_indices
+    assert checkout_indices[0] < rm_origin_indices[0]
+    assert "core.longpaths=true" in calls[checkout_indices[0]]
+
+
+def test_baseline_parallel_calls_use_unique_log_and_pipestatus_files(tmp_path, monkeypatch):
+    ws = tmp_path / "repo"
+    _init_repo(ws)
+    ctx = _make_ctx(tmp_path, ws)
+
+    seen_logs: list[Path] = []
+    seen_ps: list[str | None] = []
+    real_start = baseline_mod.ProcessRun.start
+
+    async def spy_start(*args, **kwargs):
+        seen_logs.append(kwargs["log_path"])
+        seen_ps.append(kwargs["env"].get("KAROX_PIPESTATUS_FILE"))
+        return await real_start(*args, **kwargs)
+
+    monkeypatch.setattr(baseline_mod.ProcessRun, "start", spy_start)
+
+    async def scenario():
+        tool = BaselineTool(ctx.shell)
+        if ctx.shell.kind == "bash":
+            cmd_a = "false | cat"
+            cmd_b = "echo parallel-ok | cat"
+        else:
+            cmd_a = _python("print('run-a')")
+            cmd_b = _python("print('parallel-ok')")
+        return await asyncio.gather(
+            tool.run({"command": cmd_a}, ctx),
+            tool.run({"command": cmd_b}, ctx),
+        )
+
+    res_a, res_b = asyncio.run(scenario())
+    assert not res_a.is_error, res_a.content
+    assert not res_b.is_error, res_b.content
+    assert len(seen_logs) == 2
+    assert len(set(seen_logs)) == 2
+    assert "parallel-ok" in res_b.content
+    if ctx.shell.kind == "bash":
+        assert all(seen_ps)
+        assert len(set(seen_ps)) == 2
+        assert res_a.meta.get("pipeline_exit_codes") == [1, 0]
+        assert "pipeline_exit_codes" not in res_b.meta
+
+
+def test_baseline_refuses_home_and_tilde_workspace_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    if sys.platform == "win32":
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    ws = tmp_path / "myrepo"
+    _init_repo(ws)
+    ctx = _make_ctx(tmp_path, ws)
+
+    async def fail_start(*args, **kwargs):
+        raise AssertionError("ProcessRun.start must not be called")
+
+    monkeypatch.setattr(baseline_mod.ProcessRun, "start", fail_start)
+
+    for cmd in (
+        "cat ~/myrepo/app.txt",
+        "cat $HOME/myrepo/app.txt",
+        'cat "${HOME}/myrepo/app.txt"',
+    ):
+        res = _run_baseline(ctx, command=cmd)
+        assert res.is_error, f"expected refusal for {cmd!r}"
+        assert "absolute workspace path" in res.content.lower()
+
+    assert not baseline_mod._command_references_workspace("cat ~/myrepo-other/app.txt", ws)
+    assert not baseline_mod._command_references_workspace("cat $HOME/myrepo-other/app.txt", ws)
+
+
+def test_baseline_drops_pwd_and_oldpwd_from_command_env(tmp_path, monkeypatch):
+    ws = tmp_path / "repo"
+    _init_repo(ws)
+    monkeypatch.setenv("PWD", str(ws))
+    monkeypatch.setenv("OLDPWD", str(ws))
+    ctx = _make_ctx(tmp_path, ws, env={"PWD": str(ws), "OLDPWD": str(ws)})
+
+    captured_envs: list[dict[str, str]] = []
+    real_start = baseline_mod.ProcessRun.start
+
+    async def spy_start(*args, **kwargs):
+        captured_envs.append(dict(kwargs["env"]))
+        return await real_start(*args, **kwargs)
+
+    monkeypatch.setattr(baseline_mod.ProcessRun, "start", spy_start)
+
+    check = _python(
+        "import os; "
+        "assert 'OLDPWD' not in os.environ, os.environ.get('OLDPWD'); "
+        "print('PWD=' + os.environ.get('PWD', '')); "
+        "print('PWD_CLEAN')"
+    )
+    res = _run_baseline(ctx, command=check)
+    assert not res.is_error, res.content
+    assert res.meta["exit_code"] == 0, res.content
+    assert "PWD_CLEAN" in res.content
+    pwd_line = next(ln for ln in res.content.splitlines() if ln.startswith("PWD="))
+    pwd_val = pwd_line.removeprefix("PWD=")
+    if pwd_val:
+        assert Path(pwd_val).resolve() != ws.resolve()
+    assert captured_envs
+    keys = {k.upper() if sys.platform == "win32" else k for k in captured_envs[0]}
+    assert "PWD" not in keys
+    assert "OLDPWD" not in keys

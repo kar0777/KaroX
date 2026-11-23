@@ -2,8 +2,8 @@
 
 Never touches the user's working tree, index, refs, stashes, or ``.git/config``.
 Creates an isolated temporary checkout via ``git clone --shared --no-checkout -q``,
-removes the ``origin`` remote so pushes cannot reach the user's repository, checks out
-``HEAD`` detached with hooks and fsmonitor disabled, runs the command with a hard
+checks out ``HEAD`` detached with hooks and fsmonitor disabled, removes the ``origin``
+remote so pushes cannot reach the user's repository, runs the command with a hard
 tree-kill timeout, removes the temporary directory, and reports any cleanup failure.
 """
 
@@ -44,7 +44,7 @@ MAX_TIMEOUT_MS = 300_000
 BASELINE_HEADER = (
     "Baseline: this command ran in a temporary checkout of HEAD (your changes are untouched). "
     "Untracked and ignored files (build outputs, compiled extensions, virtualenvs) are not "
-    "present there."
+    "present there. Any node_modules is the live one from your working tree, not HEAD's."
 )
 _WORKSPACE_PATH_ERROR = (
     "Error: baseline refuses commands containing the absolute workspace path "
@@ -58,6 +58,7 @@ _STALE_MIN_AGE_S = 3600.0
 _STRIP_GIT_ENV = frozenset(
     {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"}
 )
+_STRIP_CMD_ENV = _STRIP_GIT_ENV | frozenset({"PWD", "OLDPWD"})
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 _PIP_NAME_RE = re.compile(r"^pip(?:\d+(?:\.\d+)*)?$")
 _PYTHON_NAME_RE = re.compile(r"^(?:python(?:\d+(?:\.\d+)*)?|py)$")
@@ -98,12 +99,15 @@ _JS_MUTATING = frozenset(
         "unlink",
     }
 )
+_ALWAYS_REFUSED_TOOLS = frozenset({"npx", "bunx", "pip-sync"})
 _PKG_INSTALL_SUBCOMMANDS: dict[str, frozenset[str]] = {
-    "npm": _JS_MUTATING,
-    "pnpm": _JS_MUTATING,
-    "yarn": _JS_MUTATING,
+    "npm": _JS_MUTATING | frozenset({"exec"}),
+    "pnpm": _JS_MUTATING | frozenset({"dlx"}),
+    "yarn": _JS_MUTATING | frozenset({"dlx"}),
     "bun": _JS_MUTATING,
+    "prisma": frozenset({"generate"}),
     "pip": frozenset({"install", "uninstall"}),
+    "pipenv": frozenset({"install", "sync", "update", "uninstall"}),
     "uv": frozenset({"pip", "sync", "add", "remove", "lock", "venv"}),
     "poetry": frozenset({"install", "add", "remove", "update", "sync", "lock"}),
     "pdm": frozenset({"install", "add", "remove", "update", "sync", "lock"}),
@@ -137,6 +141,7 @@ _PKG_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "pnpm": frozenset({"-C", "--dir", "--filter", "-F", "--config", "--workspace-concurrency"}),
     "yarn": frozenset({"--cwd", "--modules-folder", "--cache-folder"}),
     "bun": frozenset({"--cwd", "-c", "--config", "--env-file"}),
+    "prisma": frozenset({"--schema"}),
     "pip": frozenset(
         {
             "-c",
@@ -149,6 +154,7 @@ _PKG_VALUE_FLAGS: dict[str, frozenset[str]] = {
             "--python",
         }
     ),
+    "pipenv": frozenset({"--python"}),
     "uv": frozenset({"--directory", "--project", "--config-file", "--cache-dir", "--python", "-p"}),
     "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
     "pdm": frozenset({"-p", "--project", "-c", "--config"}),
@@ -173,11 +179,15 @@ class _GitOut:
         return self.stderr.decode("utf-8", "replace").strip()
 
 
+def _strip_env(env: Mapping[str, str], keys: frozenset[str]) -> dict[str, str]:
+    if sys.platform == "win32":
+        return {k: v for k, v in env.items() if k.upper() not in keys}
+    return {k: v for k, v in env.items() if k not in keys}
+
+
 def _strip_git_env(env: Mapping[str, str]) -> dict[str, str]:
     """Remove git repository override variables that would redirect git to the real tree."""
-    if sys.platform == "win32":
-        return {k: v for k, v in env.items() if k.upper() not in _STRIP_GIT_ENV}
-    return {k: v for k, v in env.items() if k not in _STRIP_GIT_ENV}
+    return _strip_env(env, _STRIP_GIT_ENV)
 
 
 def _git(cwd: Path, *args: str) -> _GitOut:
@@ -252,18 +262,10 @@ def _prepare_checkout(
         detail = clone.err or clone.text.strip()
         return f"Error: git clone failed: {detail}"
 
-    try:
-        rm_origin = _git(temp_parent, "-C", str(wt_dir), *git_opts, "remote", "remove", "origin")
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"Error: could not disconnect temporary clone remote ({exc})."
-    if rm_origin.returncode != 0:
-        detail = rm_origin.err or rm_origin.text.strip()
-        return f"Error: could not disconnect temporary clone remote: {detail}"
-
     checkout_opts = list(git_opts)
     # Match the repo's checkout formatting (e.g. core.autocrlf=false on Windows)
     # without sharing .git/config with the temporary clone.
-    for key in ("core.autocrlf", "core.eol", "core.symlinks"):
+    for key in ("core.autocrlf", "core.eol", "core.symlinks", "core.longpaths"):
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             cfg = _git(repo_root, "config", "--get", key)
             val = cfg.text.strip()
@@ -286,6 +288,14 @@ def _prepare_checkout(
     if checkout.returncode != 0:
         detail = checkout.err or checkout.text.strip()
         return f"Error: git checkout failed: {detail}"
+
+    try:
+        rm_origin = _git(temp_parent, "-C", str(wt_dir), *git_opts, "remote", "remove", "origin")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"Error: could not disconnect temporary clone remote ({exc})."
+    if rm_origin.returncode != 0:
+        detail = rm_origin.err or rm_origin.text.strip()
+        return f"Error: could not disconnect temporary clone remote: {detail}"
     return None
 
 
@@ -305,19 +315,50 @@ def _is_link(path: Path) -> bool:
         return True
 
 
-def _handle_remove_readonly(func: Callable[..., Any], path: str, _exc: BaseException) -> None:
+def _make_writable(path: Path, *, is_dir: bool = False) -> None:
+    if _is_link(path):
+        return
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        return
+    bits = stat.S_IWUSR | (stat.S_IXUSR if (is_dir or stat.S_ISDIR(st.st_mode)) else 0)
+    os.chmod(path, stat.S_IMODE(st.st_mode) | bits)
+
+
+def _handle_remove_readonly(
+    func: Callable[..., Any],
+    path: str,
+    _exc: BaseException,
+    *,
+    root: Path | None = None,
+) -> None:
+    p = Path(path)
     with contextlib.suppress(OSError):
-        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
-        func(path)
+        if sys.platform != "win32":
+            parent = p.parent
+            if parent != p and (root is None or parent == root or root in parent.parents):
+                with contextlib.suppress(OSError):
+                    _make_writable(parent, is_dir=True)
+        if _is_link(p):
+            if func in (os.unlink, os.rmdir):
+                func(path)
+            return
+        _make_writable(p)
+        if func not in (os.open, os.scandir, os.listdir, os.lstat):
+            func(path)
 
 
 def _rmtree_force(path: Path) -> bool:
     if not path.exists():
         return True
-    attempts = 5 if sys.platform == "win32" else 1
+    attempts = 5 if sys.platform == "win32" else 2
+
+    def onexc(func: Callable[..., Any], target: str, exc: BaseException) -> None:
+        _handle_remove_readonly(func, target, exc, root=path)
+
     for attempt in range(attempts):
         try:
-            shutil.rmtree(path, onexc=_handle_remove_readonly)
+            shutil.rmtree(path, onexc=onexc)
             return True
         except OSError:
             if not path.exists():
@@ -508,6 +549,8 @@ def _python_target(args: list[str]) -> tuple[str, str, list[str]] | None:
 
 
 def _check_pkg_tool(tool: str, rest: list[str]) -> str | None:
+    if tool in _ALWAYS_REFUSED_TOOLS:
+        return tool
     if tool not in _PKG_INSTALL_SUBCOMMANDS:
         return None
     sub = _first_subcommand(rest, _PKG_VALUE_FLAGS.get(tool, frozenset()))
@@ -607,21 +650,65 @@ def _package_install_command(command: str, shell: str = "bash", depth: int = 0) 
     return None
 
 
+def _home_prefixes() -> list[str]:
+    homes: list[Path] = []
+    with contextlib.suppress(RuntimeError, OSError):
+        homes.append(Path.home())
+    for env_key in ("HOME", "USERPROFILE"):
+        raw = os.environ.get(env_key)
+        if raw:
+            homes.append(Path(raw))
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    for home in homes:
+        candidates: list[Path] = [home]
+        with contextlib.suppress(OSError):
+            candidates.append(home.resolve())
+        for cand in candidates:
+            posix = re.sub(r"[\\/]+", "/", cand.as_posix()).rstrip("/")
+            if not posix:
+                continue
+            forms = [posix]
+            if sys.platform == "win32" and len(posix) >= 2 and posix[1] == ":":
+                forms.append(f"/{posix[0].lower()}{posix[2:]}")
+            for form in forms:
+                key = form.lower() if sys.platform == "win32" else form
+                if key not in seen:
+                    seen.add(key)
+                    prefixes.append(form)
+    return prefixes
+
+
 def _command_references_workspace(command: str, *paths: Path) -> bool:
     """Return True when ``command`` explicitly contains an absolute workspace/repo path."""
     normalized_cmd = re.sub(r"[\\/]+", "/", command)
     flags = re.IGNORECASE if sys.platform == "win32" else 0
+    home_prefixes = _home_prefixes()
     variants: set[str] = set()
     for path in paths:
         for candidate in (path, path.resolve()):
             posix = re.sub(r"[\\/]+", "/", candidate.as_posix()).rstrip("/")
             if not posix:
                 continue
-            variants.add(posix)
+            cand_forms = [posix]
             if sys.platform == "win32" and len(posix) >= 2 and posix[1] == ":":
                 drive = posix[0].lower()
                 rest = posix[2:]
-                variants.add(f"/{drive}{rest}")
+                cand_forms.append(f"/{drive}{rest}")
+            for form in cand_forms:
+                variants.add(form)
+                cmp_form = form.lower() if sys.platform == "win32" else form
+                for home_posix in home_prefixes:
+                    cmp_home = home_posix.lower() if sys.platform == "win32" else home_posix
+                    if cmp_form.startswith(cmp_home + "/"):
+                        rel = form[len(home_posix) + 1 :]
+                        variants.add(f"~/{rel}")
+                        variants.add(f"$HOME/{rel}")
+                        variants.add(f"${{HOME}}/{rel}")
+                        if sys.platform == "win32":
+                            variants.add(f"$env:HOME/{rel}")
+                            variants.add(f"$env:USERPROFILE/{rel}")
+                            variants.add(f"%USERPROFILE%/{rel}")
     for variant in variants:
         pattern = re.escape(variant) + r"(?=$|[\s/\\'\"`;|&):,])"
         if re.search(pattern, normalized_cmd, flags):
@@ -653,7 +740,10 @@ def _merge_pythonpath(env: dict[str, str], wt_dir: Path) -> dict[str, str]:
 
 
 def _merge_node_env(env: dict[str, str], *search_roots: Path) -> dict[str, str]:
-    """Expose the user's ``node_modules`` read-only via ``PATH`` and ``NODE_PATH``."""
+    """Expose ``node_modules`` via ``PATH`` and ``NODE_PATH``.
+
+    Note: this ``node_modules`` is the live one from your working tree, not HEAD's.
+    """
     bin_dirs: list[str] = []
     node_dirs: list[str] = []
     seen: set[Path] = set()
@@ -693,7 +783,8 @@ class BaselineTool:
     description = (
         "Run a test or check command against the last commit in a temporary checkout of HEAD, "
         "leaving your working tree untouched: shows which failures already existed before your "
-        "change. Use instead of git stash."
+        "change. Any node_modules is the live one from your working tree, not HEAD's. "
+        "Use instead of git stash."
     )
     read_only = False
 
@@ -812,9 +903,9 @@ class BaselineTool:
 
                     log_dir = ctx.session_dir / "baseline"
                     log_dir.mkdir(parents=True, exist_ok=True)
-                    index = len(list(log_dir.glob("*.log"))) + 1
-                    log_path = log_dir / f"base-{index:04d}.log"
-                    log_path.touch()
+                    fd, raw_log = tempfile.mkstemp(dir=log_dir, prefix="base-", suffix=".log")
+                    os.close(fd)
+                    log_path = Path(raw_log)
 
                     pipestatus_path = (
                         log_path.with_suffix(".pipestatus") if self.shell.kind == "bash" else None
@@ -822,7 +913,7 @@ class BaselineTool:
                     wrapped_command, extra_env = wrap_command_for_pipestatus(
                         command, self.shell, pipestatus_path
                     )
-                    cmd_env = _strip_git_env(shell_env({**ctx.env, **extra_env}))
+                    cmd_env = _strip_env(shell_env({**ctx.env, **extra_env}), _STRIP_CMD_ENV)
                     _merge_pythonpath(cmd_env, wt_dir)
                     _merge_node_env(cmd_env, base_cwd, repo_root)
 
@@ -843,12 +934,15 @@ class BaselineTool:
                             finished = await run.wait(waited_s)
                             if not finished:
                                 timed_out = True
-                            # Kill any running or lingering process tree before cleanup.
-                            await run.kill()
-                            tree_killed = True
+                            # Kill the process tree only while the command is still active,
+                            # never after a normal exit.
+                            if not finished or run.active:
+                                await run.kill()
+                                tree_killed = True
                         except BaseException:
-                            await run.kill_on_cancel()
-                            tree_killed = True
+                            if run.active:
+                                await run.kill_on_cancel()
+                                tree_killed = True
                             with contextlib.suppress(OSError):
                                 if pipestatus_path is not None:
                                     pipestatus_path.unlink(missing_ok=True)
@@ -875,7 +969,7 @@ class BaselineTool:
                 elif not clone_task.cancelled():
                     with contextlib.suppress(BaseException):
                         clone_task.exception()
-            if run is not None and not tree_killed:
+            if run is not None and not tree_killed and run.active:
                 with contextlib.suppress(BaseException):
                     await run.kill_on_cancel()
             cleanup_task = asyncio.ensure_future(asyncio.to_thread(_cleanup_temp_dir, temp_parent))

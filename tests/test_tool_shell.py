@@ -628,6 +628,15 @@ def test_pipeline_ignores_sigpipe_141_in_non_last_stages(ctx):
         "[exit code: 141] (128+13, likely signal 13) [pipeline exit codes: 0 141]",
         [0, 141],
     )
+    # Pipefail: returncode differs from pipestatus[-1], so pipeline codes are shown.
+    assert format_exit_marker(141, [141, 0]) == (
+        "[exit code: 141] [pipeline exit codes: 141 0]",
+        [141, 0],
+    )
+    assert format_exit_marker(141, [141, 0, 0]) == (
+        "[exit code: 141] [pipeline exit codes: 141 0 0]",
+        [141, 0, 0],
+    )
 
     if ctx.shell.kind != "bash":
         pytest.skip("bash pipeline statuses")
@@ -636,6 +645,11 @@ def test_pipeline_ignores_sigpipe_141_in_non_last_stages(ctx):
     assert sigpipe_sim.meta["exit_code"] == 0
     assert "pipeline_exit_codes" not in sigpipe_sim.meta
     assert "[pipeline exit codes:" not in sigpipe_sim.content
+
+    pipefail_sigpipe = shell(ctx, command="set -o pipefail; (exit 141) | true")
+    assert pipefail_sigpipe.meta["exit_code"] == 141
+    assert pipefail_sigpipe.meta["pipeline_exit_codes"] == [141, 0]
+    assert pipefail_sigpipe.content.endswith("[exit code: 141] [pipeline exit codes: 141 0]")
 
     head_pipe = shell(ctx, command="yes | head -n 1")
     assert head_pipe.meta["exit_code"] == 0
