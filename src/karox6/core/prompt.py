@@ -150,8 +150,7 @@ def project_inventory(workspace: Path, max_items: int = 12) -> list[str]:
 
 
 PREFLIGHT_BUDGET_S = 3.0
-PREFLIGHT_DEPS_TIMEOUT_S = 2.0
-PREFLIGHT_MAX_LINE_CHARS = 198  # leaves room for the "- " bullet within 200 chars
+PREFLIGHT_MAX_LINE_CHARS = 298  # leaves room for the "- " bullet within 300 chars
 PREFLIGHT_MAX_MISSING_DEPS = 8
 
 _PY_TOOL_CHECKERS = (
@@ -188,33 +187,36 @@ _JS_DEVDEP_CHECKERS: dict[str, str] = {
     "jest": "jest",
     "vitest": "vitest",
 }
+_KNOWN_CHECKER_NAMES = frozenset(
+    {
+        *_PY_TOOL_CHECKERS,
+        *(checker for _, checker in _STANDALONE_CHECKER_FILES),
+        *_JS_DEVDEP_CHECKERS.values(),
+    }
+)
 _JS_SCRIPT_CHECKER_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])(eslint|tsc|prettier|jest|vitest)(?:\.(?:cmd|exe|ps1))?(?![A-Za-z0-9_.-])"
 )
 _TEST_DEP_GROUPS = frozenset({"test", "tests", "testing", "dev"})
 _PEP503_SEP = re.compile(r"[-_.]+")
-_REQ_NAME_RE = re.compile(
-    r"^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(?:\[[^\]]*\])?\s*(?:@|[=<>!~(]|$)"
+_REQ_SPEC_RE = re.compile(
+    r"^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(?:\[([^\]]*)\])?\s*(?:[=<>!~(]|$)"
 )
-_SIMPLE_OS_MARKER_RE = re.compile(
-    r"^\s*(sys_platform|os_name|platform_system)\s*(==|!=)\s*['\"]([^'\"]+)['\"]\s*$"
+_PIP_OPTION_RE = re.compile(r"(?:^|\s)--[A-Za-z]")
+_VCS_PREFIX_RE = re.compile(r"^(?:git|hg|svn|bzr)\+", re.IGNORECASE)
+_WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
+_ARCHIVE_SUFFIXES = (".whl", ".tar.gz", ".tgz", ".zip", ".tar.bz2", ".egg")
+_MARKER_TOKEN_RE = re.compile(
+    r"""\s*(?:
+        (\() |
+        (\)) |
+        ('[^']*'|"[^"]*") |
+        (===|==|!=|<=|>=|<|>) |
+        ([A-Za-z_][A-Za-z0-9_]*)
+    )""",
+    re.VERBOSE,
 )
-_PROBE_DIST_SCRIPT = (
-    "import sys\n"
-    "sys.path = [p for p in sys.path if p not in ('', '.')]\n"
-    "import importlib.metadata as m, json, re\n"
-    "norm = lambda s: re.sub(r'[-_.]+', '-', s).lower()\n"
-    "have = set()\n"
-    "for d in m.distributions():\n"
-    "    try:\n"
-    "        name = d.metadata['Name'] if d.metadata else None\n"
-    "    except Exception:\n"
-    "        name = None\n"
-    "    if name:\n"
-    "        have.add(norm(name))\n"
-    "want = json.loads(sys.stdin.read())\n"
-    "print(json.dumps([n for n in want if norm(n) not in have]))\n"
-)
+_MARKER_MAX_DEPTH = 16
 
 
 def _read_project_text(workspace: Path, name: str) -> str | None:
@@ -222,7 +224,7 @@ def _read_project_text(workspace: Path, name: str) -> str | None:
     try:
         if path.is_file() and path.stat().st_size < 512 * 1024:
             return path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     return None
 
@@ -233,13 +235,52 @@ def _read_pyproject(workspace: Path) -> dict[str, object] | None:
         return None
     try:
         data = tomllib.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError, OSError, UnicodeError):
         return None
     return data if isinstance(data, dict) else None
 
 
 def _normalize_dist_name(name: str) -> str:
     return _PEP503_SEP.sub("-", name).lower()
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _which_outside(name: str, workspace: Path) -> str | None:
+    """Resolve ``name`` on PATH, ignoring results inside ``workspace`` or the current directory."""
+    try:
+        found = shutil.which(name)
+    except OSError:
+        return None
+    if not found:
+        return None
+    found_path = Path(found)
+    if _is_within(found_path, workspace):
+        return None
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        cwd = None
+    if cwd is not None and _is_within(found_path, cwd):
+        return None
+    return found
+
+
+def _is_executable_file(path: Path) -> bool:
+    try:
+        if not path.is_file():
+            return False
+        if os.name != "nt":
+            return os.access(path, os.X_OK)
+        return True
+    except OSError:
+        return False
 
 
 def _ini_section_checker(section: str) -> str | None:
@@ -284,7 +325,7 @@ def _configured_checkers(workspace: Path, pyproject: dict[str, object] | None = 
         parser = configparser.RawConfigParser(strict=False)
         try:
             parser.read_string(body)
-        except configparser.Error:
+        except (configparser.Error, ValueError, RecursionError, OSError, UnicodeError):
             continue
         for sec in parser.sections():
             checker = _ini_section_checker(sec)
@@ -302,7 +343,7 @@ def _configured_checkers(workspace: Path, pyproject: dict[str, object] | None = 
     if package_raw is not None:
         try:
             pkg = json.loads(package_raw)
-        except ValueError:
+        except (ValueError, RecursionError, OSError, UnicodeError):
             pkg = None
         if isinstance(pkg, dict):
             dev_deps = pkg.get("devDependencies")
@@ -320,27 +361,20 @@ def _configured_checkers(workspace: Path, pyproject: dict[str, object] | None = 
     return list(dict.fromkeys(found))
 
 
-def _is_checker_available(workspace: Path, name: str) -> bool:
+def _checker_location(workspace: Path, name: str) -> str | None:
     for venv in (".venv", "venv"):
         for subdir in ("bin", "Scripts"):
             base = workspace / venv / subdir
             for candidate in (name, f"{name}.exe", f"{name}.cmd", f"{name}.bat"):
-                try:
-                    if (base / candidate).is_file():
-                        return True
-                except OSError:
-                    continue
+                if _is_executable_file(base / candidate):
+                    return venv
     node_bin = workspace / "node_modules" / ".bin"
     for candidate in (name, f"{name}.cmd", f"{name}.exe", f"{name}.ps1", f"{name}.bat"):
-        try:
-            if (node_bin / candidate).is_file():
-                return True
-        except OSError:
-            continue
-    try:
-        return shutil.which(name) is not None
-    except OSError:
-        return False
+        if _is_executable_file(node_bin / candidate):
+            return "node_modules"
+    if _which_outside(name, workspace) is not None:
+        return "PATH"
+    return None
 
 
 def _join_within(items: list[str], max_chars: int, *, force_ellipsis: bool = False) -> str:
@@ -366,25 +400,28 @@ def _join_within(items: list[str], max_chars: int, *, force_ellipsis: bool = Fal
 
 def _format_checkers_line(
     available: list[str],
-    not_installed: list[str],
+    not_found: list[str],
     *,
     max_chars: int = PREFLIGHT_MAX_LINE_CHARS,
 ) -> str | None:
-    if not available and not not_installed:
+    if not available and not not_found:
         return None
-    suffix = " (do not install; skip or note it)"
-    if available and not not_installed:
-        prefix = "Checkers configured by the project: available: "
+    suffix = (
+        " (try the project runner such as uv run / poetry run / npx before skipping;"
+        " do not install unless the task asks)"
+    )
+    if available and not not_found:
+        prefix = "Checkers configured by the project: available at session start: "
         return prefix + _join_within(available, max_chars - len(prefix))
-    if not_installed and not available:
-        prefix = "Checkers configured by the project: not installed: "
-        return prefix + _join_within(not_installed, max_chars - len(prefix) - len(suffix)) + suffix
+    if not_found and not available:
+        prefix = "Checkers configured by the project: not found at session start: "
+        return prefix + _join_within(not_found, max_chars - len(prefix) - len(suffix)) + suffix
 
     prefix = "Checkers configured by the project: available: "
-    mid = "; not installed: "
+    mid = "; not found at session start: "
     budget = max_chars - len(prefix) - len(mid) - len(suffix)
     avail_full = ", ".join(available)
-    miss_full = ", ".join(not_installed)
+    miss_full = ", ".join(not_found)
     if len(avail_full) + len(miss_full) <= budget:
         return f"{prefix}{avail_full}{mid}{miss_full}{suffix}"
     half = budget // 2
@@ -398,40 +435,229 @@ def _format_checkers_line(
         avail_budget = half
         miss_budget = budget - half
     avail_str = _join_within(available, avail_budget)
-    miss_str = _join_within(not_installed, miss_budget)
+    miss_str = _join_within(not_found, miss_budget)
     return f"{prefix}{avail_str}{mid}{miss_str}{suffix}"
 
 
-def _os_marker_applies(marker: str) -> bool:
-    match = _SIMPLE_OS_MARKER_RE.match(marker)
-    if not match:
-        return True
-    var, op, expected = match.groups()
-    actual = {
+def _parse_version_tuple(raw: str) -> tuple[int, ...] | None:
+    parts = raw.strip().split(".")
+    if not parts or any(not p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def _compare_versions(lhs: tuple[int, ...], op: str, rhs: tuple[int, ...]) -> bool | None:
+    size = max(len(lhs), len(rhs))
+    a = lhs + (0,) * (size - len(lhs))
+    b = rhs + (0,) * (size - len(rhs))
+    if op == "==":
+        return a == b
+    if op == "!=":
+        return a != b
+    if op == "<":
+        return a < b
+    if op == "<=":
+        return a <= b
+    if op == ">":
+        return a > b
+    if op == ">=":
+        return a >= b
+    return None
+
+
+def _tokenize_marker(marker: str) -> list[tuple[str, str]] | None:
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    length = len(marker)
+    while pos < length:
+        if marker[pos].isspace():
+            pos += 1
+            continue
+        match = _MARKER_TOKEN_RE.match(marker, pos)
+        if not match:
+            return None
+        pos = match.end()
+        lp, rp, qstr, op, ident = match.groups()
+        if lp:
+            tokens.append(("LPAREN", "("))
+        elif rp:
+            tokens.append(("RPAREN", ")"))
+        elif qstr:
+            tokens.append(("STR", qstr[1:-1]))
+        elif op:
+            tokens.append(("OP", op))
+        elif ident:
+            if ident in ("and", "or"):
+                tokens.append((ident.upper(), ident))
+            elif ident == "in":
+                tokens.append(("OP", "in"))
+            elif ident == "not":
+                tokens.append(("NOT", "not"))
+            else:
+                tokens.append(("VAR", ident))
+    merged: list[tuple[str, str]] = []
+    idx = 0
+    while idx < len(tokens):
+        kind, val = tokens[idx]
+        if kind == "NOT":
+            if idx + 1 < len(tokens) and tokens[idx + 1] == ("OP", "in"):
+                merged.append(("OP", "not in"))
+                idx += 2
+                continue
+            return None
+        merged.append((kind, val))
+        idx += 1
+    return merged
+
+
+def _eval_marker_comparison(
+    left: tuple[str, str],
+    op: str,
+    right: tuple[str, str],
+    venv_py_version: tuple[int, ...] | None,
+) -> bool | None:
+    string_vars = {
         "sys_platform": sys.platform,
         "os_name": os.name,
         "platform_system": platform.system(),
-    }[var]
-    return actual == expected if op == "==" else actual != expected
+        "platform_machine": platform.machine(),
+    }
+    version_vars: dict[str, tuple[int, ...]] = {}
+    if venv_py_version is not None and len(venv_py_version) >= 2:
+        version_vars["python_version"] = venv_py_version[:2]
+        if len(venv_py_version) >= 3:
+            version_vars["python_full_version"] = venv_py_version[:3]
+
+    lkind, lval = left
+    rkind, rval = right
+    if lkind not in ("VAR", "STR") or rkind not in ("VAR", "STR"):
+        return None
+
+    is_version = (lkind == "VAR" and lval in version_vars) or (
+        rkind == "VAR" and rval in version_vars
+    )
+    if is_version:
+        lver = version_vars.get(lval) if lkind == "VAR" else _parse_version_tuple(lval)
+        rver = version_vars.get(rval) if rkind == "VAR" else _parse_version_tuple(rval)
+        if lver is None or rver is None:
+            return None
+        return _compare_versions(lver, op, rver)
+
+    lstr = string_vars.get(lval) if lkind == "VAR" else lval
+    rstr = string_vars.get(rval) if rkind == "VAR" else rval
+    if lstr is None or rstr is None:
+        return None
+    if op == "==":
+        return lstr == rstr
+    if op == "!=":
+        return lstr != rstr
+    if op == "in":
+        return lstr in rstr
+    if op == "not in":
+        return lstr not in rstr
+    return None
 
 
-def _parse_requirement_name(raw: str, *, self_name: str | None = None) -> str | None:
+def _marker_applies(marker: str, venv_py_version: tuple[int, ...] | None = None) -> bool:
+    """Evaluate a PEP 508 environment marker statically.
+
+    Returns ``False`` (skip requirement) whenever any variable, operator, or syntax in the
+    marker cannot be fully evaluated without running Python.
+    """
+    try:
+        tokens = _tokenize_marker(marker)
+    except (ValueError, RecursionError):
+        return False
+    if not tokens:
+        return False
+
+    pos = 0
+
+    def parse_or(depth: int) -> bool | None:
+        nonlocal pos
+        if depth > _MARKER_MAX_DEPTH:
+            return None
+        val = parse_and(depth + 1)
+        while pos < len(tokens) and tokens[pos][0] == "OR":
+            pos += 1
+            rhs = parse_and(depth + 1)
+            val = None if (val is None or rhs is None) else (val or rhs)
+        return val
+
+    def parse_and(depth: int) -> bool | None:
+        nonlocal pos
+        if depth > _MARKER_MAX_DEPTH:
+            return None
+        val = parse_atom(depth + 1)
+        while pos < len(tokens) and tokens[pos][0] == "AND":
+            pos += 1
+            rhs = parse_atom(depth + 1)
+            val = None if (val is None or rhs is None) else (val and rhs)
+        return val
+
+    def parse_atom(depth: int) -> bool | None:
+        nonlocal pos
+        if depth > _MARKER_MAX_DEPTH or pos >= len(tokens):
+            return None
+        if tokens[pos][0] == "LPAREN":
+            pos += 1
+            val = parse_or(depth + 1)
+            if pos >= len(tokens) or tokens[pos][0] != "RPAREN":
+                return None
+            pos += 1
+            return val
+        if pos + 2 >= len(tokens) or tokens[pos + 1][0] != "OP":
+            return None
+        left = tokens[pos]
+        op = tokens[pos + 1][1]
+        right = tokens[pos + 2]
+        pos += 3
+        return _eval_marker_comparison(left, op, right, venv_py_version)
+
+    try:
+        result = parse_or(0)
+    except (ValueError, RecursionError):
+        return False
+    if pos != len(tokens) or result is None:
+        return False
+    return result
+
+
+def _parse_requirement(
+    raw: str,
+    *,
+    venv_py_version: tuple[int, ...] | None = None,
+) -> tuple[str, tuple[str, ...]] | None:
     line = re.sub(r"(?:^|\s)#.*$", "", raw).strip()
     if not line or line.startswith(("-", ".", "/", "\\")):
         return None
-    req_part, _, marker_part = line.partition(";")
+    if _PIP_OPTION_RE.search(line):
+        return None
+    req_part, sep, marker_part = line.partition(";")
     req_part = req_part.strip()
-    if not req_part or req_part.lower().endswith((".whl", ".tar.gz", ".zip")):
+    if not req_part:
         return None
-    if marker_part and not _os_marker_applies(marker_part):
+    if (
+        "://" in req_part
+        or "@" in req_part
+        or "/" in req_part
+        or "\\" in req_part
+        or _VCS_PREFIX_RE.match(req_part)
+        or _WIN_DRIVE_RE.match(req_part)
+        or req_part.lower().endswith(_ARCHIVE_SUFFIXES)
+    ):
         return None
-    match = _REQ_NAME_RE.match(req_part)
+    if sep and not _marker_applies(marker_part, venv_py_version=venv_py_version):
+        return None
+    match = _REQ_SPEC_RE.match(req_part)
     if not match:
         return None
     norm = _normalize_dist_name(match.group(1))
-    if self_name and norm == self_name and "[" in req_part:
-        return None
-    return norm
+    extras_raw = match.group(2)
+    extras: tuple[str, ...] = ()
+    if extras_raw:
+        extras = tuple(_normalize_dist_name(e.strip()) for e in extras_raw.split(",") if e.strip())
+    return norm, extras
 
 
 def _iter_req_file_lines(body: str) -> list[str]:
@@ -449,12 +675,19 @@ def _iter_req_file_lines(body: str) -> list[str]:
     return merged
 
 
-def _declared_test_deps(workspace: Path, pyproject: dict[str, object] | None = None) -> list[str]:
-    deps: list[str] = []
+def _declared_test_deps(
+    workspace: Path,
+    pyproject: dict[str, object] | None = None,
+    *,
+    venv_py_version: tuple[int, ...] | None = None,
+) -> list[str]:
     if pyproject is None:
         pyproject = _read_pyproject(workspace)
 
     self_name: str | None = None
+    all_extras: dict[str, list[str]] = {}
+    seed_reqs: list[str] = []
+
     if pyproject is not None:
         project = pyproject.get("project")
         if isinstance(project, dict):
@@ -464,16 +697,12 @@ def _declared_test_deps(workspace: Path, pyproject: dict[str, object] | None = N
             opt = project.get("optional-dependencies")
             if isinstance(opt, dict):
                 for key, val in opt.items():
-                    if (
-                        isinstance(key, str)
-                        and key.lower() in _TEST_DEP_GROUPS
-                        and isinstance(val, list)
-                    ):
-                        for item in val:
-                            if isinstance(item, str):
-                                parsed = _parse_requirement_name(item, self_name=self_name)
-                                if parsed:
-                                    deps.append(parsed)
+                    if isinstance(key, str) and isinstance(val, list):
+                        norm_extra = _normalize_dist_name(key)
+                        items = [item for item in val if isinstance(item, str)]
+                        all_extras.setdefault(norm_extra, []).extend(items)
+                        if key.lower() in _TEST_DEP_GROUPS:
+                            seed_reqs.extend(items)
 
         dep_groups = pyproject.get("dependency-groups")
         if isinstance(dep_groups, dict):
@@ -489,9 +718,7 @@ def _declared_test_deps(workspace: Path, pyproject: dict[str, object] | None = N
                 seen.add(group_key)
                 for entry in norm_groups[group_key]:
                     if isinstance(entry, str):
-                        parsed = _parse_requirement_name(entry, self_name=self_name)
-                        if parsed:
-                            deps.append(parsed)
+                        seed_reqs.append(entry)
                     elif isinstance(entry, dict):
                         inc = entry.get("include-group")
                         if isinstance(inc, str):
@@ -506,16 +733,20 @@ def _declared_test_deps(workspace: Path, pyproject: dict[str, object] | None = N
         parser = configparser.RawConfigParser(strict=False)
         try:
             parser.read_string(setup_cfg)
-        except configparser.Error:
+        except (configparser.Error, ValueError, RecursionError, OSError, UnicodeError):
             pass
         else:
+            if self_name is None and parser.has_option("metadata", "name"):
+                raw_cfg_name = parser.get("metadata", "name").strip()
+                if raw_cfg_name:
+                    self_name = _normalize_dist_name(raw_cfg_name)
             if parser.has_section("options.extras_require"):
                 for key, val in parser.items("options.extras_require"):
+                    norm_extra = _normalize_dist_name(key)
+                    items = _iter_req_file_lines(val)
+                    all_extras.setdefault(norm_extra, []).extend(items)
                     if key.lower() in _TEST_DEP_GROUPS:
-                        for line in _iter_req_file_lines(val):
-                            parsed = _parse_requirement_name(line, self_name=self_name)
-                            if parsed:
-                                deps.append(parsed)
+                        seed_reqs.extend(items)
 
     req_files: list[Path] = []
     for pattern in (
@@ -532,116 +763,148 @@ def _declared_test_deps(workspace: Path, pyproject: dict[str, object] | None = N
         body = _read_project_text(workspace, req_path.name)
         if body is None:
             continue
-        for line in _iter_req_file_lines(body):
-            parsed = _parse_requirement_name(line, self_name=self_name)
-            if parsed:
-                deps.append(parsed)
+        seed_reqs.extend(_iter_req_file_lines(body))
+
+    deps: list[str] = []
+    seen_extras: set[str] = set()
+
+    def add_req(raw: str) -> None:
+        parsed = _parse_requirement(raw, venv_py_version=venv_py_version)
+        if parsed is None:
+            return
+        dist_name, extras = parsed
+        if self_name and dist_name == self_name:
+            for extra in extras:
+                if extra in seen_extras or extra not in all_extras:
+                    continue
+                seen_extras.add(extra)
+                for nested in all_extras[extra]:
+                    add_req(nested)
+            return
+        deps.append(dist_name)
+
+    for raw_req in seed_reqs:
+        add_req(raw_req)
 
     return list(dict.fromkeys(deps))
 
 
-def _project_python(workspace: Path) -> str | None:
-    is_win = platform.system() == "Windows"
-    rel_exes = (
-        (
-            "Scripts/python.exe",
-            "Scripts/python.cmd",
-            "Scripts/python.bat",
-            "bin/python",
-            "bin/python3",
-        )
-        if is_win
-        else ("bin/python", "bin/python3", "Scripts/python.exe")
-    )
-    for venv in (".venv", "venv"):
-        for rel in rel_exes:
-            candidate = workspace / venv / rel
-            try:
-                if candidate.is_file():
-                    return str(candidate)
-            except OSError:
-                continue
-
-    for env_var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
-        env_root = os.environ.get(env_var)
-        if not env_root:
+def _read_venv_python_version(venv_dir: Path) -> tuple[int, ...] | None:
+    cfg = venv_dir / "pyvenv.cfg"
+    try:
+        if not cfg.is_file() or cfg.stat().st_size > 64 * 1024:
+            return None
+        raw = cfg.read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeError):
+        return None
+    for line in raw.splitlines():
+        key, sep, val = line.partition("=")
+        if not sep:
             continue
-        root = Path(env_root)
-        env_exes = (
-            ("Scripts/python.exe", "python.exe", "bin/python")
-            if is_win
-            else ("bin/python", "bin/python3")
-        )
-        for rel in env_exes:
-            candidate = root / rel
-            try:
-                if candidate.is_file():
-                    return str(candidate)
-            except OSError:
-                continue
+        if key.strip().lower() in ("version_info", "version"):
+            match = re.match(r"\s*(\d+)\.(\d+)(?:\.(\d+))?", val)
+            if match:
+                parts = [int(match.group(1)), int(match.group(2))]
+                if match.group(3) is not None:
+                    parts.append(int(match.group(3)))
+                return tuple(parts)
+    return None
 
-    names = ("python", "python3") if is_win else ("python3", "python")
-    fallback: str | None = None
-    for name in names:
+
+def _venv_site_packages(venv_dir: Path) -> list[Path]:
+    found: list[Path] = []
+    seen: set[Path] = set()
+
+    def add_dir(candidate: Path) -> None:
         try:
-            found = shutil.which(name)
+            if candidate.is_dir():
+                resolved = candidate.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    found.append(candidate)
         except OSError:
-            found = None
-        if not found:
+            pass
+
+    add_dir(venv_dir / "Lib" / "site-packages")
+    for lib_name in ("lib", "lib64"):
+        lib_dir = venv_dir / lib_name
+        try:
+            if not lib_dir.is_dir():
+                continue
+            py_dirs = sorted(e.name for e in os.scandir(lib_dir) if e.name.startswith("python"))
+        except OSError:
             continue
-        if is_win and "\\windowsapps\\" in found.lower().replace("/", "\\"):
-            fallback = fallback or found
-            continue
-        return found
-    return fallback
+        for py_name in py_dirs:
+            add_dir(lib_dir / py_name / "site-packages")
+    return found
 
 
-def _probe_missing_deps(python_exe: str, deps: list[str], *, timeout: float) -> list[str] | None:
-    if not deps or timeout <= 0:
+def _find_project_venv(
+    workspace: Path,
+) -> tuple[str, list[Path], tuple[int, ...] | None] | None:
+    for venv_name in (".venv", "venv"):
+        venv_dir = workspace / venv_name
+        site_dirs = _venv_site_packages(venv_dir)
+        if site_dirs:
+            return venv_name, site_dirs, _read_venv_python_version(venv_dir)
+
+    env_root = os.environ.get("VIRTUAL_ENV")
+    if env_root:
+        venv_dir = Path(env_root)
+        site_dirs = _venv_site_packages(venv_dir)
+        if site_dirs:
+            return "VIRTUAL_ENV", site_dirs, _read_venv_python_version(venv_dir)
+
+    return None
+
+
+def _dist_name_from_info_entry(entry_name: str) -> str | None:
+    if entry_name.endswith(".dist-info"):
+        stem = entry_name[: -len(".dist-info")]
+        name = stem.rsplit("-", 1)[0] if "-" in stem else stem
+    elif entry_name.endswith(".egg-info"):
+        stem = entry_name[: -len(".egg-info")]
+        stem = re.sub(r"-py\d[^-]*.*$", "", stem, flags=re.IGNORECASE)
+        if "-" in stem:
+            head, tail = stem.rsplit("-", 1)
+            name = head if tail and tail[0].isdigit() else stem
+        else:
+            name = stem
+    else:
         return None
-    try:
-        proc = subprocess.run(
-            [python_exe, "-c", _PROBE_DIST_SCRIPT],
-            input=json.dumps(deps).encode("utf-8"),
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    text = proc.stdout.decode("utf-8", "replace").strip()
-    if not text:
-        return None
-    try:
-        parsed = json.loads(text)
-    except ValueError:
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        if not lines:
+    name = name.strip()
+    return _normalize_dist_name(name) if name else None
+
+
+def _installed_distributions(site_dirs: list[Path], *, deadline: float) -> set[str] | None:
+    installed: set[str] = set()
+    for site_dir in site_dirs:
+        if time.monotonic() >= deadline:
             return None
         try:
-            parsed = json.loads(lines[-1])
-        except ValueError:
+            with os.scandir(site_dir) as entries:
+                for entry in entries:
+                    if time.monotonic() >= deadline:
+                        return None
+                    dist = _dist_name_from_info_entry(entry.name)
+                    if dist is not None:
+                        installed.add(dist)
+        except OSError:
             return None
-    if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
-        return None
-    allowed = set(deps)
-    return list(
-        dict.fromkeys(norm for item in parsed if (norm := _normalize_dist_name(item)) in allowed)
-    )
+    return installed
 
 
 def _format_missing_deps_line(
     missing: list[str],
     *,
+    env_label: str = ".venv",
     max_items: int = PREFLIGHT_MAX_MISSING_DEPS,
     max_chars: int = PREFLIGHT_MAX_LINE_CHARS,
 ) -> str | None:
     if not missing:
         return None
-    prefix = "Declared test dependencies not installed: "
-    suffix = " (tests needing them will fail or skip; do not install unless the task asks)"
+    prefix = f"Declared test/dev packages missing from {env_label}: "
+    suffix = " (at session start; do not install unless the task asks)"
     budget = max_chars - len(prefix) - len(suffix)
     capped = missing[:max_items]
     body = _join_within(capped, budget, force_ellipsis=len(missing) > max_items)
@@ -651,47 +914,69 @@ def _format_missing_deps_line(
 
 
 def environment_preflight(workspace: Path, *, budget_s: float = PREFLIGHT_BUDGET_S) -> list[str]:
-    """One-shot environment preflight: configured checkers and missing declared test deps.
+    """One-shot environment preflight: configured checkers and missing declared test/dev packages.
 
-    Bounded by ``budget_s`` with hard subprocess timeouts; any failure is silently omitted.
+    Reads config files and inspects venv site-packages without executing any interpreter or script.
+    Bounded by ``budget_s``; any failure silently omits the affected line.
     """
     deadline = time.monotonic() + max(0.0, budget_s)
     out: list[str] = []
-    pyproject = _read_pyproject(workspace)
+    if time.monotonic() >= deadline:
+        return out
 
     try:
-        checkers = _configured_checkers(workspace, pyproject)
-        if checkers:
-            avail: list[str] = []
-            missing_checkers: list[str] = []
-            for checker in checkers:
-                if _is_checker_available(workspace, checker):
-                    avail.append(checker)
-                else:
-                    missing_checkers.append(checker)
-            line = _format_checkers_line(avail, missing_checkers)
-            if line:
-                out.append(line)
-    except Exception:
+        pyproject = _read_pyproject(workspace)
+    except (ValueError, RecursionError, OSError, UnicodeError):
+        pyproject = None
+
+    try:
+        if time.monotonic() < deadline:
+            checkers = _configured_checkers(workspace, pyproject)
+            if checkers:
+                avail: list[str] = []
+                missing_checkers: list[str] = []
+                timed_out = False
+                for checker in checkers:
+                    if time.monotonic() >= deadline:
+                        timed_out = True
+                        break
+                    loc = _checker_location(workspace, checker)
+                    if loc is not None:
+                        avail.append(f"{checker} ({loc})")
+                    else:
+                        missing_checkers.append(checker)
+                if not timed_out:
+                    line = _format_checkers_line(avail, missing_checkers)
+                    if line:
+                        out.append(line)
+    except (ValueError, RecursionError, OSError, UnicodeError, configparser.Error):
         pass
 
     try:
         if time.monotonic() < deadline:
-            deps = _declared_test_deps(workspace, pyproject)
-            if deps:
-                python_exe = _project_python(workspace)
-                remaining = deadline - time.monotonic()
-                if python_exe and remaining > 0.05:
-                    missing_deps = _probe_missing_deps(
-                        python_exe,
-                        deps,
-                        timeout=min(PREFLIGHT_DEPS_TIMEOUT_S, remaining),
-                    )
-                    if missing_deps:
-                        line = _format_missing_deps_line(missing_deps)
-                        if line:
-                            out.append(line)
-    except Exception:
+            venv_info = _find_project_venv(workspace)
+            if venv_info is not None:
+                env_label, site_dirs, venv_py_version = venv_info
+                deps = _declared_test_deps(workspace, pyproject, venv_py_version=venv_py_version)
+                if deps and time.monotonic() < deadline:
+                    installed = _installed_distributions(site_dirs, deadline=deadline)
+                    if installed is not None:
+                        missing_deps: list[str] = []
+                        timed_out = False
+                        for dep in deps:
+                            if time.monotonic() >= deadline:
+                                timed_out = True
+                                break
+                            if dep in installed or dep in _KNOWN_CHECKER_NAMES:
+                                continue
+                            if _which_outside(dep, workspace) is not None:
+                                continue
+                            missing_deps.append(dep)
+                        if not timed_out and missing_deps:
+                            line = _format_missing_deps_line(missing_deps, env_label=env_label)
+                            if line:
+                                out.append(line)
+    except (ValueError, RecursionError, OSError, UnicodeError, configparser.Error):
         pass
 
     return out
