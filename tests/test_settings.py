@@ -37,7 +37,7 @@ def test_defaults_from_file(home):
     assert args.api_key_env == "MY_KEY"
     assert args.context_window == 64000
     assert args.subagents is True
-    assert args.provider == "openai-chat"  # not in the file: built-in default
+    assert args.provider is None  # not in the file: main() picks it from the model
 
 
 def test_flag_and_env_beat_file(home, monkeypatch):

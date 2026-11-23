@@ -318,8 +318,9 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
     p.add_argument("-m", "--model", default=os.environ.get("KAROX_MODEL"))
     p.add_argument(
         "--provider",
-        default=os.environ.get("KAROX_PROVIDER", "openai-chat"),
-        help="openai-chat | openai-responses | anthropic | gemini",
+        default=os.environ.get("KAROX_PROVIDER"),
+        help="openai-chat | openai-responses | anthropic | gemini (default: anthropic for "
+        "claude-* models on Anthropic's API, else openai-chat)",
     )
     p.add_argument("--base-url", default=os.environ.get("KAROX_BASE_URL"))
     p.add_argument(
@@ -484,6 +485,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not argv and sys.stdin.isatty() and sys.stdout.isatty():
         argv = ["chat"]
     args = parser.parse_args(argv)
+    if hasattr(args, "provider") and not args.provider:
+        args.provider = default_provider(args.model, args.base_url)
     if args.command == "run":
         return _run(args, parser)
     if args.command == "chat":
@@ -956,6 +959,19 @@ def _positive[N: (int, float)](value: N | None) -> N | None:
     return value if value is not None and value > 0 else None
 
 
+def default_provider(model: str | None, base_url: str | None) -> str:
+    """The native Messages API for Claude models on Anthropic's own endpoint: it keeps signed
+    thinking blocks across turns (the OpenAI-compatible path drops them, which measured ~1.7x
+    the output tokens per call). Everything else defaults to the OpenAI-compatible protocol."""
+    from urllib.parse import urlsplit
+
+    url = urlsplit(base_url or "")
+    native = not base_url or (url.hostname == "api.anthropic.com" and url.path.rstrip("/") == "")
+    if native and (model or "").lower().startswith("claude"):
+        return "anthropic"
+    return "openai-chat"
+
+
 def _provider(args: argparse.Namespace) -> Any:
     from karox6.providers import make_provider
 
@@ -968,7 +984,7 @@ def _provider(args: argparse.Namespace) -> Any:
 
         api_key = load_key((args.home or default_home()).expanduser())
     return make_provider(
-        args.provider,
+        args.provider or default_provider(args.model, args.base_url),
         base_url=args.base_url,
         api_key=api_key,
         timeout_s=args.request_timeout,
