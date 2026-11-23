@@ -60,25 +60,6 @@ class SessionStore:
     def reset(self, messages: list[Message]) -> None:
         self.append("reset", messages=[m.to_dict() for m in messages])
 
-    def has_finish_gate(self) -> bool:
-        """True if this session log already recorded a fired ``finish_gate`` event."""
-        if not self.path.is_file():
-            return False
-        try:
-            text = self.path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return False
-        for line in text.split("\n"):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if record.get("kind") == "finish_gate" and record.get("fired"):
-                return True
-        return False
-
     @staticmethod
     def load(home: Path, session_id: str) -> LoadedSession:
         path = home / "sessions" / session_id / "session.jsonl"
@@ -229,7 +210,6 @@ def resume_kwargs(
         "messages": loaded.messages,
         "usage": loaded.usage,
         "cost_usd": loaded.cost_usd,
-        "finish_gate_fired": loaded.finish_gate_fired,
     }
 
 

@@ -98,10 +98,15 @@ class FileTracker:
                 out.add(path.relative_to(self.workspace).as_posix())
             except ValueError:
                 out.add(path.as_posix())
+        ignore = tuple(d.replace("\\", "/").strip("/") for d in self.ignore if d)
         return sorted(
             p
             for p in out
-            if not is_generated(p) and not any(p == d or p.startswith(d + "/") for d in self.ignore)
+            if not is_generated(p)
+            and not any(
+                p.replace("\\", "/") == d or p.replace("\\", "/").startswith(d + "/")
+                for d in ignore
+            )
         )
 
     def _was_written(self, rel: str) -> bool:
