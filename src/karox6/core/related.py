@@ -7,6 +7,9 @@ implementations, callers, or subclasses that the agent may have missed.
 from __future__ import annotations
 
 import ast
+import bisect
+import builtins
+import keyword
 import os
 import re
 import subprocess
@@ -15,15 +18,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from karox6.core.loopguard import _run_git, is_test_file
-from karox6.tools.files import GENERATED_DIRS, is_generated
+from karox6.tools.files import is_generated
 
 RELATED_TIMEOUT_S = 2.0
 MAX_RESULTS = 5
 MAX_SYMBOLS_PER_LINE = 4
-MAX_SCAN_FILES = 20_000
 MAX_FILE_BYTES = 1_048_576  # 1 MiB
+MAX_DIFF_CHARS = 2 * 1024 * 1024  # 2 MiB
 MAX_SEARCH_SYMBOLS = 200
-MAX_GREP_ARG_CHARS = 8_000
 
 RELATED_FILES_NOTICE = (
     "Before you finish: these files reference names you changed but you did not edit them:\n"
@@ -63,167 +65,19 @@ EXCLUDED_DIRS = frozenset(
     }
 )
 
-# Common Python keywords, builtins, generic dunders, and ubiquitous method/attr names
-# that appear in almost every file and carry no cross-file signal.
-STOPWORDS = frozenset(
+# Short list (<= 60 words) of ubiquitous variable, container, IO, logging, and stdlib
+# attribute names that carry no useful cross-file signal.
+_COMMON_STOPWORDS = frozenset(
     {
-        # Keywords / literals
-        "False",
-        "None",
-        "True",
-        "and",
-        "as",
-        "assert",
-        "async",
-        "await",
-        "break",
-        "class",
-        "continue",
-        "def",
-        "del",
-        "elif",
-        "else",
-        "except",
-        "finally",
-        "for",
-        "from",
-        "global",
-        "if",
-        "import",
-        "in",
-        "is",
-        "lambda",
-        "nonlocal",
-        "not",
-        "or",
-        "pass",
-        "raise",
-        "return",
-        "try",
-        "while",
-        "with",
-        "yield",
-        "match",
-        "case",
         "self",
         "cls",
         "args",
         "kwargs",
         "other",
-        # Common builtins & exceptions
-        "abs",
-        "all",
-        "any",
-        "bool",
-        "bytes",
-        "callable",
-        "chr",
-        "classmethod",
-        "complex",
-        "dict",
-        "dir",
-        "divmod",
-        "enumerate",
-        "eval",
-        "exec",
-        "filter",
-        "float",
-        "format",
-        "frozenset",
-        "getattr",
-        "globals",
-        "hasattr",
-        "hash",
-        "help",
-        "hex",
-        "id",
-        "input",
-        "int",
-        "isinstance",
-        "issubclass",
-        "iter",
-        "len",
-        "list",
-        "locals",
-        "map",
-        "max",
-        "min",
-        "next",
-        "object",
-        "oct",
-        "open",
-        "ord",
-        "pow",
-        "print",
-        "property",
-        "range",
-        "repr",
-        "reversed",
-        "round",
-        "set",
-        "setattr",
-        "slice",
-        "sorted",
-        "staticmethod",
-        "str",
-        "sum",
-        "super",
-        "tuple",
-        "type",
-        "vars",
-        "zip",
-        "BaseException",
-        "Exception",
-        "ValueError",
-        "TypeError",
-        "KeyError",
-        "IndexError",
-        "AttributeError",
-        "RuntimeError",
-        "NotImplementedError",
-        "OSError",
-        "IOError",
-        "ImportError",
-        "FileNotFoundError",
-        "StopIteration",
-        "AssertionError",
-        "ZeroDivisionError",
-        "Warning",
-        "UserWarning",
-        "DeprecationWarning",
-        "FutureWarning",
-        # Typing / stdlib common names
-        "Any",
-        "Optional",
-        "Union",
-        "List",
-        "Dict",
-        "Set",
-        "Tuple",
-        "Sequence",
-        "Mapping",
-        "Callable",
-        "Iterable",
-        "Iterator",
-        "Generator",
-        "NamedTuple",
-        "Literal",
-        "Final",
-        "ClassVar",
-        "Protocol",
-        "TypeVar",
-        "Generic",
-        "cast",
-        "overload",
-        "Path",
-        "dataclass",
-        "field",
-        # Generic container / string / IO / logging methods & attrs
         "get",
         "pop",
         "add",
         "remove",
-        "discard",
         "clear",
         "copy",
         "update",
@@ -236,52 +90,31 @@ STOPWORDS = frozenset(
         "index",
         "count",
         "sort",
-        "reverse",
         "join",
         "split",
-        "rsplit",
         "splitlines",
         "strip",
-        "lstrip",
-        "rstrip",
         "replace",
         "find",
-        "rfind",
         "startswith",
         "endswith",
         "lower",
         "upper",
-        "title",
         "encode",
         "decode",
         "read",
         "write",
         "close",
-        "flush",
-        "seek",
-        "tell",
         "exists",
-        "is_file",
-        "is_dir",
-        "mkdir",
-        "unlink",
         "resolve",
         "parent",
-        "parents",
         "name",
-        "stem",
-        "suffix",
-        "parts",
         "debug",
         "info",
         "warning",
-        "warn",
         "error",
-        "critical",
-        "exception",
         "logger",
         "logging",
-        "log",
         "data",
         "value",
         "result",
@@ -289,121 +122,24 @@ STOPWORDS = frozenset(
         "node",
         "path",
         "file",
-        "line",
-        "lines",
         "text",
-        "string",
-        "code",
-        "mode",
-        "kind",
-        "size",
-        "length",
-        "width",
-        "height",
-        "shape",
-        "dtype",
-        "dims",
-        "attrs",
-        "config",
-        "options",
-        "params",
-        "state",
-        "status",
-        "message",
-        "errors",
-        "default",
-        "defaults",
-        "context",
-        "metadata",
-        "extra",
-        "run",
-        "call",
-        "apply",
-        "check",
-        "parse",
-        "load",
-        "dump",
+        "monotonic",
+        "environ",
+        "isoformat",
         "dumps",
         "loads",
-        "save",
-        "create",
-        "delete",
-        "reset",
-        "init",
-        "setup",
-        "build",
-        "render",
-        "start",
-        "stop",
-        "send",
-        "recv",
-        "emit",
-        "handle",
-        "process",
-        "execute",
-        "validate",
-        "convert",
-        "transform",
-        "serialize",
-        "deserialize",
-        "search",
-        "sub",
-        "group",
-        "groups",
-        "compile",
-        # Generic dunders
-        "__init__",
-        "__new__",
-        "__del__",
-        "__repr__",
-        "__str__",
-        "__bytes__",
-        "__format__",
-        "__lt__",
-        "__le__",
-        "__eq__",
-        "__ne__",
-        "__gt__",
-        "__ge__",
-        "__hash__",
-        "__bool__",
-        "__getattr__",
-        "__getattribute__",
-        "__setattr__",
-        "__delattr__",
-        "__dir__",
-        "__get__",
-        "__set__",
-        "__delete__",
-        "__call__",
-        "__len__",
-        "__getitem__",
-        "__setitem__",
-        "__delitem__",
-        "__iter__",
-        "__next__",
-        "__reversed__",
-        "__contains__",
-        "__enter__",
-        "__exit__",
-        "__class__",
-        "__dict__",
-        "__name__",
-        "__qualname__",
-        "__module__",
-        "__doc__",
-        "__annotations__",
-        "__slots__",
-        "__all__",
-        "__file__",
-        "__version__",
-        "__post_init__",
-        "__copy__",
-        "__deepcopy__",
+        "dirname",
     }
 )
 
-_DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$")
+STOPWORDS = (
+    frozenset(keyword.kwlist)
+    | frozenset(keyword.softkwlist)
+    | frozenset(dir(builtins))
+    | frozenset(dir(object))
+    | _COMMON_STOPWORDS
+)
+
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 _DEF_CLASS_RE = re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)")
 _TOPLEVEL_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?=(?!=)\s*")
@@ -411,7 +147,6 @@ _ATTR_RE = re.compile(r"\.([A-Za-z_][A-Za-z0-9_]*)")
 _STRING_RE = re.compile(
     r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"[^"\\]*(?:\\.[^"\\]*)*"|\'[^\'\\]*(?:\\.[^\'\\]*)*\')'
 )
-_WORD_RE = re.compile(r"\w+")
 
 
 @dataclass(slots=True)
@@ -426,6 +161,10 @@ class _DiffFileInfo:
     deletion_new_anchors: set[int] = field(default_factory=set)
     ast_enclosing_syms: set[str] = field(default_factory=set)
     ast_ok: bool = False
+
+
+def _git(ws_root: Path, *args: str, timeout: float) -> subprocess.CompletedProcess[bytes] | None:
+    return _run_git(ws_root, "-c", "core.quotepath=off", *args, timeout=timeout)
 
 
 def _norm_path(path: str) -> str:
@@ -484,7 +223,7 @@ def is_production_python(
 
 
 def is_valid_symbol(sym: str, *, min_len: int = 3) -> bool:
-    return len(sym) >= min_len and sym not in STOPWORDS
+    return min_len <= len(sym) <= 100 and sym not in STOPWORDS
 
 
 def _strip_comments_and_strings(code_line: str) -> str:
@@ -495,65 +234,108 @@ def _strip_comments_and_strings(code_line: str) -> str:
     return cleaned
 
 
+def _strip_diff_target(raw_target: str, prefix: str) -> str | None:
+    target = raw_target.split("\t", 1)[0].strip()
+    if not target or target == "/dev/null":
+        return None
+    if len(target) >= 2 and target[0] == '"' and target[-1] == '"':
+        target = target[1:-1]
+    if target.startswith(prefix):
+        target = target[len(prefix) :]
+    norm = _norm_path(target)
+    return norm or None
+
+
+def _parse_diff_git_symmetric(raw: str) -> str | None:
+    """Extract path from `diff --git a/<p> b/<p>` when both sides match (handles spaces)."""
+    rest = raw[len("diff --git ") :]
+    if not rest.startswith("a/"):
+        return None
+    mid = len(rest) // 2
+    if len(rest) % 2 == 1 and rest[mid : mid + 3] == " b/" and rest[2:mid] == rest[mid + 3 :]:
+        norm = _norm_path(rest[2:mid])
+        return norm or None
+    return None
+
+
 def _parse_diff(
     diff_text: str,
     allowed_prod: set[str],
+    *,
+    deadline: float | None = None,
+    max_chars: int = MAX_DIFF_CHARS,
 ) -> tuple[set[str], dict[str, _DiffFileInfo]]:
     """Parse unified diff -> (all_diff_files, prod_py_file_infos)."""
+    if len(diff_text) > max_chars:
+        diff_text = diff_text[:max_chars]
+
     all_diff_files: set[str] = set()
     prod_files: dict[str, _DiffFileInfo] = {}
     cur_file: _DiffFileInfo | None = None
+    in_header = True
     old_line = 0
     new_line = 0
     in_docstring_delim: str | None = None
-    saw_git_header = False
 
     def select_file(path: str) -> _DiffFileInfo | None:
         if path in allowed_prod:
             return prod_files.setdefault(path, _DiffFileInfo(path=path))
         return None
 
-    for raw in diff_text.splitlines():
+    for idx, raw in enumerate(diff_text.splitlines()):
+        if (idx & 255) == 0 and deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("related_files timed out parsing diff")
+
         if raw.startswith("diff --git "):
-            saw_git_header = True
             cur_file = None
+            in_header = True
             in_docstring_delim = None
-            m = _DIFF_GIT_RE.match(raw)
-            if m:
-                a_path, b_path = _norm_path(m.group(1)), _norm_path(m.group(2))
-                all_diff_files.add(a_path)
-                all_diff_files.add(b_path)
-                cur_file = select_file(b_path) or select_file(a_path)
+            sym_path = _parse_diff_git_symmetric(raw)
+            if sym_path is not None:
+                all_diff_files.add(sym_path)
             continue
 
-        if raw.startswith("+++ "):
-            target = raw[4:].split("\t", 1)[0].strip()
-            if target != "/dev/null":
-                b_path = _norm_path(target[2:] if target.startswith("b/") else target)
-                all_diff_files.add(b_path)
-                if not saw_git_header:
-                    in_docstring_delim = None
-                    cur_file = select_file(b_path)
+        if in_header and raw.startswith("rename from "):
+            p = _norm_path(raw[len("rename from ") :])
+            if p:
+                all_diff_files.add(p)
             continue
 
-        if raw.startswith("--- "):
-            target = raw[4:].split("\t", 1)[0].strip()
-            if target != "/dev/null":
-                a_path = _norm_path(target[2:] if target.startswith("a/") else target)
+        if in_header and raw.startswith("rename to "):
+            p = _norm_path(raw[len("rename to ") :])
+            if p:
+                all_diff_files.add(p)
+            continue
+
+        if in_header and raw.startswith("--- "):
+            in_docstring_delim = None
+            a_path = _strip_diff_target(raw[4:], "a/")
+            if a_path is not None:
                 all_diff_files.add(a_path)
-                if not saw_git_header and cur_file is None:
-                    in_docstring_delim = None
-                    cur_file = select_file(a_path)
+                cur_file = select_file(a_path)
+            else:
+                cur_file = None
+            continue
+
+        if in_header and raw.startswith("+++ "):
+            in_docstring_delim = None
+            b_path = _strip_diff_target(raw[4:], "b/")
+            if b_path is not None:
+                all_diff_files.add(b_path)
+                cur_file = select_file(b_path)
             continue
 
         if cur_file is None:
             continue
 
-        if raw.startswith(("index ", "new file", "deleted file", "old mode", "new mode")):
+        if in_header and raw.startswith(
+            ("index ", "new file", "deleted file", "old mode", "new mode")
+        ):
             continue
 
         hm = _HUNK_RE.match(raw)
         if hm:
+            in_header = False
             old_line = int(hm.group(1))
             new_line = int(hm.group(3))
             header_ctx = hm.group(5).strip()
@@ -635,7 +417,7 @@ def _add_ast_enclosing_symbols(
     """Use AST of the new file on disk to find enclosing def/class for changed lines."""
     for rel_path, info in prod_files.items():
         if deadline is not None and time.monotonic() >= deadline:
-            return
+            raise TimeoutError("related_files timed out during AST scan")
         if not _inside_workspace(ws_root, rel_path):
             continue
         fpath = ws_root / rel_path
@@ -653,13 +435,17 @@ def _add_ast_enclosing_symbols(
         if not target_lines:
             continue
 
-        for node in ast.walk(tree):
+        sorted_lines = sorted(target_lines)
+        for idx, node in enumerate(ast.walk(tree)):
+            if (idx & 255) == 0 and deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("related_files timed out walking AST")
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 start = getattr(node, "lineno", None)
                 end = getattr(node, "end_lineno", None)
                 if start is None or end is None:
                     continue
-                if any(start <= ln <= end for ln in target_lines):
+                pos = bisect.bisect_left(sorted_lines, start)
+                if pos < len(sorted_lines) and sorted_lines[pos] <= end:
                     info.ast_enclosing_syms.add(node.name)
 
 
@@ -710,29 +496,13 @@ def extract_symbols(
     if not changed_prod or not diff_text.strip():
         return []
 
-    _, prod_files = _parse_diff(diff_text, changed_prod)
-    if not prod_files:
+    try:
+        _, prod_files = _parse_diff(diff_text, changed_prod, deadline=deadline)
+        if not prod_files:
+            return []
+        return _collect_symbols(ws_root, prod_files, deadline=deadline)
+    except TimeoutError:
         return []
-
-    return _collect_symbols(ws_root, prod_files, deadline=deadline)
-
-
-def _batch_symbols(symbols: list[str], max_chars: int = MAX_GREP_ARG_CHARS) -> list[list[str]]:
-    batches: list[list[str]] = []
-    cur: list[str] = []
-    chars = 0
-    for sym in symbols:
-        cost = len(sym) + 4  # "-e " + sym + space
-        if cur and chars + cost > max_chars:
-            batches.append(cur)
-            cur = [sym]
-            chars = cost
-        else:
-            cur.append(sym)
-            chars += cost
-    if cur:
-        batches.append(cur)
-    return batches
 
 
 def _git_grep_symbols(
@@ -741,129 +511,77 @@ def _git_grep_symbols(
     excluded: set[str],
     ignore: tuple[str, ...],
     deadline: float,
-) -> dict[str, dict[str, int]] | None:
-    """Search tracked `.py` files with `git grep -w -F -n`. Returns None to trigger fallback."""
-    file_hits: dict[str, dict[str, int]] = {}
-    for batch in _batch_symbols(symbols):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("related_files timed out before git grep")
-        e_args: list[str] = []
-        for sym in batch:
-            e_args.extend(("-e", sym))
-        try:
-            proc = _run_git(
-                ws_root,
-                "grep",
-                "--no-color",
-                "-w",
-                "-F",
-                "-n",
-                *e_args,
-                "--",
-                "*.py",
-                timeout=remaining,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("git grep timed out") from exc
-        if proc is None or proc.returncode not in (0, 1):
-            return None
-        if proc.returncode == 1:
-            continue
-
-        batch_set = set(batch)
-        for raw_line in proc.stdout.decode("utf-8", "replace").splitlines():
-            parts = raw_line.split(":", 2)
-            if len(parts) < 3:
-                continue
-            rel = _norm_path(parts[0])
-            if rel in excluded:
-                continue
-            if not is_production_python(rel, ws_root, ignore=ignore, _ws_root=ws_root):
-                continue
-            counts = file_hits.get(rel)
-            for tok in _WORD_RE.findall(parts[2]):
-                if tok in batch_set:
-                    if counts is None:
-                        counts = file_hits.setdefault(rel, {})
-                    counts[tok] = counts.get(tok, 0) + 1
-    return file_hits
-
-
-def _python_scan_symbols(
-    ws_root: Path,
-    symbols: list[str],
-    excluded: set[str],
-    ignore: tuple[str, ...],
-    deadline: float,
 ) -> dict[str, dict[str, int]]:
-    """Pure Python fallback scan limited to 20k files and 1 MB per file."""
+    """Search tracked `.py` files with `git -c core.quotepath=off grep -I -o -w -F`."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("related_files timed out before git grep")
+    e_args: list[str] = []
+    for sym in symbols:
+        e_args.extend(("-e", sym))
+    try:
+        proc = _git(
+            ws_root,
+            "grep",
+            "--no-color",
+            "-I",
+            "-o",
+            "-w",
+            "-F",
+            *e_args,
+            "--",
+            "*.py",
+            timeout=remaining,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("git grep timed out") from exc
+    if proc is None or proc.returncode not in (0, 1) or proc.returncode == 1:
+        return {}
+    if time.monotonic() >= deadline:
+        raise TimeoutError("related_files timed out after git grep")
+
     sym_set = set(symbols)
-    norm_ign = _norm_ignore(ignore)
+    norm_ign = _norm_ignore(ignore) if ignore else ()
+    prod_cache: dict[str, bool] = {}
     file_hits: dict[str, dict[str, int]] = {}
-    scanned = 0
 
-    for dirpath, dirnames, filenames in os.walk(ws_root, topdown=True):
-        if time.monotonic() >= deadline:
-            raise TimeoutError("related_files scan timed out")
-        dir_rel = _norm_path(os.path.relpath(dirpath, ws_root))
-        if dir_rel == ".":
-            dir_rel = ""
-
-        # Prune excluded and ignored directories in-place.
-        kept: list[str] = []
-        for d in dirnames:
-            dl = d.lower()
-            if dl in EXCLUDED_DIRS or d in GENERATED_DIRS:
-                continue
-            sub_rel = f"{dir_rel}/{d}" if dir_rel else d
-            if norm_ign and _in_ignore(sub_rel, norm_ign):
-                continue
-            kept.append(d)
-        dirnames[:] = kept
-
-        for fname in filenames:
-            scanned += 1
-            if scanned > MAX_SCAN_FILES:
-                return file_hits
-            if (scanned & 31) == 0 and time.monotonic() >= deadline:
-                raise TimeoutError("related_files scan timed out")
-            if not fname.endswith(".py"):
-                continue
-            rel = f"{dir_rel}/{fname}" if dir_rel else fname
-            if rel in excluded:
-                continue
-            if not is_production_python(rel, ws_root, ignore=ignore, _ws_root=ws_root):
-                continue
-            fpath = ws_root / rel
-            try:
-                st = fpath.stat()
-                if not fpath.is_file() or st.st_size > MAX_FILE_BYTES:
-                    continue
-                content = fpath.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            counts: dict[str, int] = {}
-            for tok in _WORD_RE.findall(content):
-                if tok in sym_set:
-                    counts[tok] = counts.get(tok, 0) + 1
-            if counts:
-                file_hits[rel] = counts
+    for idx, raw_line in enumerate(proc.stdout.decode("utf-8", "replace").splitlines()):
+        if (idx & 255) == 0 and time.monotonic() >= deadline:
+            raise TimeoutError("related_files timed out parsing git grep")
+        sep = raw_line.rfind(":")
+        if sep <= 0:
+            continue
+        rel = _norm_path(raw_line[:sep])
+        if not rel or rel in excluded:
+            continue
+        ok = prod_cache.get(rel)
+        if ok is None:
+            ok = is_production_python(rel, ws_root, ignore=norm_ign, _ws_root=ws_root)
+            prod_cache[rel] = ok
+        if not ok:
+            continue
+        tok = raw_line[sep + 1 :]
+        if tok not in sym_set:
+            continue
+        counts = file_hits.get(rel)
+        if counts is None:
+            counts = file_hits[rel] = {}
+        counts[tok] = counts.get(tok, 0) + 1
     return file_hits
 
 
-def _shared_dir_depth(path: str, edited_prod_paths: set[str]) -> int:
-    p_parts = path.split("/")[:-1]
+def _shared_dir_depth(path: str, edited_dirs: tuple[str, ...]) -> int:
+    p_dir = os.path.dirname(path)
+    if not p_dir or not edited_dirs:
+        return 0
     best = 0
-    for ep in edited_prod_paths:
-        e_parts = ep.split("/")[:-1]
-        depth = 0
-        for a, b in zip(p_parts, e_parts, strict=False):
-            if a == b:
-                depth += 1
-            else:
-                break
-        best = max(best, depth)
+    for e_dir in edited_dirs:
+        try:
+            common = os.path.commonpath((p_dir, e_dir))
+        except ValueError:
+            continue
+        if common and common != ".":
+            best = max(best, len(Path(common).parts))
     return best
 
 
@@ -875,7 +593,6 @@ def related_files(
     limit: int = MAX_RESULTS,
     timeout_s: float = RELATED_TIMEOUT_S,
     ignore: tuple[str, ...] = (),
-    use_git: bool = True,
 ) -> list[tuple[str, list[str]]]:
     """Return top-`limit` untouched production `.py` files referencing changed symbols.
 
@@ -896,32 +613,27 @@ def related_files(
     if not changed_prod:
         return []
 
-    diff_paths, prod_files = _parse_diff(diff_text, changed_prod)
-    if not prod_files:
-        return []
-    excluded = norm_changed | diff_paths
-
-    symbols = _collect_symbols(ws_root, prod_files, deadline=deadline)
-    if not symbols:
-        return []
-
     try:
-        file_hits: dict[str, dict[str, int]] | None = None
-        if use_git:
-            file_hits = _git_grep_symbols(ws_root, symbols, excluded, ignore, deadline)
-        if file_hits is None:
-            file_hits = _python_scan_symbols(ws_root, symbols, excluded, ignore, deadline)
+        diff_paths, prod_files = _parse_diff(diff_text, changed_prod, deadline=deadline)
+        if not prod_files:
+            return []
+        excluded = norm_changed | diff_paths
+        symbols = _collect_symbols(ws_root, prod_files, deadline=deadline)
+        if not symbols:
+            return []
+        file_hits = _git_grep_symbols(ws_root, symbols, excluded, ignore, deadline)
     except (TimeoutError, OSError):
         return []
 
     if not file_hits:
         return []
 
+    edited_dirs = tuple({d for ep in changed_prod if (d := os.path.dirname(ep))})
     ranked = sorted(
         file_hits.items(),
         key=lambda item: (
             -len(item[1]),
-            -_shared_dir_depth(item[0], changed_prod),
+            -_shared_dir_depth(item[0], edited_dirs),
             -sum(item[1].values()),
             item[0],
         ),
@@ -937,40 +649,56 @@ def format_related_notice(items: list[tuple[str, list[str]]]) -> str:
     return RELATED_FILES_NOTICE.format(lines=lines)
 
 
-def _git_changed_files(ws_root: Path, deadline: float) -> list[str] | None:
-    """Tracked and untracked changed paths from `git status`, or None outside a repo."""
+def _workspace_prefix(ws_root: Path, deadline: float) -> str:
+    """Return git repo prefix (e.g. ``'sub/'``) when ``ws_root`` is a repo subdirectory."""
+    if (ws_root / ".git").exists():
+        return ""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        return None
+        return ""
     try:
-        proc = _run_git(
+        proc = _git(ws_root, "rev-parse", "--show-prefix", timeout=remaining)
+    except subprocess.TimeoutExpired:
+        return ""
+    if proc is None or proc.returncode != 0:
+        return ""
+    prefix = _norm_path(proc.stdout.decode("utf-8", "replace"))
+    return f"{prefix}/" if prefix else ""
+
+
+def _relativize_changed(ws_root: Path, files: list[str], prefix: str) -> list[str]:
+    out: list[str] = []
+    for raw in files:
+        p = _norm_path(raw)
+        if not p:
+            continue
+        if prefix and p.startswith(prefix) and not (ws_root / p).exists():
+            p = p[len(prefix) :]
+        if p:
+            out.append(p)
+    return out
+
+
+def _git_untracked_files(ws_root: Path, prod_files: list[str], deadline: float) -> set[str]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return set()
+    try:
+        proc = _git(
             ws_root,
-            "status",
-            "--porcelain=v1",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
             "-z",
-            "--untracked-files=all",
+            "--",
+            *prod_files,
             timeout=remaining,
         )
     except subprocess.TimeoutExpired:
-        return None
+        return set()
     if proc is None or proc.returncode != 0:
-        return None
-    entries = proc.stdout.decode("utf-8", "replace").split("\0")
-    out: set[str] = set()
-    skip_next = False
-    for entry in entries:
-        if skip_next:
-            skip_next = False
-            continue
-        if len(entry) < 4:
-            continue
-        status, path = entry[:2], entry[3:]
-        norm = _norm_path(path)
-        if norm:
-            out.add(norm)
-        if status[0] in "RC":
-            skip_next = True
-    return sorted(out)
+        return set()
+    return {_norm_path(p) for p in proc.stdout.decode("utf-8", "replace").split("\0") if p}
 
 
 def _git_diff_for_files(ws_root: Path, prod_files: list[str], deadline: float) -> str:
@@ -980,11 +708,12 @@ def _git_diff_for_files(ws_root: Path, prod_files: list[str], deadline: float) -
         return ""
     text = ""
     try:
-        proc = _run_git(
+        proc = _git(
             ws_root,
             "diff",
             "--no-ext-diff",
             "--no-textconv",
+            "--relative",
             "HEAD",
             "--",
             *prod_files,
@@ -993,21 +722,17 @@ def _git_diff_for_files(ws_root: Path, prod_files: list[str], deadline: float) -
     except subprocess.TimeoutExpired:
         return ""
     if proc is not None and proc.returncode == 0:
-        text = proc.stdout.decode("utf-8", "replace")
+        text = proc.stdout[:MAX_DIFF_CHARS].decode("utf-8", "replace")
 
-    shown: set[str] = set()
-    for line in text.splitlines():
-        if line.startswith("diff --git "):
-            m = _DIFF_GIT_RE.match(line)
-            if m:
-                shown.add(_norm_path(m.group(2)))
-                shown.add(_norm_path(m.group(1)))
-
+    untracked = _git_untracked_files(ws_root, prod_files, deadline)
     chunks = [text] if text else []
+    total_chars = len(text)
     for rel in prod_files:
         if time.monotonic() >= deadline:
             return ""
-        if rel in shown or not _inside_workspace(ws_root, rel):
+        if total_chars >= MAX_DIFF_CHARS:
+            break
+        if rel not in untracked or not _inside_workspace(ws_root, rel):
             continue
         fpath = ws_root / rel
         try:
@@ -1021,7 +746,7 @@ def _git_diff_for_files(ws_root: Path, prod_files: list[str], deadline: float) -
         if not added_lines:
             continue
         body = "".join(f"+{line}\n" for line in added_lines)
-        chunks.append(
+        chunk = (
             f"diff --git a/{rel} b/{rel}\n"
             "new file mode 100644\n"
             "--- /dev/null\n"
@@ -1029,31 +754,36 @@ def _git_diff_for_files(ws_root: Path, prod_files: list[str], deadline: float) -
             f"@@ -0,0 +1,{len(added_lines)} @@\n"
             f"{body}"
         )
+        chunks.append(chunk)
+        total_chars += len(chunk)
     return "\n".join(chunks)
 
 
 def find_related_files(
     workspace: Path,
-    changed: list[str] | None = None,
+    changed: list[str],
     *,
     limit: int = MAX_RESULTS,
     timeout_s: float = RELATED_TIMEOUT_S,
     ignore: tuple[str, ...] = (),
 ) -> list[tuple[str, list[str]]]:
-    """Git helper: collect diff for `changed` (or working tree) and return related files.
+    """Git helper: collect diff for `changed` and return related production `.py` files.
 
     Time-bounded to `timeout_s` (default 2 s). Never raises; returns `[]` on timeout or error.
     """
     try:
+        if not changed or limit <= 0 or timeout_s <= 0:
+            return []
         deadline = time.monotonic() + timeout_s
         ws_root = workspace.resolve()
-        files = _git_changed_files(ws_root, deadline) if changed is None else list(changed)
+        prefix = _workspace_prefix(ws_root, deadline)
+        files = _relativize_changed(ws_root, changed, prefix)
         if not files:
             return []
         prod_changed = sorted(
             {
                 p
-                for p in (_norm_path(c) for c in files)
+                for p in files
                 if is_production_python(p, ws_root, ignore=ignore, _ws_root=ws_root)
             }
         )
@@ -1072,7 +802,6 @@ def find_related_files(
             limit=limit,
             timeout_s=remaining,
             ignore=ignore,
-            use_git=True,
         )
     except Exception:
         return []

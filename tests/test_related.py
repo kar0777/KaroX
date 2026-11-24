@@ -92,6 +92,7 @@ def test_symbol_extraction_ast_defs_assigns_attrs_and_filters(tmp_path: Path) ->
                 '        label = "string.fake_str_attr"',
                 "        self.get(cfg.quota_window)",
                 "        self.append(cfg.value)",
+                "        now = time.monotonic() + os.environ.get('X', '') + dt.isoformat()",
                 "        return cfg.xy + self.custom_scale",
                 "",
                 "def added_helper():",
@@ -118,6 +119,7 @@ def test_symbol_extraction_ast_defs_assigns_attrs_and_filters(tmp_path: Path) ->
             '+        label = "string.fake_str_attr"',
             "+        self.get(cfg.quota_window)",
             "+        self.append(cfg.value)",
+            "+        now = time.monotonic() + os.environ.get('X', '') + dt.isoformat()",
             "-        return cfg.xy + self.old_scale",
             "+        return cfg.xy + self.custom_scale",
             "@@ -12,2 +13,4 @@",
@@ -160,6 +162,9 @@ def test_symbol_extraction_ast_defs_assigns_attrs_and_filters(tmp_path: Path) ->
         "dict",
         "args",
         "kwargs",
+        "monotonic",
+        "environ",
+        "isoformat",
     ):
         assert excluded not in syms
 
@@ -234,13 +239,8 @@ def test_ranking_order_top5_whole_word_and_exclusions(tmp_path: Path) -> None:
         ("pkg/zzz_tie.py", ["alpha_calc"]),
     ]
 
-    # Git grep path
-    via_git = related_files(ws, ["pkg/sub/core.py"], diff_text, use_git=True)
+    via_git = related_files(ws, ["pkg/sub/core.py"], diff_text)
     assert via_git == expected
-
-    # Pure Python fallback path produces the exact same ranking & exclusions
-    via_py = related_files(ws, ["pkg/sub/core.py"], diff_text, use_git=False)
-    assert via_py == expected
 
 
 def test_exclusions_outside_workspace_and_notice_format(tmp_path: Path) -> None:
@@ -281,24 +281,44 @@ def test_exclusions_outside_workspace_and_notice_format(tmp_path: Path) -> None:
     )
 
 
-def test_python_fallback_skips_oversized_files(tmp_path: Path) -> None:
-    ws = tmp_path / "plain"
+def test_parse_diff_size_cap_and_deadline_and_ast_bisect(tmp_path: Path) -> None:
+    ws = tmp_path / "proj"
     ws.mkdir()
-    (ws / "changed.py").write_text("def special_token():\n    return 2\n", encoding="utf-8")
-    (ws / "small.py").write_text("special_token()\n", encoding="utf-8")
-    # > 1 MiB file must be skipped by fallback scan
-    (ws / "huge.py").write_text("special_token()\n" + ("# pad\n" * 200_000), encoding="utf-8")
+    # Large file with many functions; change only line inside func_450.
+    lines = []
+    for i in range(500):
+        lines.append(f"def func_{i}():")
+        lines.append(f"    return {i}")
+    src = "\n".join(lines) + "\n"
+    (ws / "many.py").write_text(src, encoding="utf-8")
+    target_line = 450 * 2 + 2  # body line of func_450
     diff_text = (
-        "diff --git a/changed.py b/changed.py\n"
-        "--- a/changed.py\n"
-        "+++ b/changed.py\n"
-        "@@ -1,2 +1,2 @@\n"
-        " def special_token():\n"
-        "-    return 1\n"
-        "+    return 2\n"
+        "diff --git a/many.py b/many.py\n"
+        "--- a/many.py\n"
+        "+++ b/many.py\n"
+        f"@@ -{target_line},1 +{target_line},1 @@\n"
+        "-    return 449\n"
+        "+    return 450\n"
     )
-    res = related_files(ws, ["changed.py"], diff_text, use_git=False)
-    assert res == [("small.py", ["special_token"])]
+    syms = extract_symbols(ws, ["many.py"], diff_text)
+    assert syms == ["func_450"]
+
+    # Expired deadline returns [] immediately.
+    assert extract_symbols(ws, ["many.py"], diff_text, deadline=time.monotonic() - 1.0) == []
+
+    # Size cap truncates diff beyond max_chars.
+    padded_diff = (
+        "diff --git a/many.py b/many.py\n"
+        "--- a/many.py\n"
+        "+++ b/many.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "+def first_kept():\n"
+        + ("# " + "x" * 100 + "\n") * 20
+        + "+def cut_off_later():\n"
+    )
+    _, prod = related._parse_diff(padded_diff, {"many.py"}, max_chars=250)
+    assert "first_kept" in prod["many.py"].def_class_syms
+    assert "cut_off_later" not in prod["many.py"].def_class_syms
 
 
 # -- Session integration ------------------------------------------------------------------
@@ -667,4 +687,159 @@ def test_untracked_new_file_and_session_error_resilience(
     assert finished(events2).status == "completed"
     assert finished(events2).final_text == "clean finish despite error"
     assert not [e for e in events2 if isinstance(e, ev.Notice) and e.kind == "related_files"]
+
+
+@needs_git
+def test_tracked_clean_file_no_synthetic_diff(tmp_path: Path) -> None:
+    ws = make_repo(
+        tmp_path,
+        {
+            "pkg/committed.py": "def already_committed():\n    return 1\n",
+            "pkg/caller.py": "from pkg.committed import already_committed\nalready_committed()\n",
+        },
+    )
+    # File is tracked and clean vs HEAD (e.g. agent committed its own edit):
+    # must NOT generate a synthetic "new file" diff or surface callers.
+    assert find_related_files(ws, ["pkg/committed.py"]) == []
+
+
+@needs_git
+def test_subdirectory_workspace_inside_bigger_repo(tmp_path: Path) -> None:
+    repo = make_repo(
+        tmp_path,
+        {
+            "other_app/external.py": "from sub.pkg.core import compute_fee\ncompute_fee()\n",
+            "sub/pkg/core.py": "def compute_fee():\n    return 1\n",
+            "sub/pkg/sibling.py": "from pkg.core import compute_fee\nval = compute_fee()\n",
+        },
+        name="mono",
+    )
+    sub_ws = repo / "sub"
+    (sub_ws / "pkg/core.py").write_text("def compute_fee():\n    return 99\n", encoding="utf-8")
+
+    # Direct call with workspace-relative path returns workspace-relative result only.
+    res = find_related_files(sub_ws, ["pkg/core.py"])
+    assert res == [("pkg/sibling.py", ["compute_fee"])]
+
+    # Session rooted at the subdirectory also resolves paths relative to sub_ws.
+    (sub_ws / "pkg/core.py").write_text("def compute_fee():\n    return 1\n", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            Turn(
+                calls=[
+                    (
+                        "edit",
+                        {
+                            "file_path": "pkg/core.py",
+                            "old_string": "return 1",
+                            "new_string": "return 5",
+                        },
+                    )
+                ]
+            ),
+            Turn(text="initial"),
+            Turn(text="final"),
+        ]
+    )
+    events = run(Session(SessionConfig(model="m", workspace=sub_ws, home=tmp_path / "h"), provider))
+    notices = [e for e in events if isinstance(e, ev.Notice) and e.kind == "related_files"]
+    assert len(notices) == 1
+    assert "- pkg/sibling.py (compute_fee)" in notices[0].text
+    assert "other_app/external.py" not in notices[0].text
+
+
+@needs_git
+def test_paths_with_spaces_and_non_ascii(tmp_path: Path) -> None:
+    tracked_a = "pkg/my dir/модуль один.py"
+    tracked_b = "pkg/my dir/модуль два.py"
+    untracked_c = "pkg/my dir/новый файл.py"
+    ws = make_repo(
+        tmp_path,
+        {
+            tracked_a: "def calc_tariff(x):\n    return x + 1\n",
+            tracked_b: "def run_tariff(x):\n    return calc_tariff(x) + helper_beta(x)\n",
+        },
+    )
+    # 1. Tracked file with spaces + Cyrillic modified
+    (ws / tracked_a).write_text("def calc_tariff(x):\n    return x + 2\n", encoding="utf-8")
+    res = find_related_files(ws, [tracked_a])
+    assert res == [(tracked_b, ["calc_tariff"])]
+
+    # 2. Untracked file with spaces + Cyrillic referencing symbol in tracked_b
+    (ws / untracked_c).write_text("def helper_beta(x):\n    return x * 3\n", encoding="utf-8")
+    res_untracked = find_related_files(ws, [untracked_c])
+    assert res_untracked == [(tracked_b, ["helper_beta"])]
+
+
+@needs_git
+def test_git_grep_caches_is_production_python_per_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = make_repo(
+        tmp_path,
+        {
+            "pkg/a.py": "def repeated_sym():\n    return 1\n",
+            "pkg/b.py": "\n".join("repeated_sym()" for _ in range(25)) + "\n",
+        },
+    )
+    (ws / "pkg/a.py").write_text("def repeated_sym():\n    return 2\n", encoding="utf-8")
+
+    orig = related.is_production_python
+    calls: list[str] = []
+
+    def counting(rel_path: str, *args: object, **kwargs: object) -> bool:
+        calls.append(rel_path)
+        return orig(rel_path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(related, "is_production_python", counting)
+    res = find_related_files(ws, ["pkg/a.py"])
+    assert res == [("pkg/b.py", ["repeated_sym"])]
+    assert calls.count("pkg/b.py") == 1
+
+
+@needs_git
+def test_session_changes_since_start_error_and_timeout_no_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from karox6.core import loopguard as lg_mod
+    from karox6.core import session as session_mod
+
+    ws = make_repo(
+        tmp_path,
+        {
+            "pkg/a.py": "def compute_rate():\n    return 1\n",
+            "pkg/b.py": "from pkg.a import compute_rate\ncompute_rate()\n",
+        },
+    )
+
+    # 1. Error in changes_since_start -> caught, no notice, run completes cleanly.
+    def failing_changes(self: object) -> None:
+        raise RuntimeError("git exploded")
+
+    monkeypatch.setattr(lg_mod.WorkspaceMonitor, "changes_since_start", failing_changes)
+    provider1 = ScriptedProvider([Turn(text="done despite changes error")])
+    events1 = run(
+        Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "h1"), provider1)
+    )
+    assert finished(events1).status == "completed"
+    assert finished(events1).final_text == "done despite changes error"
+    assert not [e for e in events1 if isinstance(e, ev.Notice) and e.kind == "related_files"]
+
+    # 2. Slow changes_since_start exceeding timeout budget -> caught, no notice.
+    monkeypatch.setattr(session_mod, "RELATED_TIMEOUT_S", 0.05)
+
+    def slow_changes(self: object) -> None:
+        time.sleep(0.8)
+
+    monkeypatch.setattr(lg_mod.WorkspaceMonitor, "changes_since_start", slow_changes)
+    provider2 = ScriptedProvider([Turn(text="done despite slow changes")])
+    t0 = time.monotonic()
+    events2 = run(
+        Session(SessionConfig(model="m", workspace=ws, home=tmp_path / "h2"), provider2)
+    )
+    elapsed = time.monotonic() - t0
+    assert finished(events2).status == "completed"
+    assert finished(events2).final_text == "done despite slow changes"
+    assert not [e for e in events2 if isinstance(e, ev.Notice) and e.kind == "related_files"]
+    assert elapsed < 1.5
 

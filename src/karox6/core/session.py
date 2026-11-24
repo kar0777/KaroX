@@ -414,26 +414,36 @@ class Session:
                         and not self._limit_reached(steps, started)
                     ):
                         related_fired = True
-                        changes = await asyncio.to_thread(monitor.changes_since_start)
-                        changes_checked = True
-                        if changes is not None:
-                            try:
-                                items = await asyncio.wait_for(
-                                    asyncio.to_thread(
-                                        find_related_files,
-                                        self.workspace,
-                                        changes.changed,
-                                        ignore=self.files.ignore,
-                                    ),
-                                    timeout=RELATED_TIMEOUT_S + 0.5,
-                                )
-                            except Exception:
-                                items = []
-                            if items:
-                                gate_text = gate_text or message.content
-                                self._notice("related_files", format_related_notice(items), emit)
-                                final_text = ""
-                                continue
+                        def _check_related(
+                            mon: WorkspaceMonitor = monitor,
+                        ) -> tuple[GitChangeSummary | None, list[tuple[str, list[str]]]]:
+                            deadline = time.monotonic() + RELATED_TIMEOUT_S
+                            found_changes = mon.changes_since_start()
+                            if found_changes is None:
+                                return None, []
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                return found_changes, []
+                            return found_changes, find_related_files(
+                                self.workspace,
+                                found_changes.changed,
+                                timeout_s=remaining,
+                                ignore=self.files.ignore,
+                            )
+
+                        try:
+                            changes, items = await asyncio.wait_for(
+                                asyncio.to_thread(_check_related),
+                                timeout=RELATED_TIMEOUT_S + 0.5,
+                            )
+                            changes_checked = True
+                        except Exception:
+                            items = []
+                        if items:
+                            gate_text = gate_text or message.content
+                            self._notice("related_files", format_related_notice(items), emit)
+                            final_text = ""
+                            continue
                     if (
                         self.config.finish_gate
                         and not self.config.review
