@@ -2467,3 +2467,14 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   baseline trials, "make the minimal change (or none) and finish"). Token branch unchanged.
 - Council 13 (Codex + Neon): dev56 vs dev61 on pool5, cap $2.60; dev61 -> final candidate iff net >= +3 AND cost
   <= 1.20x dev56; else keep dev56; no cost-per-solve fallback.
+
+## 2026-11-24: dev61 A/B (prereg_dev61) — FAIL on cost; provider mistake found
+- dev56 25/72 vs dev61 28/72; discordant 2 vs 5 (net +3); diff +4.2 pp CI [-2.8, +11.1];
+  $ 0.877 vs 1.224 (1.40x > 1.20x) -> rule FAILS, keep dev56. Median wall 156 vs 197 s (geo 1.10x).
+  Guard notices: dev61 still fired in some trials (token branch). Cost per solve 0.035 vs 0.044 (CC on pool5: 0.056).
+- MISTAKE (mine): today's three pool5 runs (pool5base, noguard, dev61ab) did not pass
+  `karox6_flags=--provider anthropic`; the bench adapter hard-codes `--provider openai-chat` (gateway base URL), so
+  KaroX ran through the OpenAI-chat translation (thinking signatures lost, ~+35% output/task: 11.7k vs 8.7k in
+  pool3a, which did pass the flag). The A/Bs are internally valid (both arms same provider) but measure the
+  non-shipping configuration; pool5base KaroX vs CC (25 vs 26, 0.60x) understates KaroX.
+- Spend today (audit prices): 0.094 + 2.339 + 2.200 + 2.101 = $6.73.
