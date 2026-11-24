@@ -2426,3 +2426,11 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   do, use a new test file, distinctive names; keep existing tests and fixtures unless the task changes them."
   (600 words). Waits for a council-approved screen.
 - Spend 2026-11-23 (audit prices): final24 0.92, speed55 0.25, wait30 0.58, wait57 0.26, pool3a 1.15 = ~$3.2.
+
+## 2026-11-24 morning: dev58 dropped ($0)
+- Mechanical recount (scripts/test_edits.py in karox6-bench-data: final agent.diff touches an existing test path):
+  pool3a CC 27/43 (63%) vs KaroX 19/43 (44%); final24 CC 38% vs KaroX 25%; wait57 both 42%.
+  The stronger arm edits existing tests MORE often, so the dev58 premise (KaroX over-edits tests) is false on final
+  diffs; dev58 ("keep existing tests") NOT screened, branch kept for the record.
+- Council 9 (Codex): screen the next candidate on pool5 (new fresh tasks, being collected now, $0 GitHub
+  validation); keep the last pre-registered comparison on pool3+pool4 for a combined final candidate.
