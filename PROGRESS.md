@@ -2510,3 +2510,14 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   behind a $0 gate (cache-expiry savings >= 20% of cost). $0 replay: 27 expirations in 14 trials cost $0.102 =
   8.5% of dev61's $1.198 -> gate FAILS -> D (no paid run). pipefail replay: failures shown with exit 0 in 34/40
   failed and 21/31 solved trials (weakly discriminating) -> not pursued.
+
+## 2026-11-24 night: dev62 related-files notice — pilot FAILED (prereg_dev62)
+- $0 proof: replay of dev62 code on dev61's pool5 diffs lists the missed gold file in top-5 for 13/15 failures.
+  Fusion: REQUEST CHANGES -> fixed by Neon -> APPROVE. Preflight (id 28) PASS, notice fired in production form.
+- Pilot (ids 153,156,174,177,192,206; $0.084): notice fired 6/6 and listed the missed gold file in all 4 failures,
+  but the agent edited it in 0/4 — each time it checked the file and argued "no change needed" (its own change
+  did not rename/alter those names). 0 regressions; cost 1.48x the same tasks in control (rule <= 1.6x).
+  Rule: >= 2/4 acted -> FAIL. Stopped; waves not run. Lesson: offline recall of a pointer != conversion; Haiku
+  dismisses "files that reference names you changed" when the task's real need there is semantic.
+- Also: an orphan grep.exe (5.8 GB, from an interrupted agy helper run) caused three low-memory reaps today; killed.
+- Spend today: $10.74 + 0.010 (preflight) + 0.084 (pilot) = $10.83.
