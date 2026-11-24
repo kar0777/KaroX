@@ -2500,3 +2500,13 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   Honest reading: solve parity with Claude Code (difference not significant) at ~17% lower cost per solve.
 - dev61 merged into karox6/main. pool3+pool4 comparisons are now used up.
 - Spend today (audit prices): 6.73 + 2.010 (native A/B) + 0.011 + 1.989 = $10.74.
+
+## 2026-11-24 evening: $0 work after the final
+- Bench: KaroX 6 arms default to native provider on Claude upstreams (devin/bench); preflight_check.py (Codex,
+  tested: PASS on preflight61, FAIL on the 404 run); stored controls in bench/baselines.json.
+- Neon diagnosis of dev61's 40 pool5 failures (analysis/dev61diag/neon.md): wrong approach 17, incomplete 16,
+  false verification 2, env 2, guard 1, timeout 2. dev61 vs CC on the same 71: 31 vs 26 (CC-only 1, dev61-only 6).
+- Council 16 (Codex + Neon): candidates finish gate (A), pipefail (B), wait cap 240 s (C), none (D). Both chose C
+  behind a $0 gate (cache-expiry savings >= 20% of cost). $0 replay: 27 expirations in 14 trials cost $0.102 =
+  8.5% of dev61's $1.198 -> gate FAILS -> D (no paid run). pipefail replay: failures shown with exit 0 in 34/40
+  failed and 21/31 solved trials (weakly discriminating) -> not pursued.
