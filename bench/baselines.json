@@ -1,0 +1,14 @@
+{
+  "note": "Stored control arms for reuse (strategy council 2026-11-24): screen candidates in one arm against these; re-run the control every 4-5 iterations to check drift.",
+  "baselines": [
+    {"pool": "pool5", "ids": "141-212", "version": "6.0.0.dev61", "provider": "anthropic (native)", "model": "claude-haiku-5-5",
+     "run": "45407450472", "local": "karox6-bench-data/runs/dev61nat2", "arm": "karox6b-hard12",
+     "solved": 31, "pairs": 71, "cost_usd": 1.198, "note": "haystack-13582 infra (no trials)"},
+    {"pool": "pool5", "ids": "141-212", "version": "6.0.0.dev56", "provider": "anthropic (native)", "model": "claude-haiku-5-5",
+     "run": "45407450472", "local": "karox6-bench-data/runs/dev61nat2", "arm": "karox6-hard12",
+     "solved": 24, "pairs": 71, "cost_usd": 0.812},
+    {"pool": "pool5", "ids": "141-212", "version": "claude-code", "provider": "anthropic", "model": "claude-haiku-5-5",
+     "run": "45338043869", "local": "karox6-bench-data/runs/pool5base", "arm": "claude-code-hard12",
+     "solved": 26, "pairs": 72, "cost_usd": 1.466}
+  ]
+}
