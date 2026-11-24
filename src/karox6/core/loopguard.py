@@ -156,8 +156,9 @@ class ProgressGuard:
     def note_command(self, command: str) -> None:
         """Record a shell command; a command not run before counts as progress (agents that
         read and search through the shell explore with new commands, not the read tool)."""
-        key = " ".join(command.split())
-        if key and key not in self._seen_commands:
+        normalized = " ".join(command.split())
+        key = hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest()
+        if normalized and key not in self._seen_commands:
             self._seen_commands.add(key)
             self._new_commands += 1
 

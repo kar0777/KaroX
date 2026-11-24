@@ -921,10 +921,9 @@ def test_progress_guard_counts_new_shell_commands_as_progress(tmp_path: Path) ->
     events = run(Session(cfg, ScriptedProvider(new_turns)))
     assert not [e for e in events if isinstance(e, ev.Notice) and e.kind == "progress_guard"]
 
-    # The same command repeated (whitespace differences ignored) is not progress.
+    # Commands differing only in whitespace are the same command: not progress.
     same = [
-        Turn(calls=[("bash", {"command": "echo  same" if i % 2 else "echo same"})])
-        for i in range(15)
+        Turn(calls=[("bash", {"command": "echo" + " " * (i + 1) + "same"})]) for i in range(15)
     ] + [Turn(text="done")]
     cfg2 = SessionConfig(model="m", workspace=ws, home=tmp_path / "h2", finish_gate=False)
     events2 = run(Session(cfg2, ScriptedProvider(same)))

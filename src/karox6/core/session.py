@@ -428,9 +428,13 @@ class Session:
                     if monitor.disabled:
                         progress_guard = None
                     else:
+                        from karox6.tools.shell import ShellTool
+
                         for call in message.tool_calls:
-                            if call.name == "bash":
-                                progress_guard.note_command(_command_text(call.arguments))
+                            if isinstance(self._lookup(call.name), ShellTool):
+                                command = _command_text(call.arguments)
+                                if command:
+                                    progress_guard.note_command(command)
                         progress_notice = progress_guard.observe(
                             steps,
                             diff_hash,
@@ -1384,9 +1388,13 @@ def _inside(path: Path, workspace: Path) -> tuple[str, ...]:
 
 
 def _command_text(arguments: str) -> str:
-    """The `command` of a shell call's raw JSON arguments (the raw text when unparsable)."""
+    """A shell call's command (with its workdir); empty when the arguments are invalid."""
     try:
         data = json.loads(arguments or "{}")
     except (ValueError, TypeError):
-        return arguments or ""
-    return str(data.get("command", "")) if isinstance(data, dict) else str(data)
+        return ""
+    if not isinstance(data, dict) or not isinstance(data.get("command"), str):
+        return ""
+    command: str = data["command"]
+    workdir = data.get("workdir")
+    return f"cd {workdir}; {command}" if isinstance(workdir, str) and workdir else command
