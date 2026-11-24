@@ -2490,3 +2490,13 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
 - Pooled over three guard A/Bs (215 pairs): guard-off/fixed arms 20 solo solves vs 5 for the guard.
 - Council strategy (Codex + Neon, before this result was read): one objective = more solves at cost/solve <= 0.85x
   Claude Code (<= $0.048); ad-hoc ratio caps dropped for future runs. dev61 would meet it ($0.039).
+
+## 2026-11-24: FINAL pool3+pool4 (prereg_final_pool34) — KaroX dev61 vs Claude Code: PASS
+- Preflight (run 45431866028, task 141): provider=anthropic, version 6.0.0.dev61, calls OK both arms, $0.011.
+- Final (run 45433181014, night ids 74-140, 67 valid pairs, 0 infra, all 67 KaroX runs native dev61):
+  solves KaroX 19 vs CC 18 (discordant 3 vs 2; diff +1.5 pp, 95% CI [-4.5, +7.5]);
+  $ 0.929 vs 1.061; cost/solve $0.0489 vs $0.0589 = 0.83x (rule <= 0.85x); median wall 125 vs 102 s.
+- Pre-registered rule: solves strictly > CC AND cost/solve <= 0.85x CC -> PASS (narrowly on both).
+  Honest reading: solve parity with Claude Code (difference not significant) at ~17% lower cost per solve.
+- dev61 merged into karox6/main. pool3+pool4 comparisons are now used up.
+- Spend today (audit prices): 6.73 + 2.010 (native A/B) + 0.011 + 1.989 = $10.74.
