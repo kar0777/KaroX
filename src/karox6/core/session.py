@@ -428,6 +428,9 @@ class Session:
                     if monitor.disabled:
                         progress_guard = None
                     else:
+                        for call in message.tool_calls:
+                            if call.name == "bash":
+                                progress_guard.note_command(_command_text(call.arguments))
                         progress_notice = progress_guard.observe(
                             steps,
                             diff_hash,
@@ -1378,3 +1381,12 @@ def _inside(path: Path, workspace: Path) -> tuple[str, ...]:
         return (path.resolve().relative_to(workspace).as_posix(),)
     except ValueError:
         return ()
+
+
+def _command_text(arguments: str) -> str:
+    """The `command` of a shell call's raw JSON arguments (the raw text when unparsable)."""
+    try:
+        data = json.loads(arguments or "{}")
+    except (ValueError, TypeError):
+        return arguments or ""
+    return str(data.get("command", "")) if isinstance(data, dict) else str(data)

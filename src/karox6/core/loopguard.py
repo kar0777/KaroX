@@ -135,6 +135,8 @@ class ProgressGuard:
     _no_progress: int = 0
     _tokens_at_last_diff: int = 0
     _fired: bool = False
+    _seen_commands: set[str] = field(default_factory=set)
+    _new_commands: int = 0
 
     def reset(
         self,
@@ -148,6 +150,16 @@ class ProgressGuard:
         self._no_progress = 0
         self._tokens_at_last_diff = initial_output_tokens
         self._fired = False
+        self._seen_commands = set()
+        self._new_commands = 0
+
+    def note_command(self, command: str) -> None:
+        """Record a shell command; a command not run before counts as progress (agents that
+        read and search through the shell explore with new commands, not the read tool)."""
+        key = " ".join(command.split())
+        if key and key not in self._seen_commands:
+            self._seen_commands.add(key)
+            self._new_commands += 1
 
     def observe(
         self,
@@ -160,7 +172,8 @@ class ProgressGuard:
         if self._fired:
             return None
         diff_changed = self._last_hash is not None and diff_hash != self._last_hash
-        new_file_read = read_count > self._last_read_count
+        new_file_read = read_count > self._last_read_count or self._new_commands > 0
+        self._new_commands = 0
         self._last_hash = diff_hash
         self._last_read_count = read_count
         if diff_changed:
