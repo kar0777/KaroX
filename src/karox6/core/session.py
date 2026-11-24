@@ -36,6 +36,7 @@ from karox6.core.loopguard import (
     FINISH_GATE_MAX_STEPS,
     FINISH_GATE_MIN_SECONDS,
     FINISH_GATE_MIN_STEPS,
+    GitChangeSummary,
     LoopGuard,
     ProgressGuard,
     WorkspaceMonitor,
@@ -43,6 +44,11 @@ from karox6.core.loopguard import (
 )
 from karox6.core.messages import IMAGE_TOKENS, Message, ToolCall, Usage
 from karox6.core.prompt import build_system_prompt
+from karox6.core.related import (
+    RELATED_TIMEOUT_S,
+    find_related_files,
+    format_related_notice,
+)
 from karox6.core.review import (
     REVIEW_APPEND,
     REVIEW_MAX_SECONDS,
@@ -285,13 +291,16 @@ class Session:
         reviewed = False  # the independent review ran (once per run)
         # Finish gate fires at most once per run() call (per user task) and never re-arms
         # within a run, even if compaction summarizes away the notice.
+        related_fired = False
         gate_fired = False
         gate_cap: int | None = None  # max step after finish_gate fires
         gate_cap_notified = False
         gate_text = ""  # pre-gate answer preserved across every exit path
         start_output_tokens = self.usage.output_tokens
         need_monitor = self.config.progress_guard or (
-            self.config.finish_gate and not self.config.review and not self._is_read_only()
+            (self.config.finish_gate or self.config.related_files)
+            and not self.config.review
+            and not self._is_read_only()
         )
         monitor: WorkspaceMonitor | None = None
         progress_guard: ProgressGuard | None = None
@@ -391,6 +400,40 @@ class Session:
                             self._notice("review", review_notice(found), emit)
                             final_text = ""
                             continue
+                    changes: GitChangeSummary | None = None
+                    changes_checked = False
+                    if (
+                        self.config.related_files
+                        and not self.config.review
+                        and not related_fired
+                        and gate_cap is None
+                        and monitor is not None
+                        and monitor.in_git
+                        and not monitor.disabled
+                        and not self._is_read_only()
+                        and not self._limit_reached(steps, started)
+                    ):
+                        related_fired = True
+                        changes = await asyncio.to_thread(monitor.changes_since_start)
+                        changes_checked = True
+                        if changes is not None:
+                            try:
+                                items = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        find_related_files,
+                                        self.workspace,
+                                        changes.changed,
+                                        ignore=self.files.ignore,
+                                    ),
+                                    timeout=RELATED_TIMEOUT_S + 0.5,
+                                )
+                            except Exception:
+                                items = []
+                            if items:
+                                gate_text = gate_text or message.content
+                                self._notice("related_files", format_related_notice(items), emit)
+                                final_text = ""
+                                continue
                     if (
                         self.config.finish_gate
                         and not self.config.review
@@ -400,7 +443,8 @@ class Session:
                         and not self._is_read_only()
                         and self._has_finish_gate_budget(steps, started)
                     ):
-                        changes = await asyncio.to_thread(monitor.changes_since_start)
+                        if not changes_checked:
+                            changes = await asyncio.to_thread(monitor.changes_since_start)
                         if changes is not None:
                             gate_fired = True
                             gate_text = message.content
@@ -822,6 +866,7 @@ class Session:
             subagents=False,
             finish_gate=False,
             progress_guard=False,
+            related_files=False,
             snapshot_on_finish=False,
             stream_deltas=False,
             max_steps=min(cfg.max_steps or SUBAGENT_MAX_STEPS, SUBAGENT_MAX_STEPS),
@@ -905,6 +950,7 @@ class Session:
             review=False,
             finish_gate=False,
             progress_guard=False,
+            related_files=False,
             snapshot_on_finish=False,
             stream_deltas=False,
             max_steps=REVIEW_MAX_STEPS,

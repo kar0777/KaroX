@@ -45,6 +45,7 @@ class SessionConfig:
     review: bool = False  # independent review before finishing (core/review.py; off until A/B)
     finish_gate: bool = False  # pre-finish self-check once per user task (opt-in)
     progress_guard: bool = True  # wrap-up notice after prolonged steps without progress
+    related_files: bool = True  # one-shot list of untouched files referencing changed symbols
     step_notices: dict[int, str] = field(default_factory=dict)  # step -> notice (the review)
     retry: RetryPolicy = field(default_factory=RetryPolicy)
 

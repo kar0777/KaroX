@@ -48,6 +48,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "copy_notes": (bool,),
     "finish_gate": (bool,),
     "progress_guard": (bool,),
+    "related_files": (bool,),
     "command_wait_cap": (int,),
     "update_check": (bool,),
     "update_repo": (str,),

@@ -435,6 +435,12 @@ def _add_session_args(p: argparse.ArgumentParser, settings: dict[str, Any] | Non
         default=True,
         help="inject a wrap-up notice after prolonged steps without progress (default: on)",
     )
+    p.add_argument(
+        "--related-files",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="list untouched files referencing changed symbols once before finishing (default: on)",
+    )
     if settings:
         p.set_defaults(**settings)
 
@@ -941,6 +947,7 @@ def _session_config(
         review=args.review,
         finish_gate=args.finish_gate,
         progress_guard=args.progress_guard,
+        related_files=args.related_files,
         code_mode=args.code_mode,
         copy_notes=args.copy_notes,
         command_wait_cap_s=_positive(args.command_wait_cap),
