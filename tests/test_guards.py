@@ -911,6 +911,26 @@ def test_progress_guard_fires_once_after_step_12_and_not_before(tmp_path: Path) 
 
 
 @needs_git
+def test_progress_guard_counts_new_shell_commands_as_progress(tmp_path: Path) -> None:
+    ws = make_repo(tmp_path)
+    # 15 distinct read-only shell commands: exploration through the shell is progress.
+    new_turns = [Turn(calls=[("bash", {"command": f"echo explore {i}"})]) for i in range(15)] + [
+        Turn(text="done")
+    ]
+    cfg = SessionConfig(model="m", workspace=ws, home=tmp_path / "h1", finish_gate=False)
+    events = run(Session(cfg, ScriptedProvider(new_turns)))
+    assert not [e for e in events if isinstance(e, ev.Notice) and e.kind == "progress_guard"]
+
+    # Commands differing only in whitespace are the same command: not progress.
+    same = [
+        Turn(calls=[("bash", {"command": "echo" + " " * (i + 1) + "same"})]) for i in range(15)
+    ] + [Turn(text="done")]
+    cfg2 = SessionConfig(model="m", workspace=ws, home=tmp_path / "h2", finish_gate=False)
+    events2 = run(Session(cfg2, ScriptedProvider(same)))
+    assert len([e for e in events2 if isinstance(e, ev.Notice) and e.kind == "progress_guard"]) == 1
+
+
+@needs_git
 def test_progress_guard_resets_on_diff_change(tmp_path: Path) -> None:
     ws = make_repo(tmp_path)
     turns = [
