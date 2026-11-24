@@ -2458,3 +2458,12 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   (both have verifier rewards, kept).
 - pool3 + pool5 combined (115 fresh tasks): KaroX 36, CC 40.
 - pool5 is now a dev pool (logs readable). Spend today: $0.094 + $2.339 = $2.43.
+
+## 2026-11-24: progress-guard A/B (prereg_noguard) on pool5
+- dev56 guard on 23/72 vs --no-progress-guard 28/72; discordant 2 vs 7 (net +5); paired diff +6.9 pp
+  95% CI [-1.4, +15.3]; $ 0.952 vs 1.248 (1.31x > 1.25x cap); median wall 127 vs 201 s (geo 1.14x).
+- Pre-registered branch: build the guard fix. dev61: a shell command not run before counts as progress in the
+  stall branch (KaroX explores via bash; old guard counted only read-tool reads -> fired at step 12 in 13/72
+  baseline trials, "make the minimal change (or none) and finish"). Token branch unchanged.
+- Council 13 (Codex + Neon): dev56 vs dev61 on pool5, cap $2.60; dev61 -> final candidate iff net >= +3 AND cost
+  <= 1.20x dev56; else keep dev56; no cost-per-solve fallback.
