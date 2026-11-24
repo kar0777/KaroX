@@ -2478,3 +2478,15 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   pool3a, which did pass the flag). The A/Bs are internally valid (both arms same provider) but measure the
   non-shipping configuration; pool5base KaroX vs CC (25 vs 26, 0.60x) understates KaroX.
 - Spend today (audit prices): 0.094 + 2.339 + 2.200 + 2.101 = $6.73.
+
+## 2026-11-24: dev61 vs dev56 NATIVE (prereg_dev61_native), run 45407450472
+- First dispatch (45401599160) failed instantly: `--provider anthropic` without `--base-url http://127.0.0.1:14000`
+  -> 404 on /v1/v1/messages, 0 model calls, $0.
+- 71 paired tasks (haystack-13582: infra, no trial results for either arm).
+  dev56 24/71 vs dev61 31/71; discordant 1 vs 8 (net +7); diff +9.9 pp, 95% CI [+2.8, +18.3].
+  $ 0.812 vs 1.198 (1.48x); cost/solve 0.034 vs 0.039 (CC on pool5: 0.056). Median wall 129 vs 151 s (geo 1.28x).
+  Output tokens/task native: dev56 9.4k (vs 11.7k openai-chat).
+- Pre-registered rule: FAIL (cost 1.48x > 1.20x; also only 71 pairs) -> keep dev56 by that rule.
+- Pooled over three guard A/Bs (215 pairs): guard-off/fixed arms 20 solo solves vs 5 for the guard.
+- Council strategy (Codex + Neon, before this result was read): one objective = more solves at cost/solve <= 0.85x
+  Claude Code (<= $0.048); ad-hoc ratio caps dropped for future runs. dev61 would meet it ($0.039).
