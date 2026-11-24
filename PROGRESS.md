@@ -2521,3 +2521,13 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   dismisses "files that reference names you changed" when the task's real need there is semantic.
 - Also: an orphan grep.exe (5.8 GB, from an interrupted agy helper run) caused three low-memory reaps today; killed.
 - Spend today: $10.74 + 0.010 (preflight) + 0.084 (pilot) = $10.83.
+
+## 2026-11-24 night: council 18 hypotheses — both $0 gates fail
+- H3 selective best-of-2 by risk markers: best single marker (>=2 failing test runs seen) captures 18/40 dev61
+  failures at 32/71 triggers (gate >= 26/40) -> NO-GO.
+- H1 requirements checklist (Neon audit of all 40 dev61 failures vs issue text, gold and test patches):
+  missed behaviour EXPLICITLY stated in the issue in 2/40 (gate >= 8/16 incomplete and >= 10/33) -> NO-GO.
+  Breakdown: S 2, inferable 13, NOT derivable from the issue 25 (exact messages, private helper names,
+  PR scope choices). Implication: ~60% of remaining failures are unreachable for any agent that only sees the
+  issue; realistic solve headroom on pool5 is ~13 tasks (the "inferable" ones: sibling paths, boundaries,
+  codebase invariants). analysis/issue_audit/neon.md.
