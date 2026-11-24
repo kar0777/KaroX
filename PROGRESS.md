@@ -2434,3 +2434,16 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   diffs; dev58 ("keep existing tests") NOT screened, branch kept for the record.
 - Council 9 (Codex): screen the next candidate on pool5 (new fresh tasks, being collected now, $0 GitHub
   validation); keep the last pre-registered comparison on pool3+pool4 for a combined final candidate.
+
+## 2026-11-24: dev59 tool-routing pilot FAILED; pool5 built (72 tasks)
+- Finding (Neon on hold49 mine + my recount): KaroX sends ~98% of tool calls to bash in dev42..dev56
+  (pool3 dev56: bash 542, edit 8, read 1) and edits repo files via python open(p,'w') / sed -i;
+  Claude Code on the same model uses Read/Edit. scripts/tool_routing.py (karox6-bench-data) measures it.
+- dev59 = bash tool description routes reading/searching/editing to read/grep/glob/edit/write.
+  Pilot (prereg_dev59a, 6 mine tasks of wait57, 1 attempt, $0.094): edit/write used successfully in 4/6
+  (dev56 baseline 2/12), but bash file edits still in 5/6 (rule <= 2/6; manual check: real repo edits via
+  python heredoc open(p,'w') in all 5). FAIL -> stopped per rule, no wording escalation.
+  dev60 (Fusion-refined wording) built, not run.
+- pool5: 72 RED/GREEN-valid fresh tasks (night ids 141-212), bench daffa77, manifest bench/pool5_frozen.json.
+  Blind fresh tasks total: 139 (pool3 43 + pool4 24 + pool5 72).
+- Spend today: $0.094.
