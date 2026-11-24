@@ -2447,3 +2447,14 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
 - pool5: 72 RED/GREEN-valid fresh tasks (night ids 141-212), bench daffa77, manifest bench/pool5_frozen.json.
   Blind fresh tasks total: 139 (pool3 43 + pool4 24 + pool5 72).
 - Spend today: $0.094.
+
+## 2026-11-24: pool5 baseline (prereg_pool5_base) — KaroX dev56 vs Claude Code, 72 fresh tasks, Haiku 5.5
+- Solved: KaroX 25/72, CC 26/72; discordant KaroX-only 2, CC-only 3. Paired diff CC-KaroX +1.4 pp,
+  95% CI [-4.2, +6.9] pp (minimal relevant gap 5 pp: not excluded, but no evidence of a gap).
+- $ (audit prices): KaroX $0.873 vs CC $1.466 (0.60x). Calls 1101 vs 1600; output tokens 841k vs 877k.
+- Wall: medians 132 vs 117 s; paired geometric ratio CC/KaroX 1.00 [0.80, 1.28].
+  (tool-seconds ratio not comparable: CC logs no KaroX tool events.)
+- Exceptions: CC AgentTimeoutError on hermes-webui-9304; KaroX NonZeroAgentExitCode on iceberg-python-4280
+  (both have verifier rewards, kept).
+- pool3 + pool5 combined (115 fresh tasks): KaroX 36, CC 40.
+- pool5 is now a dev pool (logs readable). Spend today: $0.094 + $2.339 = $2.43.
