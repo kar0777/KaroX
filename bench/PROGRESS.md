@@ -36,3 +36,19 @@
   names the missed behaviour in 1/10 FAIR failures (a2a-1476), flags 8/28 solved diffs as MISSED. Gate
   (>= 5/10, <= 4/28) FAILS -> NO-GO for a reviewer/critic pass. Even a strong fresh reviewer does not see the
   edge cases the maintainers' tests probe. On FAIR tasks dev61 is 28/38 (74%) vs CC 24/38 (63%).
+
+## 2026-11-25: 6.0.0.dev63 — CLI bugs found by SWE-2.1 (free Devin model) review + dogfood
+- Free Dahl GLM dogfood (run 45612552433, dev61, tasks 141/158/159): iceberg solved but 2262 s of 3550 s
+  went to a silent full test suite (`| tail`) and 3 x 600 s job_output waits showing only "(no new output)".
+- SWE-2.1 Max code reviews (core/tools, UI/CLI) -> verified and fixed with regression tests:
+  Git Bash /d/x paths on Windows resolved to D:/d/x (writes into a parallel tree); PowerShell output
+  decoded as UTF-8 while written in OEM (Cyrillic -> U+FFFD; now BOM-less UTF-8, param/using/#Requires
+  untouched); background job reads split UTF-8 characters; run_code ignored the run deadline; MCP stdio
+  `npx` failed on Windows (no PATHEXT; now resolved with the server's PATH); project-instructions budget
+  went negative and kept ~whole second file (up to 1 MB per request). job_output on a running job now
+  says "running for N s; M s left in this run". Two SWE-2.1 review rounds on the branch; remaining
+  known limits: pwsh prologue after comments/[CmdletBinding()], foreground-timeout handoff can split a
+  UTF-8 char once.
+- Gates: full suite green on Windows (main venv), ruff, ruff format, mypy clean; wheel built and
+  smoke_installed OK (karox 6.0.0.dev63, chat CLI, MCP stdio 7 tools). Bench behaviour change on Linux:
+  only the job_output timing text and run_code deadline. Not pushed.
