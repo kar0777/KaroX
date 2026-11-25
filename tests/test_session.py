@@ -907,3 +907,13 @@ def test_a_failed_summary_shrinks_without_the_model(tmp_path):
     assert len(provider.requests) == 3  # two summary tries, then the task: no third try
     assert any(m.meta.get("kind") == "compaction" for m in session.messages)
     assert session.messages[0].content == "original"
+
+
+def test_an_empty_refused_reply_ends_the_run_and_is_not_kept(tmp_path):
+    session = Session(
+        config(tmp_path), ScriptedProvider([Turn(text="", finish_reason="content_filter")])
+    )
+    done = finish(run(session))
+    assert done.status == "error"
+    assert "content_filter" in done.reason
+    assert not [m for m in session.messages if m.role == "assistant"]

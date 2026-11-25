@@ -246,3 +246,43 @@ def test_a_reply_stopped_by_the_context_window_asks_for_a_smaller_conversation()
     with pytest.raises(ProviderError) as exc:
         run([*TEXT, stop, {"type": "message_stop"}])
     assert exc.value.code == "context_window"
+
+
+def test_an_empty_refusal_reports_the_refusal_instead_of_retrying_as_empty():
+    stop = {"type": "message_delta", "delta": {"stop_reason": "refusal"}}
+    result, _ = run([stop, {"type": "message_stop"}])
+    assert result.finish_reason == "content_filter"
+
+
+def test_an_assistant_turn_without_content_is_not_sent():
+    request = ModelRequest(
+        "model",
+        "system",
+        [Message("user", "hello"), Message("assistant", ""), Message("user", "again")],
+    )
+    _, captured = run([*TEXT, *END], request=request)
+    roles = [m["role"] for m in captured["body"]["messages"]]
+    assert roles == ["user"]  # both user turns merged; no empty assistant message
+    assert all(m["content"] for m in captured["body"]["messages"])
+
+
+def test_reading_stops_at_done_even_if_the_connection_stays_open():
+    class OpenAfterDone(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            body = "".join("data: " + json.dumps(e) + "\n\n" for e in [*TEXT, *END])
+            yield (body + "data: [DONE]\n\n").encode()
+            await asyncio.sleep(30)
+
+    async def invoke():
+        provider = AnthropicProvider("https://example.test", "key")
+        provider._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _req: httpx.Response(200, stream=OpenAfterDone()))
+        )
+        try:
+            return await asyncio.wait_for(
+                provider.complete(ModelRequest("model", "system", [Message("user", "hi")])), 5
+            )
+        finally:
+            await provider.aclose()
+
+    assert asyncio.run(invoke()).message.content

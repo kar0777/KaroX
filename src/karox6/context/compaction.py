@@ -73,10 +73,17 @@ def estimate_tokens(messages: list[Message], system: str = "") -> int:
 def prune_tool_results(messages: list[Message], keep_last: int = 6) -> int:
     """Cut the middle out of big tool results except the newest ``keep_last`` messages.
 
-    Returns the number of characters removed. Mutates ``messages`` in place.
+    With ``keep_last`` > 0 the results of the newest batch of calls are kept whole too,
+    however many there are: the model has not read them yet (a step with seven parallel
+    calls put the first result outside the newest six). ``keep_last=0`` is the emergency
+    cut that spares nothing. Returns the number of characters removed. Mutates
+    ``messages`` in place.
     """
     removed = 0
     limit = max(len(messages) - keep_last, 0)
+    if keep_last > 0:
+        last_reply = max((i for i, m in enumerate(messages) if m.role == "assistant"), default=-1)
+        limit = min(limit, last_reply + 1)
     for i in range(limit):
         m = messages[i]
         if m.role != "tool" or len(m.content) <= PRUNE_THRESHOLD:

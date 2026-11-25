@@ -230,20 +230,46 @@ async def stream_lines(
     seconds raises :class:`StreamStalled`, which the retry policy treats as a timeout:
     a connection that died without a reset (a sleeping laptop, a dropped NAT entry) no
     longer hangs for the whole request timeout. Before that point the model may be
-    thinking without sending anything, so only the request timeout applies."""
+    thinking without sending anything, so only the request timeout applies. Keep-alive
+    lines (SSE comments, pings, blank separators) do not count as progress: a server that
+    pings every 30 s while the answer is stuck still stalls after ``idle_s``."""
     lines = response.aiter_lines().__aiter__()
+    quiet_since: float | None = None
     while True:
         try:
             if idle_s and flowing():
-                async with asyncio.timeout(idle_s):
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                left = idle_s - (time.monotonic() - quiet_since)
+                if left <= 0:
+                    raise TimeoutError
+                async with asyncio.timeout(left):
                     line = await anext(lines)
             else:
+                quiet_since = None
                 line = await anext(lines)
         except StopAsyncIteration:
             return
         except TimeoutError:
             raise StreamStalled(idle_s or 0.0) from None
+        if not _keep_alive(line):
+            quiet_since = None
         yield line
+
+
+_PING_DATA = re.compile(r'^data:\s*\{\s*"type"\s*:\s*"ping"\s*\}$')
+
+
+def _keep_alive(line: str) -> bool:
+    """An SSE line that carries no part of the answer: blank, a comment, an event name
+    (its data line follows) or a ping event."""
+    text = line.strip()
+    return (
+        not text
+        or text.startswith(":")
+        or text.startswith("event:")
+        or bool(_PING_DATA.match(text))
+    )
 
 
 _UNIT_SECONDS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}

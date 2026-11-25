@@ -173,7 +173,7 @@ class OpenAIResponsesProvider(StreamProvider):
             reasoning="".join(thoughts) or None,
             extra={"responses_reasoning": reasoning} if reasoning else {},
         )
-        if is_empty(msg) and finish != "length":
+        if is_empty(msg) and finish not in ("length", "content_filter"):
             raise ProviderError("empty_response", "the model returned no text and no tool calls")
         if calls and finish == "stop":
             finish = "tool_calls"

@@ -70,6 +70,7 @@ from karox6.providers.base import (
     Provider,
     ProviderError,
     complete_with_retry,
+    is_empty,
 )
 from karox6.tools.base import (
     Approver,
@@ -345,7 +346,10 @@ class Session:
                     status, reason = "limit", f"time limit {self.config.max_seconds:.0f}s"
                     break
                 message = response.message
-                self._append(message)
+                if not (response.finish_reason == "content_filter" and is_empty(message)):
+                    # An empty refused reply is not kept: replaying an assistant turn with
+                    # no content is itself rejected by the API on the next request.
+                    self._append(message)
                 emit(
                     ev.AssistantMessage(
                         step=steps,
