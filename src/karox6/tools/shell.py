@@ -10,6 +10,7 @@ Tool contract follows DSH's bash/pwsh tools (MIT, see THIRD_PARTY_NOTICES.md).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -53,7 +54,25 @@ class ShellInfo:
                 script.write_bytes(command.encode("utf-8", "replace"))
                 return [self.executable, script.as_posix()]
             return [self.executable, "-c", command]
-        return [self.executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+        # Redirected PowerShell output uses the console code page (OEM), but the output is
+        # decoded as UTF-8: Cyrillic names came back as U+FFFD. Switch the session to UTF-8.
+        return [
+            self.executable,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command if _PWSH_MUST_LEAD.match(command) else PWSH_UTF8_PREFIX + command,
+        ]
+
+
+# BOM-less: [Text.Encoding]::UTF8 would prefix piped input to native programs with a BOM.
+PWSH_UTF8_PREFIX = (
+    "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding $false;"
+    "$OutputEncoding=New-Object System.Text.UTF8Encoding $false; "
+)
+# Statements PowerShell only accepts at the very start of a script.
+_PWSH_MUST_LEAD = re.compile(r"^\s*(param\s*\(|using\s|#requires\b)", re.IGNORECASE)
 
 
 def detect_shell(environ: dict[str, str] | None = None) -> ShellInfo:

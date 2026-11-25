@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 
 import pytest
 
@@ -398,3 +399,27 @@ def test_edit_next_to_latin1_bytes_shows_and_logs_clean_text(ctx):
     result = edit(ctx, "y = 1", "y = 2")
     assert not result.is_error
     json.dumps(result.content, ensure_ascii=False).encode("utf-8")  # no lone surrogate
+
+
+def test_msys_drive_paths_map_to_windows_drives():
+    from karox6.tools.base import msys_to_windows
+
+    assert msys_to_windows("/d/work/a.py") == "D:/work/a.py"
+    assert msys_to_windows("/c") == "C:/"
+    assert msys_to_windows("/c/") == "C:/"
+    for unchanged in ("/tmp/x", "/usr/bin", "a/b", "/dd/x", "C:/x", ""):
+        assert msys_to_windows(unchanged) == unchanged
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path semantics")
+def test_resolve_maps_msys_paths_on_windows(ctx):
+    from pathlib import Path
+
+    from karox6.tools.shell import ShellInfo
+
+    ctx.shell = ShellInfo("bash", "bash", "git-bash")
+    assert ctx.resolve("/d/work/a.py") == Path("D:/work/a.py")
+    ctx.shell = ShellInfo("pwsh", "pwsh", "pwsh")  # PowerShell keeps its own meaning
+    assert ctx.resolve("/d/work/a.py") != Path("D:/work/a.py")
+    ctx.shell = ShellInfo("bash", "wsl-bash", "bash")  # a non-MSYS bash too
+    assert ctx.resolve("/d/work/a.py") != Path("D:/work/a.py")

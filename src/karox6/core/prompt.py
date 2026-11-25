@@ -226,6 +226,8 @@ def project_instructions(workspace: Path) -> str:
     budget = INSTRUCTIONS_MAX_CHARS
     for root in roots:
         for name in INSTRUCTION_FILES:
+            if budget <= 0:  # spent: a negative slice below would keep almost everything
+                break
             path = root / name
             try:
                 if not path.is_file() or path.stat().st_size > 1_000_000:
@@ -240,8 +242,6 @@ def project_instructions(workspace: Path) -> str:
                 text = text[:budget] + "\n[... truncated ...]"
             budget -= len(text)
             chunks.append(f'<instructions file="{path}">\n{text}\n</instructions>')
-            if budget <= 0:
-                break
     if not chunks:
         return ""
     return (

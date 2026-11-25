@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -67,10 +69,24 @@ class ToolContext:
 
     def resolve(self, raw: str) -> Path:
         """Resolve a model-given path against the workspace (absolute paths pass through)."""
+        if sys.platform == "win32" and self.shell.flavor == "git-bash":  # not WSL or pwsh
+            raw = msys_to_windows(raw)
         path = Path(raw).expanduser()
         if not path.is_absolute():
             path = self.workspace / path
         return Path(_normpath(str(path)))
+
+
+_MSYS_DRIVE = re.compile(r"^/([A-Za-z])(?:/|$)")
+
+
+def msys_to_windows(raw: str) -> str:
+    """``/d/work/a.py`` (Git Bash style, as the bash tool describes) -> ``D:/work/a.py``.
+
+    Without this, Windows reads ``/d/work`` as a driveless rooted path and puts it on the
+    workspace's drive (``D:/d/work``): a write would create a parallel tree. Any other
+    path is returned unchanged."""
+    return _MSYS_DRIVE.sub(lambda m: f"{m.group(1).upper()}:/", raw, count=1)
 
 
 def _normpath(path: str) -> str:

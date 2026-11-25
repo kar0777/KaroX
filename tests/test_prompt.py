@@ -104,3 +104,19 @@ def test_an_appended_variant_follows_the_rules_it_extends(tmp_path):
     assert build_system_prompt(tmp_path, detect_shell(), base="Other base.").startswith(
         "Other base.\n\nEnvironment:"
     )
+
+
+def test_project_instructions_never_exceed_the_budget_across_roots(tmp_path):
+    import subprocess
+
+    from karox6.core.prompt import INSTRUCTIONS_MAX_CHARS, project_instructions
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "AGENTS.md").write_text("a" * (INSTRUCTIONS_MAX_CHARS + 50), encoding="utf-8")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "CLAUDE.md").write_text("b" * 200_000, encoding="utf-8")
+    text = project_instructions(sub)
+    assert "a" * 100 in text
+    assert "b" * 100 not in text
+    assert len(text) < INSTRUCTIONS_MAX_CHARS + 1_000

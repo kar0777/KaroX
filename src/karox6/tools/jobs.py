@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ class Job:
     read_offset: int = 0
     notified: bool = False
     killed_by_model: bool = False
+    held_bytes: int = 0  # unfinished UTF-8 tail left for the next read
 
     @property
     def status(self) -> str:
@@ -79,6 +82,14 @@ class JobManager:
                 data = fh.read()
         except OSError as exc:
             return f"(cannot read job log: {exc})"
+        if job.run.active and len(data) > job.held_bytes:
+            # A read can end inside a multi-byte UTF-8 character; leave that tail for the
+            # next read instead of decoding both halves into replacement characters. A
+            # tail that got no continuation since the last read is shown as it is.
+            job.held_bytes = _incomplete_utf8_tail(data)
+            data = data[: len(data) - job.held_bytes]
+        else:
+            job.held_bytes = 0
         job.read_offset += len(data)
         text = clean_text(data)
         inline, _ = limit_output(
@@ -97,6 +108,14 @@ class JobManager:
 
 
 NOTICE_TAIL_CHARS = 2_000
+
+
+def _incomplete_utf8_tail(data: bytes) -> int:
+    """Bytes at the end of ``data`` that are a valid but unfinished UTF-8 sequence.
+    Invalid bytes (0xFF, a lone 0xC0) are never held back: they surface as U+FFFD."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    decoder.decode(data[-4:], final=False)
+    return len(decoder.getstate()[0])
 
 
 def _unread_tail(job: Job) -> str:
@@ -172,8 +191,22 @@ class JobOutputTool:
             job.notified = True
         body = text if text.strip() else "(no new output)"
         return ToolResult(
-            f"{body}\n[job {job.id}: {job.status}]", meta={"job_id": job.id, "status": job.status}
+            f"{body}\n[job {job.id}: {job.status}{_timing(job, ctx)}]",
+            meta={"job_id": job.id, "status": job.status},
         )
+
+
+def _timing(job: Job, ctx: ToolContext) -> str:
+    """How long a running job has run and how much of the run is left. Without it a model
+    waited 3 x 600 s on a silent full test suite (piped to `tail`) until the run's time
+    limit ended the session."""
+    if job.status != "running":
+        return ""
+    note = f", running for {int(job.run.elapsed_s)} s"
+    if ctx.deadline is not None:
+        left = max(int(ctx.deadline - time.monotonic()), 0)
+        note += f"; {left} s left in this run"
+    return note
 
 
 class JobListTool:
