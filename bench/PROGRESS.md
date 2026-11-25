@@ -57,3 +57,15 @@
   baseline re-runs (git stash / worktree / git show HEAD) 80 calls in 38 sessions, 10% of wall time.
   Both below the 20% cost gate -> not pursued as bench changes. Most other findings are bench-image
   gaps (missing dev deps, offline hatch/uv), not CLI bugs.
+
+## 2026-11-25: pre-registered pool6 final (bench/prereg_final_pool6.md) — dev63 native vs Claude Code, Haiku 5.5
+- Run 45669297097 (tag final63), 56 tasks x 1 attempt, all 112 trials with a verifier reward; telemetry
+  checks 395 PASS (provider, version, per-step usage, cache hits on every KaroX trial). Two KaroX trials
+  (227, 251) hit the 3430 s time limit (exit 3, status "limit"); counted as normal outcomes (251 solved).
+- PRIMARY (26 FAIR, all 26 valid pairs): KaroX 22/26 vs CC 20/26; cost over FAIR $0.313 vs $0.410;
+  cost/solve $0.0142 vs $0.0205 (ratio 0.69 <= 0.85) -> PASS. Paired diff 95% CI [0.0, +19.2] pp
+  (lower bound touches 0: a win on the pre-registered rule, not a statistically separated one).
+- SECONDARY: all 56 KaroX 24 vs CC 21 (CI [0.0, +12.5] pp), cost $0.836 vs $1.104; PARTIAL 1 vs 0;
+  UNFAIR 1 vs 1. Mean agent time 380 s vs 281 s (the two 3430 s limits alone add ~122 s to KaroX's mean).
+- Spend: run $2.11 (KaroX $0.836, CC $1.104, interview $0.173) + preflight $0.012. Evaluation:
+  karox6-bench-data/scripts/eval_final63.py, output runs/final63_eval.txt.
