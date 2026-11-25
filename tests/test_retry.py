@@ -335,3 +335,22 @@ def test_keep_alive_pings_do_not_hide_a_stalled_answer():
         _complete(provider)
     assert caught.value.code == "timeout"
     assert time.monotonic() - started < 0.6
+
+
+def test_a_steady_answer_longer_than_the_idle_limit_is_not_a_stall():
+    usage = {"prompt_tokens": 5, "completion_tokens": 40}
+    parts = []
+    for _ in range(30):  # 30 x 20 ms of real tokens: past the 200 ms idle limit in total
+        parts += [_sse(_chunk({"content": "x"})), 0.02]
+    parts.append(_sse(_chunk({}, "stop", usage)) + "data: [DONE]\n\n")
+    provider, _ = _streaming_provider(parts, idle_s=0.2)
+    assert _complete(provider).message.content == "x" * 30
+
+
+def test_an_empty_content_filter_stop_is_reported_not_retried():
+    usage = {"prompt_tokens": 5, "completion_tokens": 0}
+    provider, seen = _streaming_provider(
+        [_sse(_chunk({}, "content_filter", usage)) + "data: [DONE]\n\n"]
+    )
+    assert _complete(provider).finish_reason == "content_filter"
+    assert len(seen) == 1
