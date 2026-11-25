@@ -421,3 +421,5 @@ def test_resolve_maps_msys_paths_on_windows(ctx):
     assert ctx.resolve("/d/work/a.py") == Path("D:/work/a.py")
     ctx.shell = ShellInfo("pwsh", "pwsh", "pwsh")  # PowerShell keeps its own meaning
     assert ctx.resolve("/d/work/a.py") != Path("D:/work/a.py")
+    ctx.shell = ShellInfo("bash", "wsl-bash", "bash")  # a non-MSYS bash too
+    assert ctx.resolve("/d/work/a.py") != Path("D:/work/a.py")

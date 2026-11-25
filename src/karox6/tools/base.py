@@ -69,7 +69,7 @@ class ToolContext:
 
     def resolve(self, raw: str) -> Path:
         """Resolve a model-given path against the workspace (absolute paths pass through)."""
-        if sys.platform == "win32" and self.shell.kind == "bash":  # PowerShell: /c is \c
+        if sys.platform == "win32" and self.shell.flavor == "git-bash":  # not WSL or pwsh
             raw = msys_to_windows(raw)
         path = Path(raw).expanduser()
         if not path.is_absolute():

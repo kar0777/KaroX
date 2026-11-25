@@ -377,7 +377,7 @@ def test_stdio_command_is_resolved_through_pathext_on_windows(monkeypatch):
 
     monkeypatch.setattr(client.sys, "platform", "win32")
     monkeypatch.setattr(
-        client.shutil, "which", lambda name: "C:/node/npx.CMD" if name == "npx" else None
+        client.shutil, "which", lambda name, path=None: "C:/node/npx.CMD" if name == "npx" else None
     )
     assert client._executable("npx") == "C:/node/npx.CMD"
     assert client._executable("no-such-tool") == "no-such-tool"

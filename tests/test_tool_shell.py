@@ -463,12 +463,16 @@ def test_job_read_keeps_a_split_utf8_character_for_the_next_read(tmp_path):
     class Job:
         id = 1
         read_offset = 0
+        held_bytes = 0
         run = Run()
 
     manager = JobManager()
     job = Job()
     first = asyncio.run(manager.read_new(job, tmp_path))
     assert first == "пр"
+    stalled = Job()  # no continuation arrives: the held byte is shown, not kept forever
+    assert asyncio.run(manager.read_new(stalled, tmp_path)) == "пр"
+    assert asyncio.run(manager.read_new(stalled, tmp_path)) == "\N{REPLACEMENT CHARACTER}"
     log.write_bytes(word)
     job.run.active = False
     second = asyncio.run(manager.read_new(job, tmp_path))

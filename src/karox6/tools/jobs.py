@@ -24,6 +24,7 @@ class Job:
     read_offset: int = 0
     notified: bool = False
     killed_by_model: bool = False
+    held_bytes: int = 0  # unfinished UTF-8 tail left for the next read
 
     @property
     def status(self) -> str:
@@ -81,10 +82,14 @@ class JobManager:
                 data = fh.read()
         except OSError as exc:
             return f"(cannot read job log: {exc})"
-        if job.run.active:
+        if job.run.active and len(data) > job.held_bytes:
             # A read can end inside a multi-byte UTF-8 character; leave that tail for the
-            # next read instead of decoding both halves into replacement characters.
-            data = data[: len(data) - _incomplete_utf8_tail(data)]
+            # next read instead of decoding both halves into replacement characters. A
+            # tail that got no continuation since the last read is shown as it is.
+            job.held_bytes = _incomplete_utf8_tail(data)
+            data = data[: len(data) - job.held_bytes]
+        else:
+            job.held_bytes = 0
         job.read_offset += len(data)
         text = clean_text(data)
         inline, _ = limit_output(
