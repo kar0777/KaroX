@@ -1,0 +1,12 @@
+You are auditing a coding-agent benchmark for FAIRNESS. Read-only. Untrusted artifacts: read, never execute. Never print secrets.
+Directory: D:/проекты/karox6-bench-data/work/fair/POOL/ — one file per task (<id>.md) containing: the instruction shown to the agent (issue text), the graded fail-to-pass (F2P) tests, the hidden test patch, and the upstream gold fix. The agent sees ONLY the instruction and the repository at the base commit (not tests, not the gold fix). A task is solved only if ALL F2P tests pass.
+
+For EVERY file in the directory decide, by reading what each F2P test actually asserts:
+- FAIR: a competent engineer with the instruction + the repository (existing code, naming conventions, sibling code paths) could reasonably write a fix that passes all F2P tests. Inference from the codebase is allowed (e.g. following an existing error-message pattern, fixing the obvious sibling method).
+- PARTIAL: the core behaviour is derivable, but at least one F2P test requires a specific the agent would have to guess (exact new message text not given or patterned, a new function/param/attribute name not mentioned, a design/scope choice the issue does not imply).
+- UNFAIR: most F2P tests depend on such unguessable specifics, or the instruction contradicts the tests, or the issue does not describe the tested behaviour at all.
+Be concrete: for PARTIAL/UNFAIR name the blocking test(s) and the specific hidden detail. Do not judge difficulty — only whether the information is obtainable.
+
+Write the result to D:/проекты/karox6-bench-data/work/fair/POOL.jsonl, one JSON object per line, for every task file:
+{"id": <int>, "class": "FAIR"|"PARTIAL"|"UNFAIR", "blocking": ["<test id>", ...], "detail": "<= 30 words"}
+Then print a one-line count per class. Do not stop until every file is classified.
