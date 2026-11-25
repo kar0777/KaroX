@@ -26,6 +26,7 @@ import itertools
 import json
 import os
 import re
+import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -58,6 +59,15 @@ class Connection(Protocol):
     async def notify(self, method: str, params: dict[str, Any]) -> None: ...
 
     async def close(self) -> None: ...
+
+
+def _executable(command: str) -> str:
+    """Windows: ``npx`` is ``npx.cmd``, and CreateProcess never searches PATHEXT, so the
+    usual MCP config ``{"command": "npx", ...}`` failed with FileNotFoundError. Resolve
+    the name the way a shell would; leave anything unresolvable unchanged."""
+    if sys.platform != "win32":
+        return command
+    return shutil.which(command) or command
 
 
 class StdioConnection:
@@ -490,7 +500,7 @@ async def _open(spec: dict[str, Any]) -> StdioConnection | HttpConnection:
             headers["Authorization"] = f"Bearer {token}"
         return HttpConnection(str(spec["url"]), headers, call_timeout=call_timeout(spec))
     if spec.get("command"):
-        command = [str(spec["command"]), *[str(a) for a in spec.get("args") or []]]
+        command = [_executable(str(spec["command"])), *[str(a) for a in spec.get("args") or []]]
         env = {str(k): str(v) for k, v in (spec.get("env") or {}).items()}
         connection = StdioConnection(command, env, spec.get("cwd"))
         await connection.start()

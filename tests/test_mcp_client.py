@@ -370,3 +370,16 @@ def test_cancelled_load_closes_the_servers_already_connected(tmp_path, monkeypat
     bad.write_text("[]")
     with pytest.raises(ValueError, match="JSON object"):
         asyncio.run(load_mcp_tools(bad))
+
+
+def test_stdio_command_is_resolved_through_pathext_on_windows(monkeypatch):
+    from karox6.mcp import client
+
+    monkeypatch.setattr(client.sys, "platform", "win32")
+    monkeypatch.setattr(
+        client.shutil, "which", lambda name: "C:/node/npx.CMD" if name == "npx" else None
+    )
+    assert client._executable("npx") == "C:/node/npx.CMD"
+    assert client._executable("no-such-tool") == "no-such-tool"
+    monkeypatch.setattr(client.sys, "platform", "linux")
+    assert client._executable("npx") == "npx"
