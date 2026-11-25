@@ -323,3 +323,34 @@ def test_a_stall_after_the_reply_finished_keeps_the_reply():
     reply = _complete(provider)  # only [DONE] is missing: not worth paying for again
     assert reply.message.content == "done"
     assert len(seen) == 1
+
+
+def test_keep_alive_pings_do_not_hide_a_stalled_answer():
+    pings = []
+    for _ in range(40):  # 40 x 20 ms of pings: far past the 50 ms idle limit
+        pings += [': ping\n\nevent: ping\ndata: {"type": "ping"}\n\n', 0.02]
+    provider, _ = _streaming_provider([_sse(_chunk({"content": "half an ans"})), *pings, 30.0])
+    started = time.monotonic()
+    with pytest.raises(ProviderError) as caught:
+        _complete(provider)
+    assert caught.value.code == "timeout"
+    assert time.monotonic() - started < 0.6
+
+
+def test_a_steady_answer_longer_than_the_idle_limit_is_not_a_stall():
+    usage = {"prompt_tokens": 5, "completion_tokens": 40}
+    parts = []
+    for _ in range(30):  # 30 x 20 ms of real tokens: past the 200 ms idle limit in total
+        parts += [_sse(_chunk({"content": "x"})), 0.02]
+    parts.append(_sse(_chunk({}, "stop", usage)) + "data: [DONE]\n\n")
+    provider, _ = _streaming_provider(parts, idle_s=0.2)
+    assert _complete(provider).message.content == "x" * 30
+
+
+def test_an_empty_content_filter_stop_is_reported_not_retried():
+    usage = {"prompt_tokens": 5, "completion_tokens": 0}
+    provider, seen = _streaming_provider(
+        [_sse(_chunk({}, "content_filter", usage)) + "data: [DONE]\n\n"]
+    )
+    assert _complete(provider).finish_reason == "content_filter"
+    assert len(seen) == 1

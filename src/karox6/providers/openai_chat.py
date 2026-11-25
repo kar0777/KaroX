@@ -225,7 +225,10 @@ class OpenAIChatProvider:
             # Some routers report tool_calls (or stop) for a reply cut at max_tokens; its
             # last call's arguments are then incomplete, so treat it as the cut it is.
             response.finish_reason = "length"
-        if is_empty(response.message) and response.finish_reason != "length":
+        if is_empty(response.message) and response.finish_reason not in (
+            "length",
+            "content_filter",
+        ):
             raise ProviderError("empty_response", "the model returned no text and no tool calls")
         return response
 

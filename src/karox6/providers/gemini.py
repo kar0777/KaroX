@@ -188,6 +188,6 @@ class GeminiProvider(StreamProvider):
             reasoning="".join(thoughts) or None,
             extra={"gemini_text_signature": signature} if signature else {},
         )
-        if is_empty(msg) and normalized != "length":
+        if is_empty(msg) and normalized not in ("length", "content_filter"):
             raise ProviderError("empty_response", "the model returned no text and no tool calls")
         return ModelResponse(msg, usage, normalized, model)

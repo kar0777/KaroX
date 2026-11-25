@@ -60,6 +60,8 @@ class AnthropicProvider(StreamProvider):
                         blocks.append({"type": "image", "source": source})
                 if m.content or not m.images:
                     blocks.append({"type": "text", "text": m.content})
+            if not blocks:
+                continue  # the API rejects a message with no content blocks
             if messages and messages[-1]["role"] == role:
                 messages[-1]["content"].extend(blocks)
             else:
@@ -216,6 +218,6 @@ class AnthropicProvider(StreamProvider):
             reasoning="".join(reasoning) or None,
             extra={"anthropic_thinking": thinking} if thinking else {},
         )
-        if is_empty(message) and finish != "length":
+        if is_empty(message) and finish not in ("length", "content_filter"):
             raise ProviderError("empty_response", "the model returned no text and no tool calls")
         return ModelResponse(message, usage, finish, model)

@@ -215,3 +215,8 @@ def test_too_many_input_tokens_is_a_context_overflow():
     with pytest.raises(ProviderError) as exc:
         run([], 400, body=json.dumps(error))
     assert exc.value.code == "context_window"
+
+
+def test_an_empty_safety_stop_reports_the_filter_instead_of_retrying_as_empty():
+    result, _ = run([{"candidates": [{"finishReason": "SAFETY"}]}])
+    assert result.finish_reason == "content_filter"

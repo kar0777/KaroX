@@ -56,7 +56,9 @@ class StreamProvider:
                 async for line in stream_lines(resp, self.stream_idle_s, flowing):
                     if line.startswith("data:"):
                         data = line[5:].strip()
-                        if data and data != "[DONE]":
+                        if data == "[DONE]":
+                            break  # a proxy may keep the connection open after it
+                        if data:
                             feed(json.loads(data))
         except httpx.TimeoutException as exc:
             raise ProviderError("timeout", f"request timed out: {exc!r}") from exc
