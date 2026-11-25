@@ -19,3 +19,16 @@
     cyclopts-1053 is a wrong-approach case a plain repro could catch (rest are missed siblings/edges)
     -> 1 << gate 5 -> NO-GO.
 - No paid run tonight after the dev62 pilot. Spend today stays $10.83.
+
+## 2026-11-25: fair pool + fresh-context reviewer ($0)
+- Fair-pool audit (Neon, blind to outcomes; scripts/fair_bundles.py, work/fair/*.jsonl): each task FAIR /
+  PARTIAL / UNFAIR by whether the F2P tests' specifics are obtainable from the issue + repository.
+  pool5: 38 FAIR / 8 PARTIAL / 26 UNFAIR. Calibration on pool5 outcomes: FAIR solved dev61 28/38, dev56 22,
+  CC 24; PARTIAL 1/8 each; UNFAIR dev61 2/26, CC 1/26 -> classifier is predictive. pool6: 26/12/18.
+  Decision: comparisons from now on are scored on FAIR tasks (the rest measured luck/noise).
+- H4 revisited on FAIR failures: most "broken P2P" tests were ADDED by the PR (pass on base, absent for the
+  agent); truly pre-existing broken tests only in iceberg-4317 and a2a-1420 (agent saw and rewrote the test)
+  -> still NO-GO. (The 11/40 figure above over-counted for the same reason.)
+- PRE-REGISTERED (before results): blind fresh-context review of dev61's 38 FAIR final diffs (Neon proxy with
+  repo access at base, issue + diff only). GO for a Haiku-reviewer replay only if it names the actual missed
+  behaviour in >= 5/10 FAIR failures AND flags <= 4/28 solved diffs as MISSED.
