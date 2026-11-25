@@ -1,6 +1,8 @@
 import asyncio
 import os
+import re
 import shlex
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -415,9 +417,25 @@ def test_command_wait_cap_turns_a_long_wait_into_a_job(ctx):
 def test_pwsh_argv_switches_output_to_utf8():
     from karox6.tools.shell import PWSH_UTF8_PREFIX, ShellInfo
 
-    argv = ShellInfo("pwsh", "pwsh", "pwsh").argv("Get-ChildItem")
-    assert argv[-1] == PWSH_UTF8_PREFIX + "Get-ChildItem"
-    assert "UTF8" in PWSH_UTF8_PREFIX
+    info = ShellInfo("pwsh", "pwsh", "pwsh")
+    assert info.argv("Get-ChildItem")[-1] == PWSH_UTF8_PREFIX + "Get-ChildItem"
+    assert "UTF8Encoding $false" in PWSH_UTF8_PREFIX  # no BOM on piped input
+    for lead in ("param($x) $x", "  using namespace System", "#Requires -Version 5"):
+        assert info.argv(lead)[-1] == lead  # must stay the first statement
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell")
+def test_pwsh_prints_cyrillic_and_keeps_exit_code(ctx):
+    from karox6.tools.shell import ShellInfo
+
+    exe = shutil.which("powershell") or shutil.which("pwsh")
+    if exe is None:
+        pytest.skip("no PowerShell")
+    ctx.shell = ShellInfo("pwsh", exe, "powershell")
+    command = "Write-Output 'проекты'; exit 3"
+    result = asyncio.run(ShellTool(ctx.shell).run({"command": command}, ctx))
+    assert "проекты" in result.content
+    assert "[exit code: 3]" in result.content
 
 
 def test_job_read_keeps_a_split_utf8_character_for_the_next_read(tmp_path):
@@ -427,6 +445,8 @@ def test_job_read_keeps_a_split_utf8_character_for_the_next_read(tmp_path):
     assert _incomplete_utf8_tail("😀".encode()[:3]) == 3
     assert _incomplete_utf8_tail("aб".encode()) == 0
     assert _incomplete_utf8_tail(b"abc") == 0
+    assert _incomplete_utf8_tail(bytes([97, 98, 0xFF])) == 0  # invalid: never held back
+    assert _incomplete_utf8_tail(bytes([97, 98, 0xC0])) == 0
 
     log = tmp_path / "job.log"
     word = "проекты".encode()
@@ -453,3 +473,20 @@ def test_job_read_keeps_a_split_utf8_character_for_the_next_read(tmp_path):
     job.run.active = False
     second = asyncio.run(manager.read_new(job, tmp_path))
     assert second == "оекты"
+
+
+def test_job_output_reports_elapsed_and_time_left(ctx):
+    import time as _time
+
+    ctx.deadline = _time.monotonic() + 500
+
+    async def scenario():
+        started = await ShellTool(ctx.shell).run(
+            {"command": python("import time; time.sleep(5)"), "run_in_background": True}, ctx
+        )
+        out = await JobOutputTool().run({"job_id": started.meta["job_id"]}, ctx)
+        await JobKillTool().run({"job_id": started.meta["job_id"]}, ctx)
+        return out.content
+
+    content = asyncio.run(scenario())
+    assert re.search(r"running for \d+ s; \d+ s left in this run", content)

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -104,20 +106,11 @@ NOTICE_TAIL_CHARS = 2_000
 
 
 def _incomplete_utf8_tail(data: bytes) -> int:
-    """Bytes at the end of ``data`` that start a UTF-8 character not yet complete."""
-    for back in range(1, min(4, len(data)) + 1):
-        byte = data[-back]
-        if byte & 0xC0 != 0x80:  # not a continuation byte: a lead byte or ASCII
-            if byte >= 0xF0:
-                need = 4
-            elif byte >= 0xE0:
-                need = 3
-            elif byte >= 0xC0:
-                need = 2
-            else:
-                return 0
-            return back if back < need else 0
-    return 0
+    """Bytes at the end of ``data`` that are a valid but unfinished UTF-8 sequence.
+    Invalid bytes (0xFF, a lone 0xC0) are never held back: they surface as U+FFFD."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    decoder.decode(data[-4:], final=False)
+    return len(decoder.getstate()[0])
 
 
 def _unread_tail(job: Job) -> str:
@@ -193,8 +186,22 @@ class JobOutputTool:
             job.notified = True
         body = text if text.strip() else "(no new output)"
         return ToolResult(
-            f"{body}\n[job {job.id}: {job.status}]", meta={"job_id": job.id, "status": job.status}
+            f"{body}\n[job {job.id}: {job.status}{_timing(job, ctx)}]",
+            meta={"job_id": job.id, "status": job.status},
         )
+
+
+def _timing(job: Job, ctx: ToolContext) -> str:
+    """How long a running job has run and how much of the run is left. Without it a model
+    waited 3 x 600 s on a silent full test suite (piped to `tail`) until the run's time
+    limit ended the session."""
+    if job.status != "running":
+        return ""
+    note = f", running for {int(job.run.elapsed_s)} s"
+    if ctx.deadline is not None:
+        left = max(int(ctx.deadline - time.monotonic()), 0)
+        note += f"; {left} s left in this run"
+    return note
 
 
 class JobListTool:

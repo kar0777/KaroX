@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 
 import pytest
 
@@ -410,9 +411,13 @@ def test_msys_drive_paths_map_to_windows_drives():
         assert msys_to_windows(unchanged) == unchanged
 
 
-def test_resolve_maps_msys_paths_on_windows(ctx, monkeypatch):
-    from karox6.tools import base
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path semantics")
+def test_resolve_maps_msys_paths_on_windows(ctx):
+    from pathlib import Path
 
-    monkeypatch.setattr(base.sys, "platform", "win32")
-    resolved = ctx.resolve("/d/work/a.py")
-    assert str(resolved).replace("\\", "/").lower().endswith("d:/work/a.py")
+    from karox6.tools.shell import ShellInfo
+
+    ctx.shell = ShellInfo("bash", "bash", "git-bash")
+    assert ctx.resolve("/d/work/a.py") == Path("D:/work/a.py")
+    ctx.shell = ShellInfo("pwsh", "pwsh", "pwsh")  # PowerShell keeps its own meaning
+    assert ctx.resolve("/d/work/a.py") != Path("D:/work/a.py")

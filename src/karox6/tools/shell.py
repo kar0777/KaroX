@@ -10,6 +10,7 @@ Tool contract follows DSH's bash/pwsh tools (MIT, see THIRD_PARTY_NOTICES.md).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -61,14 +62,17 @@ class ShellInfo:
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            PWSH_UTF8_PREFIX + command,
+            command if _PWSH_MUST_LEAD.match(command) else PWSH_UTF8_PREFIX + command,
         ]
 
 
+# BOM-less: [Text.Encoding]::UTF8 would prefix piped input to native programs with a BOM.
 PWSH_UTF8_PREFIX = (
-    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-    "$OutputEncoding=[System.Text.Encoding]::UTF8; "
+    "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding $false;"
+    "$OutputEncoding=New-Object System.Text.UTF8Encoding $false; "
 )
+# Statements PowerShell only accepts at the very start of a script.
+_PWSH_MUST_LEAD = re.compile(r"^\s*(param\s*\(|using\s|#requires\b)", re.IGNORECASE)
 
 
 def detect_shell(environ: dict[str, str] | None = None) -> ShellInfo:
