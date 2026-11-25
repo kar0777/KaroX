@@ -53,7 +53,22 @@ class ShellInfo:
                 script.write_bytes(command.encode("utf-8", "replace"))
                 return [self.executable, script.as_posix()]
             return [self.executable, "-c", command]
-        return [self.executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+        # Redirected PowerShell output uses the console code page (OEM), but the output is
+        # decoded as UTF-8: Cyrillic names came back as U+FFFD. Switch the session to UTF-8.
+        return [
+            self.executable,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            PWSH_UTF8_PREFIX + command,
+        ]
+
+
+PWSH_UTF8_PREFIX = (
+    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+    "$OutputEncoding=[System.Text.Encoding]::UTF8; "
+)
 
 
 def detect_shell(environ: dict[str, str] | None = None) -> ShellInfo:

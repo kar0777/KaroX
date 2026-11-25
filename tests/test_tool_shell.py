@@ -410,3 +410,46 @@ def test_command_wait_cap_turns_a_long_wait_into_a_job(ctx):
         assert "later" in output.content
 
     asyncio.run(scenario())
+
+
+def test_pwsh_argv_switches_output_to_utf8():
+    from karox6.tools.shell import PWSH_UTF8_PREFIX, ShellInfo
+
+    argv = ShellInfo("pwsh", "pwsh", "pwsh").argv("Get-ChildItem")
+    assert argv[-1] == PWSH_UTF8_PREFIX + "Get-ChildItem"
+    assert "UTF8" in PWSH_UTF8_PREFIX
+
+
+def test_job_read_keeps_a_split_utf8_character_for_the_next_read(tmp_path):
+    from karox6.tools.jobs import JobManager, _incomplete_utf8_tail
+
+    assert _incomplete_utf8_tail("aб".encode()[:-1]) == 1
+    assert _incomplete_utf8_tail("😀".encode()[:3]) == 3
+    assert _incomplete_utf8_tail("aб".encode()) == 0
+    assert _incomplete_utf8_tail(b"abc") == 0
+
+    log = tmp_path / "job.log"
+    word = "проекты".encode()
+    log.write_bytes(word[:5])  # ends in the middle of the third letter
+
+    class Run:
+        active = True
+        log_path = log
+        command = "x"
+
+        def _flush_log(self):
+            pass
+
+    class Job:
+        id = 1
+        read_offset = 0
+        run = Run()
+
+    manager = JobManager()
+    job = Job()
+    first = asyncio.run(manager.read_new(job, tmp_path))
+    assert first == "пр"
+    log.write_bytes(word)
+    job.run.active = False
+    second = asyncio.run(manager.read_new(job, tmp_path))
+    assert second == "оекты"

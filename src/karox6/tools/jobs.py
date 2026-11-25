@@ -79,6 +79,10 @@ class JobManager:
                 data = fh.read()
         except OSError as exc:
             return f"(cannot read job log: {exc})"
+        if job.run.active:
+            # A read can end inside a multi-byte UTF-8 character; leave that tail for the
+            # next read instead of decoding both halves into replacement characters.
+            data = data[: len(data) - _incomplete_utf8_tail(data)]
         job.read_offset += len(data)
         text = clean_text(data)
         inline, _ = limit_output(
@@ -97,6 +101,23 @@ class JobManager:
 
 
 NOTICE_TAIL_CHARS = 2_000
+
+
+def _incomplete_utf8_tail(data: bytes) -> int:
+    """Bytes at the end of ``data`` that start a UTF-8 character not yet complete."""
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte & 0xC0 != 0x80:  # not a continuation byte: a lead byte or ASCII
+            if byte >= 0xF0:
+                need = 4
+            elif byte >= 0xE0:
+                need = 3
+            elif byte >= 0xC0:
+                need = 2
+            else:
+                return 0
+            return back if back < need else 0
+    return 0
 
 
 def _unread_tail(job: Job) -> str:

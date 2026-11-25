@@ -167,3 +167,15 @@ def test_session_offers_run_code_only_with_the_flag(tmp_path, monkeypatch):
     plain_session = Session(plain, ScriptedProvider([]))
     assert "run_code" not in [t.name for t in plain_session.tools]
     assert code_module.CODE_MODE_APPEND not in plain_session.system_prompt
+
+
+def test_timeout_respects_the_run_deadline(ctx, monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(code_module, "find_python", lambda env: sys.executable)
+    ctx.deadline = _time.monotonic() + 1.0
+    started = _time.monotonic()
+    result, _ = run_code(ctx, "import time\ntime.sleep(30)", timeout=300_000)
+    assert _time.monotonic() - started < 20
+    assert result.is_error
+    assert "timed out" in result.content

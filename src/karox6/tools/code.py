@@ -190,7 +190,9 @@ class RunCodeTool:
                 log_path=folder / f"{stem}.log",
                 command=f"run_code {stem}",
             )
-            finished = await run.wait(timeout_ms / 1000)
+            # Never outlast the run's own time limit (the program is killed at the cap).
+            waited_s = ctx.wait_cap_s(timeout_ms / 1000)
+            finished = await run.wait(waited_s)
             if not finished:
                 await run.kill()
         except BaseException:
@@ -207,7 +209,7 @@ class RunCodeTool:
         took = time.monotonic() - started
         calls = f"{nested.count} tool call{'s' if nested.count != 1 else ''}"
         if not finished:
-            marker = f"[timed out after {timeout_ms / 1000:.0f}s; {calls}]"
+            marker = f"[timed out after {waited_s:.0f}s; {calls}]"
             return ToolResult(f"{text}\n{marker}".strip(), is_error=True)
         code_rc = run.returncode
         marker = f"[exit code: {code_rc}; {calls}; {took:.1f}s]"
