@@ -52,3 +52,8 @@
 - Gates: full suite green on Windows (main venv), ruff, ruff format, mypy clean; wheel built and
   smoke_installed OK (karox 6.0.0.dev63, chat CLI, MCP stdio 7 tools). Bench behaviour change on Linux:
   only the job_output timing text and run_code deadline. Not pushed.
+- SWE-2.1 harness audit of all 71 dev61 pool5 sessions (work/swe21/traj_a.out, traj_b.out), measured at $0:
+  calls hitting a missing dev tool (ruff/uv/mypy/...) 67 of 1323 steps in 41/71 sessions (~5% steps);
+  baseline re-runs (git stash / worktree / git show HEAD) 80 calls in 38 sessions, 10% of wall time.
+  Both below the 20% cost gate -> not pursued as bench changes. Most other findings are bench-image
+  gaps (missing dev deps, offline hatch/uv), not CLI bugs.
