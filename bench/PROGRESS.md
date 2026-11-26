@@ -101,3 +101,11 @@
 - Free Dahl GLM dogfood dog64 (run 45738740180, dev64, tasks 128 + pool0 FAIR 13/40/62): 1/4 solved (GLM
   noise); every run ended normally (no "invalid JSON" crash on a2a-1456 this time), 40 hit the time limit
   amid 429 retries. Dahl reports no prompt-cache hits (provider side). dev65 replay 6/6 green.
+
+## 2026-11-26: aquarium-3d (user's visual task), dev65 vs Claude Code, Haiku 5.5, 2 attempts each
+- Run 45759284569 (aqua65), $0.22 total (KaroX $0.077, CC $0.135, interview $0.007); telemetry PASS.
+- KaroX 2/2 pages render (canvas, no console/page errors), ~204-280 s agent time, 4 steps: one wasted
+  32k-token first reply (all thinking, cut at max_tokens), then one 40 KB write, one edit. Look: tank,
+  glass, frame, lamp, gravel, stones, plants, 3 banded clownfish (trial 2 fish smaller and clustered).
+- CC 0/2: both ended after ~620 s with "response exceeded the 128000 output token maximum", no file.
+- Files for the user: D:/проекты/aquarium-dev65/ (html + screenshots per trial).
