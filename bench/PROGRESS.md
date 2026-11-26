@@ -1,4 +1,19 @@
 
+## 2026-11-26: pre-registered pool8 (bench/prereg_pool8_dev67.md) — dev67 NOT adopted; dev65 beats Claude Code
+- pool8 = 49 fresh tasks (ids 321-369, 2026-09-10..10-01), labels 24 FAIR/12 PARTIAL/12 UNFAIR/1 DISPUTED fixed
+  before the run. Run 45889673914 (tag p8d67): dev65 + dev67 + Claude Code side by side, 2 attempts, Haiku 5.5.
+  Task 340 lost to infra (job produced only gateway logs, no trials); 48 valid.
+- PRIMARY FAIR (23 valid): solved attempts dev65 25, dev67 23, CC 22; cost/solve $0.0187 / $0.0236 / $0.0289.
+  dev67 - dev65 = -2, cost/solve 1.27x -> KEEP dev65 (dev67/dev66 prompt edits not adopted).
+- Secondary: dev67 vs CC 23 vs 22 at 0.82x ("number one" rule passes for dev67 but it loses to dev65).
+  dev65 vs CC (not pre-registered as a decision): FAIR 25 vs 22 at 0.65x cost/solve; ALL 30 vs 24 at 0.73x.
+  Wall per trial median 160 s / 179 s / 140 s, mean 401 / 402 / 289 s (KaroX long tail remains).
+- Reading: the scr66 +5 on a dev pool did not transfer to fresh tasks; prompt rules lifted from 9 losses
+  (even when phrased generally) added cost without solves. Devin SWE-2.1 attribution of scr66 changes: mostly
+  sampling noise; one harm (strict "unverified case is not fixed" pulled an agent into a pre-existing bug).
+- Spend $5.141 (dev65 1.445, dev67 1.462, CC 1.594, interview 0.640). Evaluation: scripts/eval_pool8.py ->
+  runs/p8d67_eval.txt. Session total since 2026-11-26 morning ~$12.1; overall ~$25.
+
 ## 2026-11-26: dev66 screen (bench/prereg_dev66_screen.md) — NO-GO by its cost cap
 - Run 45876179786 (tag scr66): dev65 vs dev66 side by side, 62 dev FAIR tasks x 2 attempts, Haiku 5.5, all 248
   trials with a verifier reward. Solved attempts dev65 76 vs dev66 81 (net +5, rule >= +4: met); cost $1.886 vs
