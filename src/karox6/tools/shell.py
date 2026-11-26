@@ -20,7 +20,7 @@ from typing import Any, Literal
 from karox6.context.spill import limit_output
 from karox6.tools.base import ApprovalRequest, ToolContext, ToolResult
 from karox6.tools.danger import check_command
-from karox6.tools.proc import ProcessRun
+from karox6.tools.proc import ProcessRun, silence_note
 
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
@@ -286,6 +286,7 @@ class ShellTool:
                 f"[still running after {int(waited_s * 1000)} ms; moved to background job "
                 f"{job.id}. "
                 "Use job_output to read more output or wait for it, job_kill to stop it.]"
+                f"{silence_note(run)}"
             )
             meta = {"job_id": job.id, "timed_out": True}
         inline, spill = limit_output(
@@ -309,6 +310,9 @@ def _description(shell: ShellInfo) -> str:
         f"moving on. Default timeout {DEFAULT_TIMEOUT_MS} ms (max {MAX_TIMEOUT_MS}); a command "
         "still running at its timeout keeps running as a background job instead of being "
         "killed. Use `run_in_background` for servers and watchers, then job_output/job_kill. "
+        "To wait for a long command, wait on its job with job_output: it returns as soon as "
+        "the command ends, while `sleep N` always waits N seconds and a command detached "
+        "with nohup or `&` is not tracked as a job. "
         "Long output keeps its head and tail; the full output is saved to a file whose path is "
         "reported. Never start interactive programs (editors, pagers, prompts). Before any "
         "delete or move, check that the target path is the intended one."
