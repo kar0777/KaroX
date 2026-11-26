@@ -299,7 +299,70 @@
    "DISPUTED": [
     55
    ]
+  },
+  "pool7": {
+   "FAIR": [
+    270,
+    271,
+    273,
+    275,
+    276,
+    277,
+    279,
+    281,
+    282,
+    283,
+    287,
+    289,
+    290,
+    291,
+    294,
+    299,
+    300,
+    301,
+    302,
+    303,
+    305,
+    307,
+    309,
+    310,
+    311,
+    317,
+    318
+   ],
+   "PARTIAL": [
+    269,
+    285,
+    286,
+    288,
+    293,
+    296,
+    297,
+    298,
+    316
+   ],
+   "UNFAIR": [
+    272,
+    274,
+    278,
+    280,
+    284,
+    292,
+    295,
+    304,
+    308,
+    312,
+    314,
+    315,
+    319,
+    320
+   ],
+   "DISPUTED": [
+    306,
+    313
+   ]
   }
  },
- "pool0_rule": "2026-11-26: tasks 13-73 (night_tasks, an old KaroX 5 dev/tuning pool: NOT a holdout). Two blind auditors with the same prompt: SWE-2.1 Max (lenient: 8/12 vs Neon on calibration) and Codex gpt-6.2-sol (11/12). FAIR only if both say FAIR; UNFAIR if neither says FAIR and one says UNFAIR; FAIR vs UNFAIR = DISPUTED. Raw labels: bench/fair_audit/pool0.json"
+ "pool0_rule": "2026-11-26: tasks 13-73 (night_tasks, an old KaroX 5 dev/tuning pool: NOT a holdout). Two blind auditors with the same prompt: SWE-2.1 Max (lenient: 8/12 vs Neon on calibration) and Codex gpt-6.2-sol (11/12). FAIR only if both say FAIR; UNFAIR if neither says FAIR and one says UNFAIR; FAIR vs UNFAIR = DISPUTED. Raw labels: bench/fair_audit/pool0.json",
+ "pool7_rule": "2026-11-26: fresh tasks 269-320 (repos merged 2026-10-01..10-20, validated by validate.yml: 52 of 103). Two blind auditors, same prompt as pool0: Codex gpt-6.2-sol and Codex gpt-6.1-sol (each 10/12 vs Neon on 12 pool5 calibration ids; both misses are Neon PARTIAL -> FAIR). Same merge rule as pool0. Raw labels: bench/fair_audit/pool7.json. Not seen by any KaroX tuning: a holdout."
 }
