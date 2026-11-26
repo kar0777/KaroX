@@ -1,4 +1,14 @@
 
+## 2026-11-26: dev66 screen (bench/prereg_dev66_screen.md) — NO-GO by its cost cap
+- Run 45876179786 (tag scr66): dev65 vs dev66 side by side, 62 dev FAIR tasks x 2 attempts, Haiku 5.5, all 248
+  trials with a verifier reward. Solved attempts dev65 76 vs dev66 81 (net +5, rule >= +4: met); cost $1.886 vs
+  $2.117 = 1.12x (rule <= 1.10x: MISSED) -> NO-GO, dev66 not adopted. Cost per solve 0.0248 vs 0.0261 (1.05x).
+  Tasks better 6 (76,110,124,150,158,210), worse 2 (200,212). Wall median 144 s vs 167 s, mean 479 vs 487 s.
+- Spend $4.749 (dev65 1.886, dev66 2.117, interview 0.745 - one long task) > the $4.5 cap written (cap overrun by
+  interview calls; reported, not re-run). Evaluation: karox6-bench-data/scripts/eval_scr66.py -> runs/scr66_eval.txt.
+- Lesson: the screen used an ad-hoc total-cost cap although the project objective is cost per solve; the next
+  test (fresh pool8) is pre-registered on cost per solve before any pool8 data exist.
+
 ## 2026-11-26: dev66 candidate (branch steps/dev66) from Devin SWE-2.1 failure analysis
 - Devin SWE-2.1 Max (free) analysed each of the 10 dev-pool tasks Claude Code solved and KaroX failed (dev54-dev61
   runs; condensed traces in karox6-bench-data/work/devin): 8 incomplete fixes (missed writer/copy/branch, step
