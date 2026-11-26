@@ -228,6 +228,78 @@
     265,
     267
    ]
+  },
+  "pool0": {
+   "FAIR": [
+    13,
+    19,
+    21,
+    22,
+    23,
+    24,
+    28,
+    30,
+    31,
+    34,
+    35,
+    40,
+    41,
+    44,
+    46,
+    48,
+    49,
+    57,
+    58,
+    59,
+    60,
+    62,
+    63,
+    68,
+    69,
+    70,
+    71,
+    73
+   ],
+   "PARTIAL": [
+    14,
+    18,
+    32,
+    36,
+    39,
+    43,
+    50,
+    51,
+    52,
+    54,
+    56,
+    61,
+    64,
+    66,
+    67
+   ],
+   "UNFAIR": [
+    15,
+    16,
+    17,
+    20,
+    25,
+    26,
+    27,
+    29,
+    33,
+    37,
+    38,
+    42,
+    45,
+    47,
+    53,
+    65,
+    72
+   ],
+   "DISPUTED": [
+    55
+   ]
   }
- }
+ },
+ "pool0_rule": "2026-11-26: tasks 13-73 (night_tasks, an old KaroX 5 dev/tuning pool: NOT a holdout). Two blind auditors with the same prompt: SWE-2.1 Max (lenient: 8/12 vs Neon on calibration) and Codex gpt-6.2-sol (11/12). FAIR only if both say FAIR; UNFAIR if neither says FAIR and one says UNFAIR; FAIR vs UNFAIR = DISPUTED. Raw labels: bench/fair_audit/pool0.json"
 }
