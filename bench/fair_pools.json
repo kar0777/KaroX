@@ -361,8 +361,68 @@
     306,
     313
    ]
+  },
+  "pool8": {
+   "FAIR": [
+    321,
+    324,
+    327,
+    328,
+    331,
+    332,
+    337,
+    338,
+    340,
+    341,
+    342,
+    343,
+    347,
+    348,
+    349,
+    352,
+    355,
+    356,
+    358,
+    359,
+    361,
+    363,
+    366,
+    369
+   ],
+   "PARTIAL": [
+    326,
+    329,
+    330,
+    334,
+    336,
+    344,
+    345,
+    350,
+    351,
+    364,
+    365,
+    367
+   ],
+   "UNFAIR": [
+    322,
+    323,
+    333,
+    335,
+    339,
+    346,
+    353,
+    354,
+    357,
+    360,
+    362,
+    368
+   ],
+   "DISPUTED": [
+    325
+   ]
   }
  },
  "pool0_rule": "2026-11-26: tasks 13-73 (night_tasks, an old KaroX 5 dev/tuning pool: NOT a holdout). Two blind auditors with the same prompt: SWE-2.1 Max (lenient: 8/12 vs Neon on calibration) and Codex gpt-6.2-sol (11/12). FAIR only if both say FAIR; UNFAIR if neither says FAIR and one says UNFAIR; FAIR vs UNFAIR = DISPUTED. Raw labels: bench/fair_audit/pool0.json",
- "pool7_rule": "2026-11-26: fresh tasks 269-320 (repos merged 2026-10-01..10-20, validated by validate.yml: 52 of 103). Two blind auditors, same prompt as pool0: Codex gpt-6.2-sol and Codex gpt-6.1-sol (each 10/12 vs Neon on 12 pool5 calibration ids; both misses are Neon PARTIAL -> FAIR). Same merge rule as pool0. Raw labels: bench/fair_audit/pool7.json. Not seen by any KaroX tuning: a holdout."
+ "pool7_rule": "2026-11-26: fresh tasks 269-320 (repos merged 2026-10-01..10-20, validated by validate.yml: 52 of 103). Two blind auditors, same prompt as pool0: Codex gpt-6.2-sol and Codex gpt-6.1-sol (each 10/12 vs Neon on 12 pool5 calibration ids; both misses are Neon PARTIAL -> FAIR). Same merge rule as pool0. Raw labels: bench/fair_audit/pool7.json. Not seen by any KaroX tuning: a holdout.",
+ "pool8_rule": "2026-11-26: fresh tasks 321-369 (merged 2026-09-10..10-01, 49 valid of 99). Same two blind Codex auditors and merge rule as pool7. Raw labels: bench/fair_audit/pool8.json. Holdout for the dev67 confirmation."
 }
