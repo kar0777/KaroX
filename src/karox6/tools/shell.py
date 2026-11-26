@@ -20,7 +20,7 @@ from typing import Any, Literal
 from karox6.context.spill import limit_output
 from karox6.tools.base import ApprovalRequest, ToolContext, ToolResult
 from karox6.tools.danger import check_command
-from karox6.tools.proc import ProcessRun
+from karox6.tools.proc import ProcessRun, silence_note
 
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
@@ -286,6 +286,7 @@ class ShellTool:
                 f"[still running after {int(waited_s * 1000)} ms; moved to background job "
                 f"{job.id}. "
                 "Use job_output to read more output or wait for it, job_kill to stop it.]"
+                f"{silence_note(run)}"
             )
             meta = {"job_id": job.id, "timed_out": True}
         inline, spill = limit_output(

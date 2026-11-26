@@ -20,6 +20,28 @@ TAIL_CAP = 64 * 1024
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 
 
+SILENT_NOTE_S = 120
+_BUFFERING_PIPE = re.compile(r"\|\s*(?:tail|head|sort|uniq|wc|grep|sed|awk|cut)\b")
+
+
+def silence_note(run: ProcessRun) -> str:
+    """Advice for a running command that has printed nothing for a while (no cap, no
+    kill): bench models waited 3 x 600 s on a test suite piped to `tail` that could not
+    show anything until it ended."""
+    silent = int(run.silent_s)
+    if run.returncode is not None or silent < SILENT_NOTE_S:
+        return ""
+    what = "it has printed nothing" if run.last_output is None else "no new output"
+    note = f" {what} for {silent} s."
+    if _BUFFERING_PIPE.search(run.command):
+        note += (
+            " Its output goes through a filter that prints only when the command ends, "
+            "so waiting longer shows nothing new: to see progress, kill it and rerun it "
+            "narrower or writing to a file you can read."
+        )
+    return note
+
+
 def clean_text(data: bytes) -> str:
     text = data.decode("utf-8", errors="replace")
     text = text.replace("\r\n", "\n")
@@ -35,6 +57,7 @@ class ProcessRun:
         self.command = command
         self.started = time.monotonic()
         self.total_bytes = 0
+        self.last_output: float | None = None  # monotonic time of the latest output byte
         self.head = bytearray()
         self.tail = bytearray()
         self.killed = False
@@ -73,6 +96,7 @@ class ProcessRun:
                 if not chunk:
                     break
                 self.total_bytes += len(chunk)
+                self.last_output = time.monotonic()
                 with contextlib.suppress(OSError, ValueError):
                     self._log.write(chunk)
                     self._log.flush()
@@ -97,6 +121,11 @@ class ProcessRun:
     @property
     def elapsed_s(self) -> float:
         return time.monotonic() - self.started
+
+    @property
+    def silent_s(self) -> float:
+        """Seconds since the latest output (since the start when it printed nothing)."""
+        return time.monotonic() - (self.last_output or self.started)
 
     async def wait(self, timeout_s: float | None) -> bool:
         """Wait for exit; True when the process exited within ``timeout_s``.
