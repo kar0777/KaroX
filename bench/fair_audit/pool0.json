@@ -1,0 +1,1108 @@
+{
+ "final": {
+  "13": "FAIR",
+  "14": "PARTIAL",
+  "15": "UNFAIR",
+  "16": "UNFAIR",
+  "17": "UNFAIR",
+  "18": "PARTIAL",
+  "19": "FAIR",
+  "20": "UNFAIR",
+  "21": "FAIR",
+  "22": "FAIR",
+  "23": "FAIR",
+  "24": "FAIR",
+  "25": "UNFAIR",
+  "26": "UNFAIR",
+  "27": "UNFAIR",
+  "28": "FAIR",
+  "29": "UNFAIR",
+  "30": "FAIR",
+  "31": "FAIR",
+  "32": "PARTIAL",
+  "33": "UNFAIR",
+  "34": "FAIR",
+  "35": "FAIR",
+  "36": "PARTIAL",
+  "37": "UNFAIR",
+  "38": "UNFAIR",
+  "39": "PARTIAL",
+  "40": "FAIR",
+  "41": "FAIR",
+  "42": "UNFAIR",
+  "43": "PARTIAL",
+  "44": "FAIR",
+  "45": "UNFAIR",
+  "46": "FAIR",
+  "47": "UNFAIR",
+  "48": "FAIR",
+  "49": "FAIR",
+  "50": "PARTIAL",
+  "51": "PARTIAL",
+  "52": "PARTIAL",
+  "53": "UNFAIR",
+  "54": "PARTIAL",
+  "55": "DISPUTED",
+  "56": "PARTIAL",
+  "57": "FAIR",
+  "58": "FAIR",
+  "59": "FAIR",
+  "60": "FAIR",
+  "61": "PARTIAL",
+  "62": "FAIR",
+  "63": "FAIR",
+  "64": "PARTIAL",
+  "65": "UNFAIR",
+  "66": "PARTIAL",
+  "67": "PARTIAL",
+  "68": "FAIR",
+  "69": "FAIR",
+  "70": "FAIR",
+  "71": "FAIR",
+  "72": "UNFAIR",
+  "73": "FAIR"
+ },
+ "swe": {
+  "13": {
+   "id": 13,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "14": {
+   "id": 14,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/server/cluster/test_database_event_stream.py::test_stream_accepts_context_warns_once_per_type",
+    "tests/server/cluster/test_database_event_stream.py::test_owner_context_succeeds_on_all_methods[sqlite]"
+   ],
+   "detail": "Requires unmentioned private _stream_accepts_context helper/warning cache; owner tests also assume unmentioned owner_resolver constructor parameter."
+  },
+  "15": {
+   "id": 15,
+   "class": "UNFAIR",
+   "blocking": [
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_decorated_functions",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_generated_source",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_kwargs_subclass_is_not_wrapped",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_missing_required_and_excess_positional_args_still_raise_type_error",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_multilevel_inheritance_super_calls",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_subclass_without_kwargs_is_wrapped",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_unadaptable_override_does_not_break_class_definition"
+   ],
+   "detail": "Tests require unmentioned SignatureCompatABC wrapping machinery; the issue instead recommends per-instrument option methods and never specifies this design."
+  },
+  "16": {
+   "id": 16,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_issue8837_share_outlives_delete.py::test_a_revoke_that_does_not_land_refuses_the_delete_before_removing_anything",
+    "tests/test_issue8837_share_outlives_delete.py::test_cleanup_keeps_a_shared_external_conversation_serving_and_revocable[/api/sessions/cleanup]",
+    "tests/test_issue8837_share_outlives_delete.py::test_delete_revokes_the_resident_token_the_sidecar_lost"
+   ],
+   "detail": "Hidden external/cleanup/resident-token lifecycle rules and exact share_revoke_failed response; snapshot validation contradicts instruction\u2019s sidecar-token comparison."
+  },
+  "17": {
+   "id": 17,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_convo_miner.py::test_hook_mine_exit_watchdog_terminates_hung_non_daemon_thread",
+    "tests/test_convo_miner.py::test_hook_mine_exit_watchdog_preserves_nonzero_exit_code_on_atexit_hang",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[-1]",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[0]",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[bad]",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[inf]",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[nan]",
+    "tests/test_hook_mine_shutdown.py::test_watchdog_rearming_reaps_old_helper"
+   ],
+   "detail": "Hidden subprocess-helper handle, SIGKILL semantics, rearming behavior, and MEMPALACE_HOOK_MINE_EXIT_GRACE_SECONDS validation are absent from the issue's threading.Timer proposal."
+  },
+  "18": {
+   "id": 18,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/server/request_handlers/test_default_request_handler_v2.py::test_on_message_send_failure_after_work_stamps_failure_time"
+   ],
+   "detail": "Requires timestamping the failure at raise time; issue only specifies racing writes and never mentions status timestamps."
+  },
+  "19": {
+   "id": 19,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  },
+  "20": {
+   "id": 20,
+   "class": "UNFAIR",
+   "blocking": [
+    "graphistry/tests/compute/gfql/cypher/test_backtick_identifiers.py::test_swapped_aggregate_aliases_across_callers",
+    "graphistry/tests/compute/gfql/cypher/test_backtick_identifiers.py::test_compound_aggregate_order_keys_preserve_output_bindings",
+    "graphistry/tests/compute/gfql/cypher/test_backtick_identifiers.py::test_quoted_order_boundaries"
+   ],
+   "detail": "Most cases test unmentioned aggregate/expression binding identity, compound ORDER BY expressions, and validation boundaries, far beyond the simple spaced-alias bug."
+  },
+  "21": {
+   "id": 21,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "22": {
+   "id": 22,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  },
+  "23": {
+   "id": 23,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "24": {
+   "id": 24,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  },
+  "25": {
+   "id": 25,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_issue9000_sibling_paths.py::test_btw_answer_never_deletes_the_swapped_in_session",
+    "tests/test_issue9000_sibling_paths.py::test_cwd_sync_target_skips_a_session_swapped_for_another",
+    "tests/test_issue9000_sibling_paths.py::test_sync_chat_refuses_a_session_swapped_for_another[True]"
+   ],
+   "detail": "Tests cover cwd mirroring, /btw deletion, and sync-chat refusal; the issue scopes the fix to three different named helpers."
+  },
+  "26": {
+   "id": 26,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_validate_changelog.py::test_accepts_entry_under_unreleased",
+    "tests/test_validate_changelog.py::test_accepts_link_definition_updates",
+    "tests/test_validate_changelog.py::test_allows_explicit_backfill_override",
+    "tests/test_validate_changelog.py::test_allows_typo_fix_in_historical_section",
+    "tests/test_validate_changelog.py::test_does_not_exempt_new_entry_matching_unreleased_text",
+    "tests/test_validate_changelog.py::test_handles_added_line_starting_with_double_plus",
+    "tests/test_validate_changelog.py::test_main_uses_base_and_head_revisions",
+    "tests/test_validate_changelog.py::test_rejects_colored_or_unparsed_diff",
+    "tests/test_validate_changelog.py::test_rejects_new_entry_under_versioned_section",
+    "tests/test_validate_changelog.py::test_reproduces_release_race"
+   ],
+   "detail": "Tests prescribe a new validate_changelog_diff API, exact errors, CLI/git invocation, backfill override, typo pairing, and malformed-diff behavior absent from the issue."
+  },
+  "27": {
+   "id": 27,
+   "class": "UNFAIR",
+   "blocking": [
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_allows_antiparallel_identical_attributes",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_avoids_cross_frame_original_identifier",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_avoids_cross_frame_returned_identifier",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_avoids_reserved_row_identifiers",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_declines_antiparallel_attribute_conflicts",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_declines_parallel_edges",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_declines_returned_attribute_collision",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_keeps_graph_return_without_attrs",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_preserves_null_attrs",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_preserves_rows_and_attrs_across_directions",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_restores_cross_frame_reserved_return_attrs",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_restores_graph_return_attrs",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_returns_edges_without_attributes",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_selects_orientation_for_opposite_edges"
+   ],
+   "detail": "Tests import unmentioned private helpers and enforce internal sentinel names plus undocumented parallel/antiparallel error semantics."
+  },
+  "28": {
+   "id": 28,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "29": {
+   "id": 29,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_SQ_explicit_VR",
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_SQ_implicit_VR",
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_non_SQ_explicit_VR",
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_non_SQ_implicit_VR",
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_read_length"
+   ],
+   "detail": "Every test asserts an undocumented exact warning substring with byte offsets; wording/offset format cannot be inferred from issue."
+  },
+  "30": {
+   "id": 30,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  },
+  "31": {
+   "id": 31,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "32": {
+   "id": 32,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "33": {
+   "id": 33,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_argfile.py::test_argfile_after_end_of_options_delimiter_not_expanded",
+    "tests/test_argfile.py::test_argfile_bare_prefix_is_literal",
+    "tests/test_argfile.py::test_argfile_call_level_end_of_options_delimiter",
+    "tests/test_argfile.py::test_argfile_call_level_end_of_options_delimiter_interactive_shell",
+    "tests/test_argfile.py::test_argfile_delimiter_inside_file_stops_expansion",
+    "tests/test_argfile.py::test_argfile_expands_command_and_options",
+    "tests/test_argfile.py::test_argfile_expands_in_place",
+    "tests/test_argfile.py::test_argfile_help_flag_in_file",
+    "tests/test_argfile.py::test_argfile_interactive_shell",
+    "tests/test_argfile.py::test_argfile_line_is_one_argument",
+    "tests/test_argfile.py::test_argfile_meta_app",
+    "tests/test_argfile.py::test_argfile_missing_file_exits",
+    "tests/test_argfile.py::test_argfile_missing_file_prints_error",
+    "tests/test_argfile.py::test_argfile_multi_character_prefix",
+    "tests/test_argfile.py::test_argfile_nested",
+    "tests/test_argfile.py::test_argfile_not_expanded_during_completion",
+    "tests/test_argfile.py::test_argfile_parse_args",
+    "tests/test_argfile.py::test_argfile_parse_known_args",
+    "tests/test_argfile.py::test_argfile_parse_known_args_missing_file_raises",
+    "tests/test_argfile.py::test_argfile_prefix_on_sub_app_has_no_effect",
+    "tests/test_argfile.py::test_argfile_prefix_on_sub_app_has_no_effect_interactive_shell",
+    "tests/test_argfile.py::test_argfile_recursive_reference_raises",
+    "tests/test_argfile.py::test_argfile_run_async"
+   ],
+   "detail": "Tests require constructor parameter argfile_prefix; issue proposes fromfile_prefix_chars, and most expansion/error semantics are unspecified."
+  },
+  "34": {
+   "id": 34,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "35": {
+   "id": 35,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "36": {
+   "id": 36,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "37": {
+   "id": 37,
+   "class": "PARTIAL",
+   "blocking": [
+    "darts/tests/test_timeseries.py::TestTimeSeries::test_values_stochastic_warning"
+   ],
+   "detail": "Warning is only one offered alternative, and the required substring 'stochastic series only extracts values of a single sample' is not specified."
+  },
+  "38": {
+   "id": 38,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasis::test_advanced_nesting",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_ambiguous_closer_pairs_with_partially_consumed_opener",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_ambiguous_closer_rejected_by_original_run_length",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_rule_of_3_skipped_opener_removed",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_stray_token_before_cached_region",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_unused_tokens_in_returned_element_tail"
+   ],
+   "detail": "Exact replacement parse trees are unspecified; the reported input's expected HTML differs from the regression output shown, alongside unrelated rule-of-three cases."
+  },
+  "39": {
+   "id": 39,
+   "class": "PARTIAL",
+   "blocking": [
+    "test/tools/test_searchable_toolset.py::TestSearchableToolsetBM25Mode::test_search_tools_matches_word_inside_tool_name[getWeather-weather]"
+   ],
+   "detail": "CamelCase splitting is tested although the issue explicitly leaves camelCase unchecked and asks only about splitting snake_case names."
+  },
+  "40": {
+   "id": 40,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  },
+  "41": {
+   "id": 41,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "42": {
+   "id": 42,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/unit/plugins/test_install_lock.py::TestEnvironmentIdentity::test_state_root_reports_a_dangling_coordination_directory",
+    "tests/unit/plugins/test_install_lock.py::TestEnvironmentIdentity::test_state_root_reports_an_unusable_passwd_home"
+   ],
+   "detail": "Both tests require undisclosed DEPENDENCY_STATE_ROOT_UNAVAILABLE wording and unmentioned passwd-home validation/dangling-symlink semantics; HOME-priority fix suggested by issue fails."
+  },
+  "43": {
+   "id": 43,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/integrations/file/test_File__download.py::test_invalid_certificate_file[invalid-certificate]",
+    "tests/integrations/file/test_File__download.py::test_invalid_certificate_file[missing-file]",
+    "tests/integrations/file/test_File__download.py::test_proxy_error"
+   ],
+   "detail": "Tests require exact undocumented hint phrases and full ordered proxy-variable list; the issue only asks generally for more helpful errors."
+  },
+  "44": {
+   "id": 44,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  },
+  "45": {
+   "id": 45,
+   "class": "UNFAIR",
+   "blocking": [
+    "toqito/state_metrics/tests/test_measured_relative_entropy.py::test_measured_relative_entropy_support_not_contained",
+    "toqito/state_metrics/tests/test_measured_relative_entropy.py::test_measured_relative_entropy_singular_sigma_on_support",
+    "toqito/state_metrics/tests/test_measured_relative_entropy.py::test_measured_relative_entropy_commuting_singular_sigma"
+   ],
+   "detail": "Instruction says unsupported support should return inf and suggests rejecting singular inputs; tests require ValueError plus full singular-input computation."
+  },
+  "46": {
+   "id": 46,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "47": {
+   "id": 47,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_translator/test_member_placements.py::test_a_placement_inside_a_struct_held_by_a_constant_buffer_is_refused[vulkan]"
+   ],
+   "detail": "Issue permits SPIR-V either to honor Offset 32 or refuse it; hidden test unconditionally requires refusal, an undisclosed design choice."
+  },
+  "48": {
+   "id": 48,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "49": {
+   "id": 49,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "50": {
+   "id": 50,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_query_schema.py::test_optional_query_schema_openapi_params",
+    "tests/test_query_schema.py::test_required_nested_query_schema_keeps_defaults_and_loc"
+   ],
+   "detail": "OpenAPI requiredness flattening and preserving required-nested defaults/leaf error loc are unmentioned scope/design requirements, partly contrary to the suggested loc change."
+  },
+  "51": {
+   "id": 51,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_utils_curl.py::TestCurlToRequestKwargs::test_post_data_raw_ansi_c_quoting",
+    "tests/test_utils_curl.py::TestCurlToRequestKwargs::test_post_data_raw_ansi_c_quoting_error"
+   ],
+   "detail": "Most edge parameters depend on unstated byte decoding, NUL truncation, surrogate-pair merging, Latin-1 fallback, and exact Python decode-error text."
+  },
+  "52": {
+   "id": 52,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  },
+  "53": {
+   "id": 53,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_mutate_diff.py::TestEngineFailure::test_a_childs_traceback_in_the_engines_message_names_the_childs_death",
+    "tests/test_mutate_diff.py::TestEngineFailure::test_an_exception_that_ends_the_log_from_the_engines_frame_is_the_engines",
+    "tests/test_mutate_diff.py::TestEngineFailure::test_an_exception_whose_message_spans_lines_is_read_whole",
+    "tests/test_mutate_diff.py::TestEngineFailure::test_the_last_traceback_decides_not_an_earlier_one_of_its_text"
+   ],
+   "detail": "Instruction is only a tracking pointer; tests require precise traceback attribution, multiline message reconstruction, summary/rule suppression, and exact harness frame formatting."
+  },
+  "54": {
+   "id": 54,
+   "class": "PARTIAL",
+   "blocking": [
+    "gammapy/astro/darkmatter/tests/test_utils.py::test_integrate_los_zero_impact_center"
+   ],
+   "detail": "Central zero-impact handling requires a new ValueError containing 'central-pixel integration'; neither rejection nor exact wording is specified."
+  },
+  "55": {
+   "id": 55,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "56": {
+   "id": 56,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_base_publisher.py::test_non_custom_post_publish_exception_is_combined_with_item_failures",
+    "tests/test_base_publisher.py::test_publish_error_keeps_additional_info_of_post_publish_failure"
+   ],
+   "detail": "Catching arbitrary non-custom post-publish exceptions and exact post_publish_all additional_info aggregation are not specified in the otherwise detailed proposal."
+  },
+  "57": {
+   "id": 57,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "58": {
+   "id": 58,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "59": {
+   "id": 59,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  },
+  "60": {
+   "id": 60,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "61": {
+   "id": 61,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_spider_sitemap.py::TestSitemapSpider::test_get_sitemap_urls_from_robotstxt_invalid_utf8_urls"
+   ],
+   "detail": "Hidden test silently changes invalid UTF-8 handling from skipping the URL to decoding it as /.xml; issue only concerns trailing comments."
+  },
+  "62": {
+   "id": 62,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "63": {
+   "id": 63,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "64": {
+   "id": 64,
+   "class": "PARTIAL",
+   "blocking": [
+    "test/mitmproxy/addons/test_tlsconfig.py::TestTlsConfig::test_emudhra_revocation_block"
+   ],
+   "detail": "Test directly imports new private _EMUDHRA_REVOCATION_HOSTS constant, an implementation name absent from the issue."
+  },
+  "65": {
+   "id": 65,
+   "class": "PARTIAL",
+   "blocking": [
+    "Tests/test_bgzf.py::BgzfTests::test_write_random_data"
+   ],
+   "detail": "Test mandates recursive halving with exact 32768-byte blocks; the issue leaves fixed smaller blocks versus retrying unresolved."
+  },
+  "66": {
+   "id": 66,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/functions/test_drop_constant_columns.py::test_drop_constant_columns_mixed_missing_sentinels",
+    "tests/functions/test_drop_constant_columns.py::test_drop_constant_columns_object_null_semantics[values0-False]",
+    "tests/functions/test_drop_constant_columns.py::test_drop_constant_columns_object_null_semantics[values1-False]"
+   ],
+   "detail": "Requires treating None, NaN, pd.NA, and NaT as one missing category; issue/proposed nunique(dropna=False) only implies NaN handling."
+  },
+  "67": {
+   "id": 67,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_ec2/test_launch_templates.py::test_delete_launch_template_versions",
+    "tests/test_ec2/test_launch_templates.py::test_delete_launch_template_versions__errors"
+   ],
+   "detail": "Extensive AWS validation matrix and exact error codes/messages, especially embedded launchTemplateVersionDoesNotExist and default-version text, are not derivable from the issue."
+  },
+  "68": {
+   "id": 68,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "69": {
+   "id": 69,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "70": {
+   "id": 70,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": ""
+  },
+  "71": {
+   "id": 71,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  },
+  "72": {
+   "id": 72,
+   "class": "PARTIAL",
+   "blocking": [
+    "test/components/builders/test_answer_builder.py::TestAnswerBuilder::test_init_with_reference_pattern_with_more_than_one_capturing_group",
+    "test/components/builders/test_answer_builder.py::TestAnswerBuilder::test_run_with_reference_pattern_with_optional_group_ignores_empty_match"
+   ],
+   "detail": "Hidden tests require initialization-time validation despite the run-only suggestion, and silently ignore empty optional matches although the issue expects a clear validation error."
+  },
+  "73": {
+   "id": 73,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "Tested behavior is explicit in the issue or inferable from repository conventions."
+  }
+ },
+ "codex": {
+  "13": {
+   "id": 13,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u041e\u0436\u0438\u0434\u0430\u0435\u0442\u0441\u044f \u043e\u0442\u043a\u0430\u0442 \u043a \u043c\u0438\u043d\u0438\u043c\u0430\u043b\u044c\u043d\u043e\u043c\u0443 \u0441\u043c\u0435\u0449\u0435\u043d\u0438\u044e \u043a\u0430\u0436\u0434\u043e\u0439 \u043f\u0430\u0440\u044b \u0442\u043e\u043f\u0438\u043a\u2013\u043f\u0430\u0440\u0442\u0438\u0446\u0438\u044f. Confluent \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u0442\u043e\u0442 \u0436\u0435 \u0434\u0435\u0444\u0435\u043a\u0442 \u0432\u044b\u0431\u043e\u0440\u0430 \u043f\u0435\u0440\u0432\u043e\u0439 \u0437\u0430\u043f\u0438\u0441\u0438, \u0447\u0442\u043e \u0438 aiokafka."
+  },
+  "14": {
+   "id": 14,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/server/cluster/test_database_event_stream.py::test_stream_accepts_context_warns_once_per_type"
+   ],
+   "detail": "\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442 \u0438 \u0444\u0438\u043b\u044c\u0442\u0440\u0430\u0446\u0438\u044f \u043f\u043e \u0432\u043b\u0430\u0434\u0435\u043b\u044c\u0446\u0443 \u0432\u044b\u0432\u043e\u0434\u0438\u043c\u044b. \u0422\u0435\u0441\u0442 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043d\u043e\u0432\u044b\u0439 \u043f\u0440\u0438\u0432\u0430\u0442\u043d\u044b\u0439 \u0445\u0435\u043b\u043f\u0435\u0440 _stream_accepts_context \u0438 \u043e\u0434\u043d\u043e\u043a\u0440\u0430\u0442\u043d\u044b\u0439 DeprecationWarning \u0441 \u043f\u043e\u0434\u0441\u0442\u0440\u043e\u043a\u043e\u0439 does not accept."
+  },
+  "15": {
+   "id": 15,
+   "class": "UNFAIR",
+   "blocking": [
+    "opentelemetry-api/tests/test_sdk_backcompat.py::TestFrozenLogger::test_emit_and_enabled",
+    "opentelemetry-api/tests/test_sdk_backcompat.py::TestFrozenMeter::test_unknown_keyword_argument",
+    "opentelemetry-api/tests/test_sdk_backcompat.py::TestFrozenTracer::test_start_as_current_span",
+    "opentelemetry-api/tests/test_sdk_backcompat.py::TestFrozenTracer::test_start_span",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_decorated_functions",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_generated_source",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_kwargs_subclass_is_not_wrapped",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_missing_required_and_excess_positional_args_still_raise_type_error",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_multilevel_inheritance_super_calls",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_subclass_without_kwargs_is_wrapped",
+    "opentelemetry-api/tests/util/test_compat.py::TestSignatureCompatABC::test_unadaptable_override_does_not_break_class_definition"
+   ],
+   "detail": "\u0422\u0435\u0441\u0442\u044b \u0438\u043c\u043f\u043e\u0440\u0442\u0438\u0440\u0443\u044e\u0442 \u043d\u043e\u0432\u044b\u0435 SignatureCompatABC \u0438 make_signature_compat_wrapper, \u0444\u0438\u043a\u0441\u0438\u0440\u0443\u044e\u0442 \u043e\u0431\u0451\u0440\u0442\u043a\u0438 \u0438 \u0442\u0440\u0435\u0431\u0443\u044e\u0442 \u0438\u0433\u043d\u043e\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0435 kwargs \u0432 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0445 API. \u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0432\u044b\u0431\u043e\u0440 \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430. \u0425\u0432\u043e\u0441\u0442\u044b \u043e\u0431\u043e\u0438\u0445 \u043f\u0430\u0442\u0447\u0435\u0439 \u0443\u0441\u0435\u0447\u0435\u043d\u044b."
+  },
+  "16": {
+   "id": 16,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_issue8837_share_outlives_delete.py::test_a_delete_refused_after_the_revoke_keeps_the_session_and_a_new_share_works",
+    "tests/test_issue8837_share_outlives_delete.py::test_a_revoke_that_does_not_land_refuses_the_delete_before_removing_anything",
+    "tests/test_issue8837_share_outlives_delete.py::test_delete_revokes_the_resident_token_the_sidecar_lost",
+    "tests/test_issue8837_share_outlives_delete.py::test_cleanup_keeps_a_shared_external_conversation_serving_and_revocable[/api/sessions/cleanup]",
+    "tests/test_issue8837_share_outlives_delete.py::test_cleanup_keeps_a_shared_external_conversation_serving_and_revocable[/api/sessions/cleanup_zero_message]",
+    "tests/test_issue8837_share_outlives_delete.py::test_cleanup_racing_a_share_create_keeps_the_new_link[/api/sessions/cleanup]",
+    "tests/test_issue8837_share_outlives_delete.py::test_cleanup_racing_a_share_create_keeps_the_new_link[/api/sessions/cleanup_zero_message]"
+   ],
+   "detail": "\u0421\u043a\u0440\u044b\u0442\u044b\u0435 \u0442\u0440\u0435\u0431\u043e\u0432\u0430\u043d\u0438\u044f \u043e\u0445\u0432\u0430\u0442\u044b\u0432\u0430\u044e\u0442 \u043e\u0431\u0435 \u043e\u0447\u0438\u0441\u0442\u043a\u0438 \u0438 \u0438\u0445 \u0433\u043e\u043d\u043a\u0443 \u0441 \u043f\u0443\u0431\u043b\u0438\u043a\u0430\u0446\u0438\u0435\u0439, \u043e\u0442\u0437\u044b\u0432 \u0442\u043e\u043a\u0435\u043d\u0430 \u0438\u0437 \u043f\u0430\u043c\u044f\u0442\u0438, \u0442\u043e\u0447\u043d\u044b\u0439 \u043e\u0442\u0432\u0435\u0442 500 share_revoke_failed \u0438 \u043e\u0442\u0437\u044b\u0432 \u0434\u043e \u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e\u0433\u043e \u043e\u0442\u043a\u0430\u0437\u0430 \u0411\u0414."
+  },
+  "17": {
+   "id": 17,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_convo_miner.py::test_hook_mine_exit_watchdog_noop_without_pid_file_env",
+    "tests/test_convo_miner.py::test_hook_mine_exit_watchdog_preserves_nonzero_exit_code_on_atexit_hang",
+    "tests/test_convo_miner.py::test_hook_mine_exit_watchdog_terminates_hung_non_daemon_thread",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[-1]",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[0]",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[bad]",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[inf]",
+    "tests/test_hook_mine_shutdown.py::test_invalid_shutdown_grace_uses_bounded_default[nan]",
+    "tests/test_hook_mine_shutdown.py::test_watchdog_rearming_reaps_old_helper"
+   ],
+   "detail": "\u0422\u0435\u0441\u0442\u044b \u0442\u0440\u0435\u0431\u0443\u044e\u0442 watchdog \u0432 miner, POSIX SIGKILL, MEMPALACE_HOOK_MINE_EXIT_GRACE_SECONDS, _hook_mine_exit_grace_seconds \u0438 \u0434\u0435\u0441\u043a\u0440\u0438\u043f\u0442\u043e\u0440 process/cancel. \u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043f\u0440\u0435\u0434\u043b\u0430\u0433\u0430\u0435\u0442 \u0442\u0430\u0439\u043c\u0435\u0440 \u0432 parser. \u042d\u0442\u0430\u043b\u043e\u043d\u043d\u044b\u0439 \u043f\u0430\u0442\u0447 \u0443\u0441\u0435\u0447\u0451\u043d."
+  },
+  "18": {
+   "id": 18,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/server/request_handlers/test_default_request_handler_v2.py::test_on_message_send_failure_after_work_stamps_failure_time"
+   ],
+   "detail": "\u0413\u043e\u043d\u043a\u0430 \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435 \u043c\u0435\u0442\u0430\u0434\u0430\u043d\u043d\u044b\u0445 \u043e\u043f\u0438\u0441\u0430\u043d\u044b. \u0422\u0435\u0441\u0442 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u0442\u0440\u0435\u0431\u0443\u0435\u0442 timestamp \u043d\u0435 \u0440\u0430\u043d\u044c\u0448\u0435 \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f \u043f\u043e\u0441\u043b\u0435 WORKING \u0432 InMemoryTaskStore."
+  },
+  "19": {
+   "id": 19,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0441\u0442\u0438 \u043f\u043e\u0441\u043b\u0435 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u0438 \u0432\u044b\u0432\u043e\u0434\u0438\u0442\u0441\u044f \u0438\u0437 \u0447\u0438\u0441\u043b\u0430 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043d\u044b\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439. \u0414\u043b\u044f \u0440\u0430\u0441\u0448\u0438\u0440\u044f\u0435\u043c\u043e\u0439 \u043c\u043e\u0449\u043d\u043e\u0441\u0442\u0438 \u043e\u043d\u043e \u0432\u044b\u0440\u0430\u0436\u0430\u0435\u0442\u0441\u044f \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0435\u0439 \u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u043e\u0439 n_mod \u0432 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0438 \u043c\u0438\u043d\u0438\u043c\u0430\u043b\u044c\u043d\u043e\u0433\u043e \u043f\u0440\u043e\u0441\u0442\u043e\u044f."
+  },
+  "20": {
+   "id": 20,
+   "class": "UNFAIR",
+   "blocking": [
+    "graphistry/tests/compute/gfql/cypher/test_backtick_identifiers.py::test_aggregate_output_alias_kinds_keep_independent_sort_order",
+    "graphistry/tests/compute/gfql/cypher/test_backtick_identifiers.py::test_compound_aggregate_order_keys_preserve_output_bindings",
+    "graphistry/tests/compute/gfql/cypher/test_backtick_identifiers.py::test_compound_swapped_aggregate_order_keys_preserve_bindings",
+    "graphistry/tests/compute/gfql/cypher/test_backtick_identifiers.py::test_swapped_aggregate_aliases_across_callers",
+    "graphistry/tests/compute/gfql/cypher/test_backtick_identifiers.py::test_quoted_hidden_order_keys_survive_final_projection"
+   ],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043e\u043f\u0438\u0441\u044b\u0432\u0430\u0435\u0442 \u043f\u0440\u043e\u0431\u0435\u043b \u0432 \u0430\u043b\u0438\u0430\u0441\u0435. \u0411\u043e\u043b\u044c\u0448\u0438\u043d\u0441\u0442\u0432\u043e \u043f\u0440\u043e\u0432\u0435\u0440\u043e\u043a \u0442\u0440\u0435\u0431\u0443\u044e\u0442 \u0440\u0430\u0437\u043b\u0438\u0447\u0430\u0442\u044c \u043f\u0435\u0440\u0435\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u043d\u044b\u0435 \u0430\u043b\u0438\u0430\u0441\u044b \u0438 \u043e\u0434\u043d\u043e\u0438\u043c\u0451\u043d\u043d\u044b\u0435 \u0432\u044b\u0437\u043e\u0432\u044b \u0430\u0433\u0440\u0435\u0433\u0430\u0442\u043e\u0432 \u0432\u043d\u0443\u0442\u0440\u0438 \u0432\u044b\u0440\u0430\u0436\u0435\u043d\u0438\u0439, \u0432\u043a\u043b\u044e\u0447\u0430\u044f UNWIND. \u041e\u0442\u0434\u0435\u043b\u044c\u043d\u043e \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u0435\u0442\u0441\u044f \u0441\u043e\u0440\u0442\u0438\u0440\u043e\u0432\u043a\u0430 \u043f\u043e \u0438\u0441\u043a\u043b\u044e\u0447\u0451\u043d\u043d\u043e\u043c\u0443 \u0438\u0437 RETURN \u0441\u0442\u043e\u043b\u0431\u0446\u0443."
+  },
+  "21": {
+   "id": 21,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 Objective: 3.00e+03 \u0438 \u043f\u0440\u044f\u043c\u043e \u043f\u0440\u0435\u0434\u043b\u0430\u0433\u0430\u0435\u0442 \u043f\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u0442\u044c dual bound \u0432\u043c\u0435\u0441\u0442\u0435 \u0441 objective. \u0424\u043e\u0440\u043c\u0430\u0442 \u043e\u0431\u0435\u0438\u0445 \u0441\u0442\u0440\u043e\u043a \u0443\u0436\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442."
+  },
+  "22": {
+   "id": 22,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043f\u0440\u043e\u043f\u0443\u0441\u043a\u0430\u0442\u044c \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u0435 \u044f\u0447\u0435\u0439\u043a\u0438 \u0438 \u043d\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u043e\u0431\u0430 \u043f\u0443\u0442\u0438 \u043e\u0442\u043a\u0430\u0437\u0430. \u0422\u0435\u0441\u0442\u044b \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u044e\u0442 NaN \u0438 \u043f\u0435\u0440\u0435\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435 \u0432 XML, \u043e\u0433\u0440\u043e\u043c\u043d\u044b\u0439 Decimal \u0438 \u0431\u0435\u0441\u043a\u043e\u043d\u0435\u0447\u043d\u0443\u044e \u0434\u043b\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u0432 IWA."
+  },
+  "23": {
+   "id": 23,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0437\u0430\u0434\u0430\u0451\u0442 \u0438\u0441\u0445\u043e\u0434\u043d\u044b\u0439 PyPI purl \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a \u043a\u043e\u043b\u0435\u0441\u0430, \u0432\u043a\u043b\u044e\u0447\u0430\u044f \u0433\u043b\u043e\u0431\u0430\u043b\u044c\u043d\u044b\u0439 \u0442\u0438\u043f. \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430 \u043f\u043e-\u043f\u0440\u0435\u0436\u043d\u0435\u043c\u0443 \u0441\u043b\u0435\u0434\u0443\u0435\u0442 \u0438\u043c\u0435\u043d\u0438 \u043a\u043e\u043b\u0435\u0441\u0430."
+  },
+  "24": {
+   "id": 24,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043f\u0440\u0435\u0434\u043b\u0430\u0433\u0430\u0435\u0442 \u043f\u043e\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u043a\u0430\u0442\u0430\u043b\u043e\u0433 \u043c\u043e\u0434\u0443\u043b\u044f \u043f\u0435\u0440\u0432\u044b\u043c \u0432 PYTHONPATH. \u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0430\u044f \u0432\u0435\u0442\u043a\u0430 \u043e\u0442\u043a\u0430\u0442\u0430 \u0438\u043c\u043f\u043e\u0440\u0442\u0430 \u043f\u043e\u0434\u0441\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c \u0438\u0441\u0445\u043e\u0434\u043d\u043e\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u043e\u0439, \u0432\u043a\u043b\u044e\u0447\u0430\u044f \u0435\u0451 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0438\u0435."
+  },
+  "25": {
+   "id": 25,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_issue9000_sibling_paths.py::test_btw_answer_never_deletes_the_swapped_in_session",
+    "tests/test_issue9000_sibling_paths.py::test_cwd_sync_target_skips_a_session_swapped_for_another",
+    "tests/test_issue9000_sibling_paths.py::test_sync_chat_refuses_a_session_swapped_for_another[True]"
+   ],
+   "detail": "\u0417\u0430\u0434\u0430\u043d\u0438\u0435 \u043f\u0435\u0440\u0435\u0447\u0438\u0441\u043b\u044f\u0435\u0442 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430, \u043f\u0430\u0443\u0437\u044b \u0438 \u0441\u043d\u0438\u043c\u043a\u0430. \u0422\u0435\u0441\u0442\u044b \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u044e\u0442 \u0434\u0440\u0443\u0433\u0438\u0435 \u043f\u0443\u0442\u0438: \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u043f\u043e\u0441\u043b\u0435 /btw, \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043d\u0438\u0435 \u0446\u0435\u043b\u0438 cwd \u0438 \u043e\u0442\u043a\u0430\u0437 \u0441\u0438\u043d\u0445\u0440\u043e\u043d\u043d\u043e\u0433\u043e /api/chat \u0441 404 \u0434\u043e \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u044f \u0430\u0433\u0435\u043d\u0442\u0430."
+  },
+  "26": {
+   "id": 26,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_validate_changelog.py::test_accepts_entry_under_unreleased",
+    "tests/test_validate_changelog.py::test_accepts_link_definition_updates",
+    "tests/test_validate_changelog.py::test_allows_explicit_backfill_override",
+    "tests/test_validate_changelog.py::test_allows_typo_fix_in_historical_section",
+    "tests/test_validate_changelog.py::test_does_not_exempt_new_entry_matching_unreleased_text",
+    "tests/test_validate_changelog.py::test_handles_added_line_starting_with_double_plus",
+    "tests/test_validate_changelog.py::test_main_uses_base_and_head_revisions",
+    "tests/test_validate_changelog.py::test_rejects_colored_or_unparsed_diff",
+    "tests/test_validate_changelog.py::test_rejects_new_entry_under_versioned_section",
+    "tests/test_validate_changelog.py::test_reproduces_release_race"
+   ],
+   "detail": "\u0412\u0441\u0435 \u0442\u0435\u0441\u0442\u044b \u0442\u0440\u0435\u0431\u0443\u044e\u0442 \u043d\u043e\u0432\u044b\u0439 scripts/validate_changelog.py \u0438 validate_changelog_diff. \u041e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u0435 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 \u0444\u0438\u043a\u0441\u0438\u0440\u0443\u044e\u0442 allow_backfill, \u0442\u043e\u0447\u043d\u044b\u0439 \u0442\u0435\u043a\u0441\u0442 \u0434\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u043a, \u043e\u0442\u043a\u0430\u0437 \u043d\u0430 \u0446\u0432\u0435\u0442\u043d\u043e\u043c diff \u0438 \u0434\u043e\u0441\u043b\u043e\u0432\u043d\u0443\u044e \u043f\u043e\u0441\u043b\u0435\u0434\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434 Git."
+  },
+  "27": {
+   "id": 27,
+   "class": "UNFAIR",
+   "blocking": [
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_allows_antiparallel_identical_attributes",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_avoids_cross_frame_original_identifier",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_avoids_cross_frame_returned_identifier",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_avoids_reserved_row_identifiers",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_declines_antiparallel_attribute_conflicts",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_declines_parallel_edges",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_declines_returned_attribute_collision",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_keeps_graph_return_without_attrs",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_preserves_null_attrs",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_preserves_rows_and_attrs_across_directions",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_restores_cross_frame_reserved_return_attrs",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_restores_graph_return_attrs",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_returns_edges_without_attributes",
+    "graphistry/tests/plugins/test_cugraph.py::Test_restore_graph_edge_attrs::test_selects_orientation_for_opposite_edges"
+   ],
+   "detail": "\u0412\u0441\u0435 \u0442\u0435\u0441\u0442\u044b \u0438\u043c\u043f\u043e\u0440\u0442\u0438\u0440\u0443\u044e\u0442 \u043d\u043e\u0432\u044b\u0435 _restore_graph_edge_attrs \u0438 _restore_graph_return_edge_attrs. \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u0437\u0430\u0444\u0438\u043a\u0441\u0438\u0440\u043e\u0432\u0430\u043d\u044b \u0438\u0434\u0435\u043d\u0442\u0438\u0447\u043d\u043e\u0441\u0442\u044c \u043e\u0431\u044a\u0435\u043a\u0442\u0430 \u0438 \u0442\u0435\u043a\u0441\u0442\u044b \u043e\u0448\u0438\u0431\u043e\u043a \u0434\u043b\u044f \u043f\u0430\u0440\u0430\u043b\u043b\u0435\u043b\u044c\u043d\u044b\u0445, \u0432\u0441\u0442\u0440\u0435\u0447\u043d\u044b\u0445 \u0440\u0451\u0431\u0435\u0440 \u0438 \u043f\u0435\u0440\u0435\u0441\u0435\u0447\u0435\u043d\u0438\u044f \u0430\u0442\u0440\u0438\u0431\u0443\u0442\u043e\u0432."
+  },
+  "28": {
+   "id": 28,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c None \u0434\u043b\u044f nullable \u0438 \u044f\u0432\u043d\u043e \u043e\u043f\u0446\u0438\u043e\u043d\u0430\u043b\u044c\u043d\u044b\u0445 \u0432\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0441\u0432\u044f\u0437\u0435\u0439. \u0412\u0435\u0442\u043a\u0430 null \u0432 JSON Schema \u0441\u043b\u0435\u0434\u0443\u0435\u0442 \u0438\u0437 Optional."
+  },
+  "29": {
+   "id": 29,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_SQ_explicit_VR",
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_SQ_implicit_VR",
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_non_SQ_explicit_VR",
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_non_SQ_implicit_VR",
+    "tests/test_filereader.py::TestReader::test_duplicate_elem_read_length"
+   ],
+   "detail": "\u0412\u0441\u0435 \u043f\u044f\u0442\u044c \u0442\u0435\u0441\u0442\u043e\u0432 \u0442\u0440\u0435\u0431\u0443\u044e\u0442 UserWarning \u0438 \u0434\u043e\u0441\u043b\u043e\u0432\u043d\u044b\u0439 \u0444\u0440\u0430\u0433\u043c\u0435\u043d\u0442 \u043b\u043e\u0433\u0430 \u00abfound multiple times at the same level of the dataset\u00bb, \u0432\u043a\u043b\u044e\u0447\u0430\u044f \u0444\u043e\u0440\u043c\u0443\u043b\u0438\u0440\u043e\u0432\u043a\u0443 \u043e\u0431\u043e\u0438\u0445 \u0441\u043c\u0435\u0449\u0435\u043d\u0438\u0439."
+  },
+  "30": {
+   "id": 30,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0422\u0430 \u0436\u0435 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 var.data \u043c\u0430\u0442\u0435\u0440\u0438\u0430\u043b\u0438\u0437\u0443\u0435\u0442 \u043c\u0430\u0441\u0441\u0438\u0432 \u0432 nbytes \u0438 nrefs. \u0418\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u044d\u0442\u0438\u0445 \u0432\u044b\u0437\u043e\u0432\u043e\u0432 \u0441\u043b\u0435\u0434\u0443\u0435\u0442 \u0438\u0437 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u043e\u0439 \u043f\u0440\u0438\u0447\u0438\u043d\u044b. \u0422\u0435\u0441\u0442 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u043d\u043e\u043b\u044c \u0447\u0442\u0435\u043d\u0438\u0439 \u0434\u043e \u0441\u0440\u0435\u0437\u0430 \u0438 \u043e\u0434\u043d\u043e \u043f\u043e\u0441\u043b\u0435."
+  },
+  "31": {
+   "id": 31,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043d\u0430\u0437\u044b\u0432\u0430\u0435\u0442 bound_symbols \u0438 \u043e\u043f\u0438\u0441\u044b\u0432\u0430\u0435\u0442 \u0441\u0432\u044f\u0437\u0430\u043d\u043d\u044b\u0435 \u0438 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0435 \u0441\u0438\u043c\u0432\u043e\u043b\u044b. \u041f\u043e\u0432\u0435\u0434\u0435\u043d\u0438\u0435 dummy-\u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432 \u0432\u044b\u0432\u043e\u0434\u0438\u0442\u0441\u044f \u0438\u0437 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0435\u0439 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0438 \u0441\u0432\u044f\u0437\u0430\u043d\u043d\u044b\u0445 \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432."
+  },
+  "32": {
+   "id": 32,
+   "class": "PARTIAL",
+   "blocking": [
+    "test/test_constraint.py::test_constraint_from_dataset_alternative_sign"
+   ],
+   "detail": "\u041e\u0431\u0449\u0430\u044f \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u0437\u043d\u0430\u043a\u043e\u0432 \u043f\u043e\u043a\u0440\u044b\u0432\u0430\u0435\u0442 ==, < \u0438 >. \u0422\u0435\u0441\u0442 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043d\u043e\u0440\u043c\u0430\u043b\u0438\u0437\u043e\u0432\u0430\u0442\u044c \u0443\u0436\u0435 \u0437\u0430\u043f\u0438\u0441\u0430\u043d\u043d\u044b\u0439 \u0437\u043d\u0430\u043a \u043f\u0440\u0438 \u043d\u0435\u043f\u043e\u0441\u0440\u0435\u0434\u0441\u0442\u0432\u0435\u043d\u043d\u043e\u0439 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0435 \u0447\u0435\u0440\u0435\u0437 Constraint.from_dataset."
+  },
+  "33": {
+   "id": 33,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_argfile.py::test_argfile_after_end_of_options_delimiter_not_expanded",
+    "tests/test_argfile.py::test_argfile_bare_prefix_is_literal",
+    "tests/test_argfile.py::test_argfile_call_level_end_of_options_delimiter",
+    "tests/test_argfile.py::test_argfile_call_level_end_of_options_delimiter_interactive_shell",
+    "tests/test_argfile.py::test_argfile_delimiter_inside_file_stops_expansion",
+    "tests/test_argfile.py::test_argfile_expands_command_and_options",
+    "tests/test_argfile.py::test_argfile_expands_in_place",
+    "tests/test_argfile.py::test_argfile_help_flag_in_file",
+    "tests/test_argfile.py::test_argfile_interactive_shell",
+    "tests/test_argfile.py::test_argfile_line_is_one_argument",
+    "tests/test_argfile.py::test_argfile_meta_app",
+    "tests/test_argfile.py::test_argfile_missing_file_exits",
+    "tests/test_argfile.py::test_argfile_missing_file_prints_error",
+    "tests/test_argfile.py::test_argfile_multi_character_prefix",
+    "tests/test_argfile.py::test_argfile_nested",
+    "tests/test_argfile.py::test_argfile_not_expanded_during_completion",
+    "tests/test_argfile.py::test_argfile_parse_args",
+    "tests/test_argfile.py::test_argfile_parse_known_args",
+    "tests/test_argfile.py::test_argfile_parse_known_args_missing_file_raises",
+    "tests/test_argfile.py::test_argfile_prefix_on_sub_app_has_no_effect",
+    "tests/test_argfile.py::test_argfile_prefix_on_sub_app_has_no_effect_interactive_shell",
+    "tests/test_argfile.py::test_argfile_recursive_reference_raises",
+    "tests/test_argfile.py::test_argfile_run_async"
+   ],
+   "detail": "\u0412\u0441\u0435 \u0442\u0435\u0441\u0442\u044b \u0442\u0440\u0435\u0431\u0443\u044e\u0442 argfile_prefix \u0432\u043c\u0435\u0441\u0442\u043e \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u043d\u043e\u0433\u043e fromfile_prefix_chars. \u041c\u043d\u043e\u0433\u043e\u0441\u0438\u043c\u0432\u043e\u043b\u044c\u043d\u044b\u0439 \u043f\u0440\u0435\u0444\u0438\u043a\u0441 \u0442\u0440\u0430\u043a\u0442\u0443\u0435\u0442\u0441\u044f \u0446\u0435\u043b\u0438\u043a\u043e\u043c, \u0445\u043e\u0442\u044f \u043f\u0440\u0438\u043c\u0435\u0440 \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u0435\u0442 \u043f\u0435\u0440\u0432\u044b\u0439 \u0441\u0438\u043c\u0432\u043e\u043b. \u0422\u0435\u043a\u0441\u0442\u044b \u043e\u0448\u0438\u0431\u043e\u043a \u0442\u043e\u0436\u0435 \u0437\u0430\u0444\u0438\u043a\u0441\u0438\u0440\u043e\u0432\u0430\u043d\u044b."
+  },
+  "34": {
+   "id": 34,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0439 \u0430\u043b\u0438\u0430\u0441 \u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0443\u044e \u043e\u0448\u0438\u0431\u043a\u0443 \u0434\u043b\u044f \u043e\u0431\u044b\u0447\u043d\u043e\u0433\u043e \u0430\u043b\u0438\u0430\u0441\u0430. \u0420\u0435\u043a\u0443\u0440\u0441\u0438\u0432\u043d\u043e\u0435 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u0438\u0435 \u0438 \u043e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0435 \u0441\u043b\u0435\u0434\u0443\u044e\u0442 \u0438\u0437 \u044d\u0442\u043e\u0433\u043e \u043f\u0440\u0438\u043c\u0435\u0440\u0430."
+  },
+  "35": {
+   "id": 35,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0422\u0435\u0441\u0442\u044b \u0442\u0440\u0435\u0431\u0443\u044e\u0442 \u044d\u043a\u0432\u0438\u0432\u0430\u043b\u0435\u043d\u0442\u043d\u043e\u0441\u0442\u044c \u0441 \u0442\u043e\u0447\u043d\u043e\u0441\u0442\u044c\u044e \u0434\u043e \u0433\u043b\u043e\u0431\u0430\u043b\u044c\u043d\u043e\u0439 \u0444\u0430\u0437\u044b, \u0446\u0435\u043b\u0435\u0432\u044b\u0435 \u043d\u0430\u0431\u043e\u0440\u044b \u0433\u0435\u0439\u0442\u043e\u0432, \u043f\u0440\u0430\u0432\u0438\u043b\u044c\u043d\u044b\u0439 \u043f\u043e\u0440\u044f\u0434\u043e\u043a \u043e\u043f\u0435\u0440\u0430\u043d\u0434\u043e\u0432 ccx, \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u0435 id \u0438 \u0440\u0430\u0437\u043b\u043e\u0436\u0435\u043d\u0438\u0435 c3x."
+  },
+  "36": {
+   "id": 36,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/table/test_manage_snapshots.py::test_remove_ref_rejects_main_missing_and_wrong_kind"
+   ],
+   "detail": "\u0414\u043b\u044f \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f \u0442\u0435\u0441\u0442 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0442\u043e\u0447\u043d\u044b\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f \u00abCannot remove main branch\u00bb, \u00abBranch/Tag does not exist\u00bb \u0438 \u00abRef \u2026 is a \u2026, not a \u2026\u00bb."
+  },
+  "37": {
+   "id": 37,
+   "class": "UNFAIR",
+   "blocking": [
+    "darts/tests/test_timeseries.py::TestTimeSeries::test_values_stochastic_warning"
+   ],
+   "detail": "\u0415\u0434\u0438\u043d\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0439 \u0442\u0435\u0441\u0442 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0437\u0430\u043f\u0438\u0441\u044c \u0432 \u043b\u043e\u0433 \u0441 \u0442\u043e\u0447\u043d\u043e\u0439 \u0444\u0440\u0430\u0437\u043e\u0439 stochastic series only extracts values of a single sample. \u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0434\u043e\u043f\u0443\u0441\u043a\u0430\u0435\u0442 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440 \u0430\u0433\u0440\u0435\u0433\u0430\u0446\u0438\u0438."
+  },
+  "38": {
+   "id": 38,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasis::test_advanced_nesting",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_ambiguous_closer_pairs_with_partially_consumed_opener",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_ambiguous_closer_rejected_by_original_run_length",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_rule_of_3_skipped_opener_removed",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_stray_token_before_cached_region",
+    "tests/test_syntax/inline/test_emphasis.py::TestEmphasisRuleOfThree::test_unused_tokens_in_returned_element_tail"
+   ],
+   "detail": "\u0422\u0435\u0441\u0442\u044b \u0444\u0438\u043a\u0441\u0438\u0440\u0443\u044e\u0442 \u043d\u043e\u0432\u0443\u044e HTML-\u0432\u043b\u043e\u0436\u0435\u043d\u043d\u043e\u0441\u0442\u044c \u0434\u043b\u044f \u043d\u0435\u043e\u0434\u043d\u043e\u0437\u043d\u0430\u0447\u043d\u044b\u0445 delimiters, \u0445\u0432\u043e\u0441\u0442\u043e\u0432 \u0438 \u0438\u0441\u0445\u043e\u0434\u043d\u043e\u0433\u043e \u043f\u0440\u0438\u043c\u0435\u0440\u0430. \u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0441\u043e\u043e\u0431\u0449\u0430\u0435\u0442 \u043e \u043f\u043e\u0442\u0435\u0440\u0435 \u0442\u0435\u043a\u0441\u0442\u0430 \u0438 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0434\u0440\u0443\u0433\u0443\u044e \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0443 \u0432 \u0441\u0442\u0430\u0440\u043e\u0439 \u0432\u0435\u0440\u0441\u0438\u0438."
+  },
+  "39": {
+   "id": 39,
+   "class": "PARTIAL",
+   "blocking": [
+    "test/tools/test_searchable_toolset.py::TestSearchableToolsetBM25Mode::test_search_tools_matches_word_inside_tool_name[getWeather-weather]"
+   ],
+   "detail": "\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0437\u0430\u043f\u0440\u0430\u0448\u0438\u0432\u0430\u0435\u0442 \u0440\u0430\u0437\u0431\u0438\u0435\u043d\u0438\u0435 snake_case \u043f\u043e \u043f\u043e\u0434\u0447\u0451\u0440\u043a\u0438\u0432\u0430\u043d\u0438\u044e. \u041e\u0434\u0438\u043d \u0442\u0435\u0441\u0442 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043d\u0430\u0445\u043e\u0434\u0438\u0442\u044c getWeather \u043f\u043e \u0441\u043b\u043e\u0432\u0443 weather, \u043a\u043e\u0442\u043e\u0440\u043e\u0435 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 \u0432 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0438 \u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442\u0430."
+  },
+  "40": {
+   "id": 40,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0430\u044f \u043a\u043e\u0434\u0438\u0440\u043e\u0432\u043a\u0430 \u0447\u0435\u0440\u0435\u0437 \u0434\u0435\u0441\u044f\u0442\u0438\u0447\u043d\u044b\u0435 \u043a\u043e\u0434\u044b \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432 \u0438 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u0430\u044f \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u043a\u0430 \u0441\u0442\u0440\u043e\u0447\u043d\u044b\u0445 \u0431\u0443\u043a\u0432 \u043f\u043e\u0434\u0441\u043a\u0430\u0437\u044b\u0432\u0430\u044e\u0442 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0443 \u0446\u0438\u0444\u0440 \u0438 \u0434\u0432\u0443\u0445\u0441\u0438\u043c\u0432\u043e\u043b\u044c\u043d\u044b\u0445 \u043c\u0435\u0442\u043e\u043a. \u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u043d\u0435\u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u044b\u0445 \u043a\u043e\u0434\u043e\u0432 \u0441\u043b\u0435\u0434\u0443\u0435\u0442 \u0438\u0437 \u043d\u0430\u0431\u043e\u0440\u0430 \u0440\u0430\u0437\u0440\u0435\u0448\u0451\u043d\u043d\u044b\u0445 \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432."
+  },
+  "41": {
+   "id": 41,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043e\u0431\u044a\u044f\u0441\u043d\u044f\u0435\u0442 \u043f\u0440\u0435\u0434\u0443\u043f\u0440\u0435\u0436\u0434\u0435\u043d\u0438\u0435 \u043e\u0442 \u043a\u043b\u044e\u0447\u0435\u0439 \u0441\u043e \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u043c None \u0438 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043f\u0435\u0440\u0435\u0434\u0430\u0432\u0430\u0442\u044c \u043f\u0440\u0438\u043d\u0443\u0434\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435 \u0442\u0435\u043a\u0441\u0442\u043e\u0432\u044b\u0435 \u0442\u0438\u043f\u044b \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u043f\u0440\u0438\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0445 \u0441\u0442\u043e\u043b\u0431\u0446\u043e\u0432."
+  },
+  "42": {
+   "id": 42,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/unit/plugins/test_install_lock.py::TestEnvironmentIdentity::test_state_root_reports_a_dangling_coordination_directory"
+   ],
+   "detail": "\u041a\u043e\u0434 \u043e\u0448\u0438\u0431\u043a\u0438 \u0443\u0436\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442, \u0430 \u0443\u0441\u043b\u043e\u0432\u0438\u0435 \u043f\u0440\u043e\u0441\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u0443\u044e \u043f\u0435\u0440\u0435\u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u044f. \u0422\u0435\u0441\u0442 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e \u0434\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0431\u0438\u0442\u0443\u044e \u0441\u0441\u044b\u043b\u043a\u0443 \u0438 \u0432\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0441\u043b\u043e\u0432\u043e dangling."
+  },
+  "43": {
+   "id": 43,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043d\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0448\u0435\u0441\u0442\u044c \u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u044b\u0445 httpx2. \u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 \u043e\u0448\u0438\u0431\u043e\u043a \u043f\u0443\u0442\u0438 \u043a \u0441\u0435\u0440\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u0443 \u0438 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a \u043f\u0440\u043e\u043a\u0441\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0442 \u0438\u0437 \u0437\u0430\u043f\u0440\u043e\u0448\u0435\u043d\u043d\u043e\u0439 \u0434\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u043a\u0438."
+  },
+  "44": {
+   "id": 44,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0430\u044f \u043c\u0438\u0433\u0440\u0430\u0446\u0438\u044f \u043f\u043e\u0434\u0441\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0443\u0441\u0442\u0430\u0440\u0435\u0432\u0448\u0438\u0439 \u043a\u044d\u0448, \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0430\u043a\u0442\u0438\u0432\u043d\u044b\u0439 \u0438 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c \u043f\u0440\u0438 \u043e\u0448\u0438\u0431\u043a\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f. \u0427\u0442\u0435\u043d\u0438\u0435 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u043e\u0432 executor.map \u043f\u0435\u0440\u0435\u0434\u0430\u0451\u0442 \u0438\u0441\u0445\u043e\u0434\u043d\u0443\u044e \u043e\u0448\u0438\u0431\u043a\u0443 \u0432\u044b\u0437\u044b\u0432\u0430\u044e\u0449\u0435\u043c\u0443 \u043a\u043e\u0434\u0443."
+  },
+  "45": {
+   "id": 45,
+   "class": "UNFAIR",
+   "blocking": [
+    "toqito/state_metrics/tests/test_measured_relative_entropy.py::test_measured_relative_entropy_commuting_singular_sigma",
+    "toqito/state_metrics/tests/test_measured_relative_entropy.py::test_measured_relative_entropy_pure_against_maximally_mixed",
+    "toqito/state_metrics/tests/test_measured_relative_entropy.py::test_measured_relative_entropy_singular_sigma_on_support",
+    "toqito/state_metrics/tests/test_measured_relative_entropy.py::test_measured_relative_entropy_support_not_contained"
+   ],
+   "detail": "\u0422\u0435\u0441\u0442\u044b \u0442\u0440\u0435\u0431\u0443\u044e\u0442 \u043a\u043e\u043d\u0435\u0447\u043d\u044b\u0445 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0439 \u0434\u043b\u044f \u0442\u0440\u0451\u0445 \u0441\u0438\u043d\u0433\u0443\u043b\u044f\u0440\u043d\u044b\u0445 \u0441\u043b\u0443\u0447\u0430\u0435\u0432, \u0433\u0434\u0435 \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d ValueError. \u0414\u043b\u044f \u043d\u0435\u0441\u043e\u0432\u043f\u0430\u0434\u0430\u044e\u0449\u0435\u0439 \u043e\u043f\u043e\u0440\u044b \u0442\u0440\u0435\u0431\u0443\u044e\u0442 ValueError \u0441 \u0437\u0430\u0434\u0430\u043d\u043d\u044b\u043c \u0442\u0435\u043a\u0441\u0442\u043e\u043c \u0432\u043c\u0435\u0441\u0442\u043e \u044f\u0432\u043d\u043e \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u043d\u043e\u0433\u043e np.inf."
+  },
+  "46": {
+   "id": 46,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0437\u0430\u0434\u0430\u0451\u0442 \u043f\u043e\u0440\u044f\u0434\u043e\u043a \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f, \u0437\u0430\u043c\u0435\u043d\u0443 chunk-\u0441\u043b\u043e\u0432\u0430\u0440\u044f \u0446\u0435\u043b\u0438\u043a\u043e\u043c \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435 None \u0438 False. \u0414\u0435\u0439\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0435 defaults \u0438 \u0438\u0442\u043e\u0433\u043e\u0432\u044b\u0435 \u043e\u043f\u0446\u0438\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u044e\u0442\u0441\u044f \u0443 reader \u0438 source."
+  },
+  "47": {
+   "id": 47,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_translator/test_member_placements.py::test_a_placement_inside_a_struct_held_by_a_constant_buffer_is_refused[directx]",
+    "tests/test_translator/test_member_placements.py::test_a_placement_inside_a_struct_held_by_a_constant_buffer_is_refused[opengl]",
+    "tests/test_translator/test_member_placements.py::test_a_placement_inside_a_struct_held_by_a_constant_buffer_is_refused[vulkan]"
+   ],
+   "detail": "\u0412\u0441\u0435 \u0442\u0440\u0438 \u0442\u0435\u0441\u0442\u0430 \u0442\u0440\u0435\u0431\u0443\u044e\u0442 MemberPlacementError \u0441 \u0443\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435\u043c constant buffer 'C'. \u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0442\u0430\u043a\u0436\u0435 \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442 \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u043e\u0435 \u0440\u0430\u0437\u043c\u0435\u0449\u0435\u043d\u0438\u0435 \u043f\u043e \u0441\u043c\u0435\u0449\u0435\u043d\u0438\u044e 32 \u0438 \u043f\u0440\u044f\u043c\u043e \u043f\u0440\u0435\u0434\u043b\u0430\u0433\u0430\u0435\u0442 \u0435\u0433\u043e \u0434\u043b\u044f SPIR-V."
+  },
+  "48": {
+   "id": 48,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 lineage \u0442\u0430\u0431\u043b\u0438\u0446 \u0438 \u0441\u0442\u043e\u043b\u0431\u0446\u043e\u0432 \u0434\u043b\u044f INSERT ALL/FIRST. \u041f\u043e\u0437\u0438\u0446\u0438\u043e\u043d\u043d\u043e\u0435 \u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0435 VALUES \u0438 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430 CTE, \u0437\u0432\u0451\u0437\u0434\u043e\u0447\u0435\u043a \u0438 NULL \u0432\u044b\u0432\u043e\u0434\u0438\u043c\u044b \u0438\u0437 SQL \u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0435\u0439 \u043c\u043e\u0434\u0435\u043b\u0438."
+  },
+  "49": {
+   "id": 49,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0443\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u043f\u0440\u043e\u043f\u0443\u0449\u0435\u043d\u043d\u044b\u0439 finally \u043f\u0440\u0438 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u0438 lifespan \u0438 \u0442\u0440\u0435\u0431\u0443\u0435\u0442, \u0447\u0442\u043e\u0431\u044b \u043f\u043e\u0441\u043b\u0435 \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f \u0438\u0437 user_simulation \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u043b\u0430\u0441\u044c \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0430\u044f \u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044f."
+  },
+  "50": {
+   "id": 50,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_query_schema.py::test_optional_query_schema_openapi_params"
+   ],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043e\u043f\u0438\u0441\u044b\u0432\u0430\u0435\u0442 \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e \u043f\u0440\u0438 \u0437\u0430\u043f\u0440\u043e\u0441\u0435. \u0422\u0435\u0441\u0442 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0440\u0430\u0437\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u0442\u044c Optional-\u0441\u0445\u0435\u043c\u0443 \u0432 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b OpenAPI \u0441 \u0437\u0430\u0434\u0430\u043d\u043d\u044b\u043c\u0438 \u0444\u043b\u0430\u0433\u0430\u043c\u0438 required."
+  },
+  "51": {
+   "id": 51,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043f\u0435\u0440\u0435\u0447\u0438\u0441\u043b\u044f\u0435\u0442 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u044b ANSI-C quoting \u0438 \u043e\u0436\u0438\u0434\u0430\u0435\u043c\u0443\u044e \u0438\u043d\u0442\u0435\u0440\u043f\u0440\u0435\u0442\u0430\u0446\u0438\u044e \u0431\u0430\u0439\u0442\u043e\u0432. \u0422\u0435\u0441\u0442\u044b \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u044e\u0442 \u044d\u0442\u0438 \u043f\u0440\u0430\u0432\u0438\u043b\u0430 \u043d\u0430 \u0440\u0430\u0437\u043d\u044b\u0445 \u043f\u043e\u0441\u043b\u0435\u0434\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044f\u0445."
+  },
+  "52": {
+   "id": 52,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/sql/table/test_path_dialect_specific.py::test_snowflake_copy_into_location[tab1-'s3://mybucket/unload/'-s3://mybucket/unload/]",
+    "tests/sql/table/test_path_dialect_specific.py::test_snowflake_copy_into_location[tab1-@mystage/unload/-@mystage/unload/]"
+   ],
+   "detail": "\u0414\u0432\u0430 \u0442\u0435\u0441\u0442\u0430 \u0442\u0440\u0435\u0431\u0443\u044e\u0442 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u043a\u0443 \u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0438 \u043d\u0435\u043f\u043e\u0441\u0440\u0435\u0434\u0441\u0442\u0432\u0435\u043d\u043d\u043e \u0438\u0437 \u0442\u0430\u0431\u043b\u0438\u0446\u044b \u0432 S3 \u0438 stage. \u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0437\u0430\u0434\u0430\u0451\u0442 \u043e\u0436\u0438\u0434\u0430\u0435\u043c\u043e\u0435 \u043f\u043e\u0432\u0435\u0434\u0435\u043d\u0438\u0435 \u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0438 \u0438\u0437 \u043f\u043e\u0434\u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432 \u0438 \u043f\u0440\u0438\u0432\u043e\u0434\u0438\u0442 \u043f\u0440\u044f\u043c\u0443\u044e \u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0443 \u043a\u0430\u043a \u0441\u0440\u0430\u0432\u043d\u0435\u043d\u0438\u0435."
+  },
+  "53": {
+   "id": 53,
+   "class": "UNFAIR",
+   "blocking": [
+    "tests/test_mutate_diff.py::TestEngineFailure::test_a_childs_traceback_in_the_engines_message_names_the_childs_death",
+    "tests/test_mutate_diff.py::TestEngineFailure::test_an_exception_that_ends_the_log_from_the_engines_frame_is_the_engines",
+    "tests/test_mutate_diff.py::TestEngineFailure::test_an_exception_whose_message_spans_lines_is_read_whole",
+    "tests/test_mutate_diff.py::TestEngineFailure::test_the_last_traceback_decides_not_an_earlier_one_of_its_text"
+   ],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043d\u0435 \u0437\u0430\u0434\u0430\u0451\u0442 \u043f\u0440\u0430\u0432\u0438\u043b\u0430 \u0440\u0430\u0437\u0431\u043e\u0440\u0430 \u0436\u0443\u0440\u043d\u0430\u043b\u0430. \u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 \u0442\u0440\u0435\u0431\u0443\u044e\u0442 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 traceback, \u0440\u0430\u0437\u043b\u0438\u0447\u0435\u043d\u0438\u0435 \u043a\u0430\u0434\u0440\u043e\u0432 \u0434\u0432\u0438\u0436\u043a\u0430 \u0438 \u0442\u0435\u0441\u0442\u0430, \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0443 \u043c\u043d\u043e\u0433\u043e\u0441\u0442\u0440\u043e\u0447\u043d\u043e\u0433\u043e \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f \u0438 \u0432\u044b\u0431\u043e\u0440 \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f \u0434\u043e\u0447\u0435\u0440\u043d\u0435\u0433\u043e \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430."
+  },
+  "54": {
+   "id": 54,
+   "class": "PARTIAL",
+   "blocking": [
+    "gammapy/astro/darkmatter/tests/test_utils.py::test_integrate_los_zero_impact_center"
+   ],
+   "detail": "\u0414\u043b\u0438\u043d\u0430 \u043b\u0443\u0447\u0430 \u043a \u0430\u043d\u0442\u0438\u0446\u0435\u043d\u0442\u0440\u0443 \u0432\u044b\u0432\u043e\u0434\u0438\u0442\u0441\u044f \u0438\u0437 \u0433\u0435\u043e\u043c\u0435\u0442\u0440\u0438\u0438. \u041f\u0440\u044f\u043c\u043e\u0439 \u0432\u044b\u0437\u043e\u0432 \u0434\u043b\u044f \u0446\u0435\u043d\u0442\u0440\u0430\u043b\u044c\u043d\u043e\u0433\u043e \u043b\u0443\u0447\u0430 \u0434\u043e\u043b\u0436\u0435\u043d \u0432\u044b\u0431\u0440\u043e\u0441\u0438\u0442\u044c ValueError \u0441 \u043a\u043e\u043d\u043a\u0440\u0435\u0442\u043d\u043e\u0439 \u0444\u0440\u0430\u0437\u043e\u0439 central-pixel integration, \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0449\u0435\u0439 \u0432 \u0437\u0430\u0434\u0430\u043d\u0438\u0438."
+  },
+  "55": {
+   "id": 55,
+   "class": "UNFAIR",
+   "blocking": [
+    "src/psyclone/tests/psyir/backend/fortran_routine_test.py::test_fw_routine_bind_c[function",
+    "src/psyclone/tests/psyir/backend/fortran_routine_test.py::test_fw_routine_bind_c[subroutine",
+    "src/psyclone/tests/psyir/frontend/fparser2_subroutine_handler_test.py::test_routine_bind_c[function",
+    "src/psyclone/tests/psyir/frontend/fparser2_subroutine_handler_test.py::test_routine_bind_c[subroutine",
+    "src/psyclone/tests/psyir/nodes/routine_test.py::test_routine_equality",
+    "src/psyclone/tests/psyir/nodes/routine_test.py::test_routine_properties"
+   ],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0442\u044c BIND(C). \u0412\u0441\u0435 \u0442\u0435\u0441\u0442\u044b \u0437\u0430\u0432\u0438\u0441\u044f\u0442 \u043e\u0442 \u043d\u043e\u0432\u043e\u0433\u043e \u0441\u0432\u043e\u0439\u0441\u0442\u0432\u0430 Routine.bind_c. \u0421\u043a\u0440\u044b\u0442\u044b\u0439 \u043a\u043e\u043d\u0442\u0440\u0430\u043a\u0442 \u0440\u0430\u0437\u043b\u0438\u0447\u0430\u0435\u0442 None, \u043f\u0443\u0441\u0442\u0443\u044e \u0441\u0442\u0440\u043e\u043a\u0443 \u0438 \u043c\u0435\u0442\u043a\u0443 \u0441 \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u044b\u043c\u0438 \u043a\u0430\u0432\u044b\u0447\u043a\u0430\u043c\u0438."
+  },
+  "56": {
+   "id": 56,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_base_publisher.py::test_publish_error_keeps_additional_info_of_post_publish_failure"
+   ],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043f\u0440\u043e\u0441\u0438\u0442 \u043d\u0430\u0437\u0432\u0430\u0442\u044c \u043e\u0431\u0435 \u043e\u0448\u0438\u0431\u043a\u0438. \u0422\u0435\u0441\u0442 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0434\u043e\u043f\u0438\u0441\u0430\u0442\u044c \u0434\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u043a\u0443 \u0445\u0443\u043a\u0430 \u0432 additional_info \u043f\u043e\u0434 \u0442\u043e\u0447\u043d\u044b\u043c \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u043e\u043c post_publish_all, \u0445\u043e\u0442\u044f \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u0434 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u043f\u043e\u043b\u0435 \u0431\u0435\u0437 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0439."
+  },
+  "57": {
+   "id": 57,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0415\u0434\u0438\u043d\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0439 \u043e\u0446\u0435\u043d\u0438\u0432\u0430\u0435\u043c\u044b\u0439 \u0442\u0435\u0441\u0442 \u0434\u043e\u0441\u043b\u043e\u0432\u043d\u043e \u0432\u043e\u0441\u043f\u0440\u043e\u0438\u0437\u0432\u043e\u0434\u0438\u0442 \u0432\u0445\u043e\u0434 \u0441 \u0431\u043e\u043b\u0435\u0435 \u0434\u043b\u0438\u043d\u043d\u043e\u0439 \u0437\u0430\u043a\u0440\u044b\u0432\u0430\u044e\u0449\u0435\u0439 \u0441\u0435\u0440\u0438\u0435\u0439 \u0438 \u043e\u0436\u0438\u0434\u0430\u0435\u043c\u044b\u0439 HTML \u0441 \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u044b\u043c \u0442\u0435\u043a\u0441\u0442\u043e\u043c."
+  },
+  "58": {
+   "id": 58,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043f\u0435\u0440\u0435\u0447\u0438\u0441\u043b\u044f\u0435\u0442 \u0432\u0441\u0435 \u0448\u0435\u0441\u0442\u044c \u043a\u043b\u0430\u0441\u0441\u043e\u0432 \u0438 \u043f\u0440\u044f\u043c\u043e \u0443\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442, \u0447\u0442\u043e \u044d\u043a\u0437\u0435\u043c\u043f\u043b\u044f\u0440\u044b \u043f\u0435\u0440\u0435\u0441\u0442\u0430\u043d\u0443\u0442 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c \u043f\u0440\u043e\u0438\u0437\u0432\u043e\u043b\u044c\u043d\u044b\u0435 \u0430\u0442\u0440\u0438\u0431\u0443\u0442\u044b. \u0422\u0435\u0441\u0442 \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u0435\u0442 \u0442\u0438\u043f\u0438\u0447\u043d\u044b\u0439 AttributeError."
+  },
+  "59": {
+   "id": 59,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0437\u0430\u0434\u0430\u0451\u0442 \u0432\u0441\u0435 \u0442\u0440\u0438 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u0430: \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435 \u043f\u0440\u043e\u0431\u0435\u043b\u0430 \u043f\u0440\u0438 \u0440\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0438, \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u043e\u0435 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u0438\u0435 \u0446\u0435\u043f\u043e\u0447\u0435\u043a \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435 \u0441\u043e\u0431\u0441\u0442\u0432\u0435\u043d\u043d\u043e\u0433\u043e \u043d\u0430\u0447\u0430\u043b\u044c\u043d\u043e\u0433\u043e \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f \u0438\u043d\u0442\u0435\u0440\u043f\u043e\u043b\u044f\u0446\u0438\u0438. \u0422\u0435\u0441\u0442\u044b \u0432\u0430\u0440\u044c\u0438\u0440\u0443\u044e\u0442 \u0442\u0435 \u0436\u0435 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438."
+  },
+  "60": {
+   "id": 60,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0421\u043c\u0435\u043d\u0430 cmap \u043d\u0430 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0435\u043c \u0433\u0440\u0430\u0444\u0438\u043a\u0435 \u043f\u043e\u0434\u0440\u0430\u0437\u0443\u043c\u0435\u0432\u0430\u0435\u0442 \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435 \u0445\u0443\u0434\u043e\u0436\u043d\u0438\u043a\u043e\u0432 Matplotlib \u0438 \u0446\u0432\u0435\u0442\u043e\u0432\u043e\u0439 \u0448\u043a\u0430\u043b\u044b \u0441 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435\u043c \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a \u0438 \u043f\u0440\u0435\u0434\u0435\u043b\u043e\u0432 Plopp."
+  },
+  "61": {
+   "id": 61,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/test_spider_sitemap.py::TestSitemapSpider::test_get_sitemap_urls_from_robotstxt_invalid_utf8_urls"
+   ],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0443\u0434\u0430\u043b\u044f\u0442\u044c \u043a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0438 \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0442\u044c \u044d\u043a\u0440\u0430\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0435 \u0440\u0435\u0448\u0451\u0442\u043a\u0438. \u0422\u0435\u0441\u0442 \u0442\u0430\u043a\u0436\u0435 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u043f\u0440\u0438\u043d\u044f\u0442\u044c URL \u043f\u043e\u0441\u043b\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f \u043d\u0435\u0432\u0430\u043b\u0438\u0434\u043d\u043e\u0433\u043e UTF-8 \u0431\u0430\u0439\u0442\u0430, \u0445\u043e\u0442\u044f \u0431\u0430\u0437\u043e\u0432\u044b\u0439 \u0442\u0435\u0441\u0442 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u043f\u0440\u043e\u043f\u0443\u0441\u043a."
+  },
+  "62": {
+   "id": 62,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u041e\u0431\u0435 \u0444\u043e\u0440\u043c\u044b \u0438\u043c\u043f\u043e\u0440\u0442\u0430 \u0438 \u043e\u0436\u0438\u0434\u0430\u0435\u043c\u044b\u0439 \u043f\u0440\u043e\u0431\u0435\u043b \u043f\u0435\u0440\u0435\u0434 \u0433\u043e\u043b\u044b\u043c # \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u044b \u0432 \u0443\u0441\u043b\u043e\u0432\u0438\u0438. \u0418\u0434\u0435\u043c\u043f\u043e\u0442\u0435\u043d\u0442\u043d\u043e\u0441\u0442\u044c \u0438 \u043f\u0435\u0440\u0435\u043d\u043e\u0441 \u0437\u0432\u0451\u0437\u0434\u043e\u0447\u043d\u043e\u0433\u043e \u0438\u043c\u043f\u043e\u0440\u0442\u0430 \u0441\u043b\u0435\u0434\u0443\u044e\u0442 \u0438\u0437 \u043e\u043f\u0438\u0441\u0430\u043d\u043d\u043e\u0433\u043e \u0434\u0435\u0444\u0435\u043a\u0442\u0430."
+  },
+  "63": {
+   "id": 63,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0443\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u043a\u043e\u043c\u043f\u0435\u043d\u0441\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 diff_of_products. \u041f\u043e\u0432\u0435\u0434\u0435\u043d\u0438\u0435 \u043d\u0430 \u0441\u043a\u0430\u043b\u044f\u0440\u0430\u0445 \u0438 \u0432\u0435\u043a\u0442\u043e\u0440\u0430\u0445 \u0432\u044b\u0432\u043e\u0434\u0438\u0442\u0441\u044f \u0438\u0437 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0445 \u0441\u043e\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u0439 \u0447\u0438\u0441\u043b\u0435\u043d\u043d\u044b\u0445 \u0444\u0443\u043d\u043a\u0446\u0438\u0439."
+  },
+  "64": {
+   "id": 64,
+   "class": "PARTIAL",
+   "blocking": [
+    "test/mitmproxy/addons/test_tlsconfig.py::TestTlsConfig::test_emudhra_revocation_block"
+   ],
+   "detail": "\u0425\u043e\u0441\u0442\u044b \u043f\u0435\u0440\u0435\u0447\u0438\u0441\u043b\u0435\u043d\u044b, \u043d\u043e \u0442\u0435\u0441\u0442 \u043f\u043e\u043b\u0443\u0447\u0430\u0435\u0442 \u0438\u0445 \u0442\u043e\u043b\u044c\u043a\u043e \u0447\u0435\u0440\u0435\u0437 \u043d\u043e\u0432\u0443\u044e \u043f\u0440\u0438\u0432\u0430\u0442\u043d\u0443\u044e \u043a\u043e\u043d\u0441\u0442\u0430\u043d\u0442\u0443 tlsconfig._EMUDHRA_REVOCATION_HOSTS. \u0415\u0451 \u0438\u043c\u044f \u0432 \u0443\u0441\u043b\u043e\u0432\u0438\u0438 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442."
+  },
+  "65": {
+   "id": 65,
+   "class": "UNFAIR",
+   "blocking": [
+    "Tests/test_bgzf.py::BgzfTests::test_write_random_data"
+   ],
+   "detail": "\u0415\u0434\u0438\u043d\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0439 \u0442\u0435\u0441\u0442 \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0431\u043b\u043e\u043a\u0438 \u0440\u043e\u0432\u043d\u043e [32768, 32768, 0]. \u041f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0439 \u0432 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0438 \u0444\u0438\u043a\u0441\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u043f\u0440\u0435\u0434\u0435\u043b 0xff00 \u0442\u043e\u0436\u0435 \u0434\u0430\u0451\u0442 \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u0439 BGZF, \u043d\u043e \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443 \u0440\u0430\u0437\u043c\u0435\u0440\u043e\u0432 \u043d\u0435 \u043f\u0440\u043e\u0445\u043e\u0434\u0438\u0442."
+  },
+  "66": {
+   "id": 66,
+   "class": "PARTIAL",
+   "blocking": [
+    "tests/functions/test_drop_constant_columns.py::test_drop_constant_columns_mixed_missing_sentinels",
+    "tests/functions/test_drop_constant_columns.py::test_drop_constant_columns_object_null_semantics[values0-False]",
+    "tests/functions/test_drop_constant_columns.py::test_drop_constant_columns_object_null_semantics[values1-False]"
+   ],
+   "detail": "\u0422\u0440\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 \u0442\u0440\u0435\u0431\u0443\u044e\u0442 \u0441\u0447\u0438\u0442\u0430\u0442\u044c None, NaN, pd.NA \u0438 NaT \u043e\u0434\u043d\u0438\u043c \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u043c \u0432 object-\u0441\u0442\u043e\u043b\u0431\u0446\u0435. \u041f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0435 nunique(dropna=False) \u0438 \u043f\u0440\u0435\u0436\u043d\u0438\u0439 unique() \u0440\u0430\u0437\u043b\u0438\u0447\u0430\u044e\u0442 \u044d\u0442\u0438 \u043c\u0430\u0440\u043a\u0435\u0440\u044b."
+  },
+  "67": {
+   "id": 67,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u0437\u0430\u0434\u0430\u0451\u0442 \u0437\u0430\u0449\u0438\u0442\u0443 \u0432\u0435\u0440\u0441\u0438\u0438 \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e, \u0441\u043c\u0435\u0448\u0430\u043d\u043d\u044b\u0435 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u044b \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435 \u043d\u0443\u043c\u0435\u0440\u0430\u0446\u0438\u0438 \u0431\u0435\u0437 \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u043e\u0433\u043e \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u044f \u043d\u043e\u043c\u0435\u0440\u043e\u0432. \u0424\u043e\u0440\u043c\u0430\u0442 API \u0432\u044b\u0432\u043e\u0434\u0438\u043c \u0438\u0437 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0445 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0439."
+  },
+  "68": {
+   "id": 68,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u041f\u0440\u0430\u0432\u0438\u043b\u043e \u0437\u0430\u043c\u043e\u0440\u043e\u0436\u0435\u043d\u043d\u043e\u0433\u043e DSC \u044f\u0432\u043d\u043e \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432\u0445\u043e\u0434\u043d\u043e\u0439 sample_rate \u0432 baggage \u0438 envelope, \u0432\u043a\u043b\u044e\u0447\u0430\u044f span streaming \u0438 \u0441\u043b\u0443\u0447\u0430\u0438 \u0440\u0430\u0441\u0445\u043e\u0436\u0434\u0435\u043d\u0438\u044f baggage \u0441 \u0440\u0435\u0448\u0435\u043d\u0438\u0435\u043c \u0440\u043e\u0434\u0438\u0442\u0435\u043b\u044f."
+  },
+  "69": {
+   "id": 69,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0423\u0441\u043b\u043e\u0432\u0438\u0435 \u043d\u0430\u0437\u044b\u0432\u0430\u0435\u0442 sentinel CPython. \u0415\u0433\u043e \u0441\u0435\u043c\u0430\u043d\u0442\u0438\u043a\u0430 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u044f\u0435\u0442 \u043f\u043e\u043c\u0435\u0449\u0435\u043d\u0438\u0435 \u0441\u0441\u044b\u043b\u043a\u0438 \u0432 files \u0434\u043b\u044f \u043e\u0431\u043e\u0438\u0445 \u043f\u043e\u0440\u044f\u0434\u043a\u043e\u0432 walk \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0433\u043e \u0446\u0435\u043b\u0438 \u043f\u0440\u0438 rmtree."
+  },
+  "70": {
+   "id": 70,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0412\u0438\u0434\u0438\u043c\u044b\u0435 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 \u0441\u043b\u0435\u0434\u0443\u044e\u0442 \u0438\u0437 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0445 \u043f\u0440\u0430\u0432\u0438\u043b narrowing: E503 \u0434\u043b\u044f \u043e\u0442\u0440\u0438\u0446\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0439 \u0432\u0435\u0442\u0432\u0438, \u0434\u043e\u043a\u0430\u0437\u0430\u043d\u043d\u043e\u0435 \u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u0441\u0442\u0432\u043e \u0434\u043b\u044f tripled, \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0438\u0435 W004 \u0438 \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u0448\u0442\u0430\u0442\u043d\u043e\u0433\u043e \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f E503. \u041a\u043e\u043d\u0446\u044b \u043f\u0430\u0442\u0447\u0435\u0439 \u043e\u0431\u0440\u0435\u0437\u0430\u043d\u044b."
+  },
+  "71": {
+   "id": 71,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u041e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0443\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u043f\u043e\u0440\u044f\u0434\u043e\u043a \u0438\u0437 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0435\u0439 \u0432\u0435\u0442\u043a\u0438: \u0441\u043d\u0430\u0447\u0430\u043b\u0430 # type: ignore, \u0437\u0430\u0442\u0435\u043c # NOQA. \u0422\u0435\u0441\u0442\u044b \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u044e\u0442 \u044d\u0442\u043e\u0442 \u043f\u043e\u0440\u044f\u0434\u043e\u043a \u0438 \u043d\u0435\u0438\u0437\u043c\u0435\u043d\u043d\u043e\u0441\u0442\u044c \u0441\u0442\u0440\u043e\u043a\u0438 \u043f\u0440\u0438 \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u043e\u043c \u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0438."
+  },
+  "72": {
+   "id": 72,
+   "class": "UNFAIR",
+   "blocking": [
+    "test/components/builders/test_answer_builder.py::TestAnswerBuilder::test_init_with_reference_pattern_with_more_than_one_capturing_group",
+    "test/components/builders/test_answer_builder.py::TestAnswerBuilder::test_run_with_reference_pattern_matching_non_index",
+    "test/components/builders/test_answer_builder.py::TestAnswerBuilder::test_run_with_reference_pattern_with_optional_group_ignores_empty_match"
+   ],
+   "detail": "\u0422\u0435\u0441\u0442\u044b \u0442\u0440\u0435\u0431\u0443\u044e\u0442 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438 \u0432 \u043a\u043e\u043d\u0441\u0442\u0440\u0443\u043a\u0442\u043e\u0440\u0435 \u0432\u043e\u043f\u0440\u0435\u043a\u0438 \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044e \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u0442\u044c \u0442\u043e\u043b\u044c\u043a\u043e run(), \u0442\u043e\u0447\u043d\u043e\u0439 \u0444\u0440\u0430\u0437\u044b \u0434\u043b\u044f \u043d\u0435\u0447\u0438\u0441\u043b\u043e\u0432\u043e\u0433\u043e \u0441\u043e\u0432\u043f\u0430\u0434\u0435\u043d\u0438\u044f \u0438 \u043f\u0440\u043e\u043f\u0443\u0441\u043a\u0430 \u043f\u0443\u0441\u0442\u043e\u0439 \u0441\u0441\u044b\u043b\u043a\u0438, \u0434\u043b\u044f \u043a\u043e\u0442\u043e\u0440\u043e\u0439 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043f\u0440\u043e\u0441\u0438\u0442 \u044f\u0441\u043d\u0443\u044e \u043e\u0448\u0438\u0431\u043a\u0443."
+  },
+  "73": {
+   "id": 73,
+   "class": "FAIR",
+   "blocking": [],
+   "detail": "\u0422\u0435\u0441\u0442\u044b \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u044e\u0442 \u043d\u0435\u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u044c \u0438\u0442\u043e\u0433\u043e\u0432\u044b\u0445 traits \u043e\u0442 \u043f\u043e\u0440\u044f\u0434\u043a\u0430 \u043e\u0431\u0445\u043e\u0434\u0430, \u0432\u043a\u043b\u044e\u0447\u0430\u044f \u044f\u0432\u043d\u043e \u0437\u0430\u0434\u0430\u043d\u043d\u044b\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f. \u0414\u043b\u044f \u043f\u0440\u0438\u0432\u0435\u0434\u0451\u043d\u043d\u043e\u0439 \u0431\u0438\u0431\u043b\u0438\u043e\u0442\u0435\u043a\u0438 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u043e\u0432 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u044e\u0442\u0441\u044f direct=True \u0438 libs=False."
+  }
+ }
+}

@@ -1,6 +1,7 @@
 """Retry policy: how long to wait, what a server's Retry-After means, when to give up."""
 
 import asyncio
+import json
 import time
 from email.utils import format_datetime
 
@@ -354,3 +355,33 @@ def test_an_empty_content_filter_stop_is_reported_not_retried():
     )
     assert _complete(provider).finish_reason == "content_filter"
     assert len(seen) == 1
+
+
+def test_a_line_separator_inside_a_json_string_does_not_split_the_event():
+    # Servers may leave U+2028 / U+2029 / U+0085 unescaped in JSON (ensure_ascii=False);
+    # httpx's aiter_lines split there and every retry failed with "invalid JSON".
+    text = "a\N{LINE SEPARATOR}b\N{PARAGRAPH SEPARATOR}c\N{NEXT LINE}d"
+    usage = {"prompt_tokens": 5, "completion_tokens": 3}
+    body = (
+        "data: "
+        + json.dumps(_chunk({"content": text}), ensure_ascii=False)
+        + "\r\n\r\n"
+        + _sse(_chunk({}, "stop", usage))
+        + "data: [DONE]\n\n"
+    )
+    provider, _ = _streaming_provider([body])
+    assert _complete(provider).message.content == text
+
+
+def test_sse_lines_end_only_at_cr_lf_or_crlf():
+    from karox6.providers.base import sse_lines
+
+    async def collect(chunks):
+        async def gen():
+            for chunk in chunks:
+                yield chunk
+
+        return [line async for line in sse_lines(gen())]
+
+    chunks = ["a\N{LINE SEPARATOR}b\x0bc\n", "\n", "d\r", "\ne\rf", "\n", "tail"]
+    assert asyncio.run(collect(chunks)) == ["a\N{LINE SEPARATOR}b\x0bc", "", "d", "e", "f", "tail"]

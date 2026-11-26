@@ -233,7 +233,7 @@ async def stream_lines(
     thinking without sending anything, so only the request timeout applies. Keep-alive
     lines (SSE comments, pings, blank separators) do not count as progress: a server that
     pings every 30 s while the answer is stuck still stalls after ``idle_s``."""
-    lines = response.aiter_lines().__aiter__()
+    lines = sse_lines(response.aiter_text()).__aiter__()
     quiet_since: float | None = None
     while True:
         try:
@@ -257,6 +257,26 @@ async def stream_lines(
         yield line
 
 
+async def sse_lines(chunks: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Lines as SSE defines them: ended by CRLF, LF or CR only. ``aiter_lines`` splits
+    like ``str.splitlines``, also at U+2028, U+2029, U+0085 and other separators that a
+    server may legally leave unescaped inside a JSON string; one such character in the
+    model's output cut the event in two and every retry failed the same way."""
+    buffer = ""
+    async for chunk in chunks:
+        buffer += chunk
+        start = 0
+        while (end := _EOL.search(buffer, start)) is not None:
+            if end.group() == "\r" and end.end() == len(buffer):
+                break  # a CR that ends the chunk may be the first half of a CRLF
+            yield buffer[start : end.start()]
+            start = end.end()
+        buffer = buffer[start:]
+    if buffer:
+        yield buffer.rstrip("\r")
+
+
+_EOL = re.compile(r"\r\n|\n|\r")
 _PING_DATA = re.compile(r'^data:\s*\{\s*"type"\s*:\s*"ping"\s*\}$')
 
 

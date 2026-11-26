@@ -655,7 +655,9 @@ def _result(reply: Any) -> Any:
 def _sse_messages(text: str) -> list[Any]:
     messages: list[Any] = []
     data: list[str] = []
-    for line in [*text.splitlines(), ""]:
+    # SSE lines end only at CRLF, LF or CR; splitlines() also breaks at U+2028 and
+    # friends, which JSON may carry unescaped, and the message was silently dropped.
+    for line in [*re.split(r"\r\n|\n|\r", text), ""]:
         if line.startswith("data:"):
             data.append(line[5:].lstrip())
         elif not line.strip() and data:

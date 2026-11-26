@@ -383,3 +383,11 @@ def test_stdio_command_is_resolved_through_pathext_on_windows(monkeypatch):
     assert client._executable("no-such-tool") == "no-such-tool"
     monkeypatch.setattr(client.sys, "platform", "linux")
     assert client._executable("npx") == "npx"
+
+
+def test_sse_message_with_a_line_separator_in_a_string_is_kept():
+    from karox6.mcp.client import _sse_messages
+
+    payload = {"jsonrpc": "2.0", "id": 1, "result": {"text": "x\N{LINE SEPARATOR}y"}}
+    text = "event: message\r\ndata: " + json.dumps(payload, ensure_ascii=False) + "\r\n\r\n"
+    assert _sse_messages(text) == [payload]
