@@ -69,3 +69,23 @@
   UNFAIR 1 vs 1. Mean agent time 380 s vs 281 s (the two 3430 s limits alone add ~122 s to KaroX's mean).
 - Spend: run $2.11 (KaroX $0.836, CC $1.104, interview $0.173) + preflight $0.012. Evaluation:
   karox6-bench-data/scripts/eval_final63.py, output runs/final63_eval.txt.
+
+## 2026-11-26 (night): 6.0.0.dev64 — CLI bugs from review + free dogfood
+- Codex gpt-6.2-sol review of providers/compaction/review (work/night/rev_prov.out.md): 10 claims, 4 verified
+  and fixed with tests: an empty reply stopped by a content filter was retried as "empty response" and then
+  misreported (all 4 providers; the empty turn is now dropped and Anthropic never gets an empty message);
+  pruning could cut results of the newest tool batch before the model read them; SSE keep-alive lines reset
+  the stall timer (stuck answer behind pings hung forever); native transport kept reading after [DONE].
+  Not fixed: retry deltas shown twice in the TUI (a retry line separates them), uncounted usage of empty
+  replies (2 retries in 5761 bench calls), --review guard races (opt-in, NO-GO feature).
+- Free Dahl GLM dogfood dog63 (run 45685383324, pool4 FAIR 122/124/128/130/135/137): 4/6 solved.
+  a2a-1456 died on "invalid JSON from server" at the same char on every retry: httpx aiter_lines (and
+  splitlines in the MCP client) also split at U+2028/U+2029/U+0085/VT/FF, which JSON may carry unescaped.
+  SSE lines now end only at CR/LF/CRLF (tests fail on the old code). Other waste: model-chosen full
+  pydicom suites > 20 min (not a harness bug).
+- Speed check (dev61 pool5): calls >= 300 s are ~45% of agent time but in ~10% of trials, which solve
+  as often as the rest (~50% vs 36%); on pool5 KaroX is faster than CC (279 s vs 406 s). Not pursued.
+- Fairness audit of tasks 13-73 (pool0): SWE-2.1 Max is lenient (8/12 vs Neon on blind calibration,
+  all misses toward FAIR, 27 empty details); Codex gpt-6.2-sol 11/12. FAIR only when both agree: 28 FAIR,
+  15 PARTIAL, 17 UNFAIR, 1 disputed. Total FAIR ids now 124 (pool0 is an old dev pool, not a holdout).
+- Gates: full suite green (Windows), ruff, ruff format, mypy clean; wheel dev64 built, smoke_installed OK.
