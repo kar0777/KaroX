@@ -98,3 +98,6 @@
   /undo vs a concurrent editor save; apply_patch marking a stale file as observed; POSIX orphan of a
   detached background child on Ctrl+C; bash/run_code edits to files already dirty before the session
   missing from "files changed"; a write in the same batch after the time limit.
+- Free Dahl GLM dogfood dog64 (run 45738740180, dev64, tasks 128 + pool0 FAIR 13/40/62): 1/4 solved (GLM
+  noise); every run ended normally (no "invalid JSON" crash on a2a-1456 this time), 40 hit the time limit
+  amid 429 retries. Dahl reports no prompt-cache hits (provider side). dev65 replay 6/6 green.
