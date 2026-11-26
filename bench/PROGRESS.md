@@ -1,4 +1,19 @@
 
+## 2026-11-26: pre-registered pool7 (bench/prereg_pool7_dev65.md) — dev65 native vs Claude Code, Haiku 5.5
+- pool7 = 52 fresh tasks (ids 269-320, window 2026-10-01..10-20). Fairness: two blind Codex auditors (gpt-6.2-sol,
+  gpt-6.1-sol; each 10/12 vs Neon on pool5 calibration) -> 27 FAIR / 9 PARTIAL / 14 UNFAIR / 2 DISPUTED, fixed
+  before the run. SWE-2.1 Max could not finish an 11-task batch in 585 s (prints only at the end): replaced.
+- Checks: free replay dev65 in 3 pool7 images (basics + code) green; paid preflight on id 141 all PASS ($0.012).
+- Run 45799935776 (tag p7d65), 52 x 1 attempt, 104/104 trials with a verifier reward, telemetry all PASS.
+- PRIMARY FAIR (27 valid): dev65 14 vs CC 15, cost/solve $0.0280 vs $0.0306 (0.91x) -> **FAIL** (needs > and
+  <= 0.85x). Paired CI [-14.8, +7.4] pp: a tie within noise. Only 4 discordant tasks in all 52 (FAIR 294, 299
+  dev65 only; FAIR 291 and PARTIAL 316 CC only). ALL 52: 17 vs 17, cost $0.740 vs $0.940 (dev65 21% cheaper).
+  Wall time per trial: median 112 s vs 110 s, mean 309 s vs 202 s.
+- Reading: on fresh tasks dev65 = Claude Code in solves and is ~20% cheaper; the pool6 win (22 vs 20) did not
+  reproduce as "more solves". pool7 trajectories stay unread (holdout).
+- Spend: run $1.849 (KaroX $0.740, CC $0.940, interview $0.168) + preflight $0.012. Evaluation:
+  karox6-bench-data/scripts/eval_pool7.py, output runs/p7d65_eval.txt.
+
 ## 2026-11-24 night: H4 "auto-run existing tests of touched modules" — $0 gate fails
 - scripts/regress_audit.py (bench-data): for dev61's 40 pool5 failures, graded tests NOT PASSED that are in the
   validated P2P set (passed on base AND after gold) = regressions an existing-test run could catch.
