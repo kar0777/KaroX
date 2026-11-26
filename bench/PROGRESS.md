@@ -1,4 +1,17 @@
 
+## 2026-11-26: dev66 candidate (branch steps/dev66) from Devin SWE-2.1 failure analysis
+- Devin SWE-2.1 Max (free) analysed each of the 10 dev-pool tasks Claude Code solved and KaroX failed (dev54-dev61
+  runs; condensed traces in karox6-bench-data/work/devin): 8 incomplete fixes (missed writer/copy/branch, step
+  order, interaction with another operation on the same state), 3 probe errors dismissed as "separate", 2 broken
+  self-made .venv left for the verifier, 1 "minimal change ... finish" stall notice narrowing the fix.
+  Gates already tried (finish_gate 0/100 verdicts changed, blind reviewer 1/10) were excluded from proposals.
+- Synthesis: Codex gpt-6.2-sol and Devin; Devin's critique of the first draft caught an exemption that excused
+  the target bug ("unless the original code fails the same way") -> removed. Prompt cap 600 -> 660 words.
+- Timing analysis of 2 slow trials: 1556 s / 1800 s were 600 s waits on suites piped to `tail` ("(no new output)").
+  dev66 adds advice-only notes for silent running commands (no caps; caps were not adopted twice).
+- Wheel dev66 built, smoke OK, free replay green; screen pre-registered (bench/prereg_dev66_screen.md), not run
+  yet: needs the user's approval for ~$3.9.
+
 ## 2026-11-26: pre-registered pool7 (bench/prereg_pool7_dev65.md) — dev65 native vs Claude Code, Haiku 5.5
 - pool7 = 52 fresh tasks (ids 269-320, window 2026-10-01..10-20). Fairness: two blind Codex auditors (gpt-6.2-sol,
   gpt-6.1-sol; each 10/12 vs Neon on pool5 calibration) -> 27 FAIR / 9 PARTIAL / 14 UNFAIR / 2 DISPUTED, fixed
