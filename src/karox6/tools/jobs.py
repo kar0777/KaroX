@@ -12,7 +12,7 @@ from typing import Any
 
 from karox6.context.spill import limit_output
 from karox6.tools.base import ToolContext, ToolResult
-from karox6.tools.proc import ProcessRun, clean_text
+from karox6.tools.proc import ProcessRun, clean_text, silence_note
 
 READ_CAP_CHARS = 30_000
 
@@ -190,8 +190,9 @@ class JobOutputTool:
         if job.run.returncode is not None:
             job.notified = True
         body = text if text.strip() else "(no new output)"
+        quiet = silence_note(job.run) if not text.strip() else ""
         return ToolResult(
-            f"{body}\n[job {job.id}: {job.status}{_timing(job, ctx)}]",
+            f"{body}\n[job {job.id}: {job.status}{_timing(job, ctx)}]{quiet}",
             meta={"job_id": job.id, "status": job.status},
         )
 
