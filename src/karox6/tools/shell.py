@@ -313,8 +313,10 @@ def _description(shell: ShellInfo) -> str:
         "To wait for a long command, call job_output with wait: true on its job: it returns "
         "as soon as the command ends, while `sleep N` always waits N seconds and a command "
         "detached with nohup or `&` is not tracked as a job. "
-        "Long output keeps its head and tail; the full output is saved to a file whose path is "
-        "reported. Never start interactive programs (editors, pagers, prompts). Before any "
+        "Long output keeps its head and tail inline and is saved in full to a file whose path "
+        "is reported, so run tests and builds without piping them through `tail` or `head`; "
+        "read that file for omitted lines instead of rerunning the command. Never start "
+        "interactive programs (editors, pagers, prompts). Before any "
         "delete or move, check that the target path is the intended one."
     )
     if shell.kind == "bash":
