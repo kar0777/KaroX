@@ -24,7 +24,8 @@ SILENT_NOTE_S = 120
 # A pipe (not `||`) into a filter that can print only after its input ends; `tail -f`
 # streams and is excluded.
 _END_ONLY_FILTER = re.compile(
-    r"(?<!\|)\|&?(?!\|)\s*(?:(?:tail|tac)\b(?![^|;&]*\s(?:-[A-Za-z]*[fF]|--follow))|sort\b|wc\b)"
+    r"(?<!\|)\|&?(?!\|)\s*(?:(?:tail|tac)\b(?![^|;&]*\s(?:-[A-Za-z]*[fF]|--follow|(?:-n\s*)?\+\d))"
+    r"|sort\b|wc\b)"
 )
 
 
@@ -41,7 +42,8 @@ def silence_note(run: ProcessRun) -> str:
         note += (
             " Its output goes through a filter that prints only when its input ends, so "
             "progress stays hidden until the command finishes. Wait if the final output "
-            "is enough; to see progress, run it narrower or write it to a file you read."
+            "is enough; to see progress, stop this job first, then rerun it narrower or "
+            "writing to a file you read."
         )
     return note
 
