@@ -89,3 +89,12 @@
   all misses toward FAIR, 27 empty details); Codex gpt-6.2-sol 11/12. FAIR only when both agree: 28 FAIR,
   15 PARTIAL, 17 UNFAIR, 1 disputed. Total FAIR ids now 124 (pool0 is an old dev pool, not a holdout).
 - Gates: full suite green (Windows), ruff, ruff format, mypy clean; wheel dev64 built, smoke_installed OK.
+- Targeted Codex reviews after dev64 (work/night/rev_unicode.out.md, rev_parallel.out.md). Fixed (each with a
+  test failing on the old code): rg grep dropped matches on lines with U+2028/U+0085; run_code nested calls
+  over 64 KiB (asyncio line limit) killed tools.write of a 70 KB file; profile names like "работа" saved as
+  invalid TOML; apply_patch could not match the first line of a UTF-8 BOM file; karox_diff returned C-quoted
+  non-ASCII untracked names; @file cap cut a UTF-8 character. Known, not fixed (rare or no outcome effect):
+  edit on mixed-EOL files when old_string spans a CRLF line normalizes the file; UTF-16 grep context;
+  /undo vs a concurrent editor save; apply_patch marking a stale file as observed; POSIX orphan of a
+  detached background child on Ctrl+C; bash/run_code edits to files already dirty before the session
+  missing from "files changed"; a write in the same batch after the time limit.
