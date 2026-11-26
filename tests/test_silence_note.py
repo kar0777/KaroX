@@ -54,6 +54,9 @@ def test_only_end_only_filters_are_named() -> None:
     assert not filtered("make -s test || tail -80 test.log")  # `||` is not a pipe
     assert not filtered("server | tail -f -n 5")  # follows, streams
     assert not filtered("server | tail --follow=name x")
+    assert not filtered("pytest | tail -n +1")  # from line 1 on: streams
+    assert not filtered("pytest | tail +3")
+    assert filtered("pytest | tail -n 30")
 
 
 def test_real_process_tracks_its_last_output(tmp_path: Any, monkeypatch: Any) -> None:
