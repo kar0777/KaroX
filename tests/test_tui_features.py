@@ -505,3 +505,13 @@ def test_colored_diff_summary_and_lines(tmp_path):
     assert "\x1b[31m-old\x1b[0m" in term.text
     assert "\x1b[32m+new1\x1b[0m" in term.text
     assert "\x1b[36m@@" in term.text
+
+
+def test_file_mention_cap_does_not_cut_a_utf8_character(tmp_path, monkeypatch):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "ru.txt").write_text("ab" + "Ж" * 10, encoding="utf-8")
+    monkeypatch.setattr("karox6.tui.MENTION_MAX_BYTES", 5)  # "ab" + 1.5 characters
+    res = expand_file_mentions("See @ru.txt", ws)
+    assert "abЖ\n... [truncated" in res.text
+    assert "\N{REPLACEMENT CHARACTER}" not in res.text

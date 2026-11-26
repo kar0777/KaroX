@@ -329,7 +329,9 @@ async def _grep_rg(
             return ToolResult(f"Error: invalid regular expression: {message}", is_error=True)
         return None
     hits: list[tuple[str, int, str]] = []
-    for line in out.decode("utf-8", "replace").splitlines():
+    # One JSON event per "\n": rg leaves U+2028/U+0085 unescaped, and splitlines() cut
+    # such a match in two and dropped it.
+    for line in out.decode("utf-8", "replace").split("\n"):
         try:
             event = json.loads(line)
         except json.JSONDecodeError:

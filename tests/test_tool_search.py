@@ -194,3 +194,12 @@ def test_python_grep_does_not_hang_on_a_long_line(ctx, monkeypatch):
     assert result.content == "No matches found."
     assert call(GrepTool(), ctx, pattern="found_here").content.endswith("found_here")
     assert time.monotonic() - started < 10
+
+
+def test_grep_finds_lines_with_unicode_line_separators(ctx, backend):
+    # rg's JSON leaves U+2028 / U+0085 unescaped; splitting its output with splitlines()
+    # broke the event in two and the match was silently dropped.
+    line = "key = 'a\N{LINE SEPARATOR}b\N{NEXT LINE}c'"
+    (ctx.workspace / "a.py").write_text(line + "\nother\n", encoding="utf-8")
+    result = call(GrepTool(), ctx, pattern="key")
+    assert result.content == f"a.py\nLine 1: {line}"

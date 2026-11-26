@@ -41,6 +41,7 @@ CODE_MODE_APPEND = (
 DEFAULT_TIMEOUT_MS = 300_000
 MAX_TIMEOUT_MS = 1_200_000
 NOT_NESTED = frozenset({"run_code", "agent"})
+NESTED_LINE_LIMIT = 64 * 1024 * 1024  # bytes per nested tool request (one JSON line)
 
 # Runs in the project's interpreter, so: standard library only, Python 3.8 syntax.
 RUNNER = r'''
@@ -169,7 +170,9 @@ class RunCodeTool:
 
         token = secrets.token_hex(16)
         nested = _NestedCalls(tools, ctx, token)
-        server = await asyncio.start_server(nested.serve, "127.0.0.1", 0)
+        # One request is one JSON line: tools.write() of a 70 KB file is a 70 KB line, over
+        # asyncio's 64 KiB default, and the call died with "connection closed".
+        server = await asyncio.start_server(nested.serve, "127.0.0.1", 0, limit=NESTED_LINE_LIMIT)
         port = server.sockets[0].getsockname()[1]
         env = shell_env(ctx.env or None)
         env.update(

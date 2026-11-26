@@ -16,7 +16,9 @@ Precedence: command-line flag > environment variable (``KAROX_MODEL``, ``KAROX_P
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -132,11 +134,18 @@ def save_settings(updates: dict[str, Any], path: Path | None = None) -> Path:
     lines = [f"{k} = {_toml_value(v)}" for k, v in data.items()]
     if isinstance(profiles, dict):
         for name, table in profiles.items():
-            lines += ["", f"[profiles.{name}]"]
+            lines += ["", f"[profiles.{_toml_key(name)}]"]
             lines += [f"{k} = {_toml_value(v)}" for k, v in table.items()]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _toml_key(name: str) -> str:
+    """A bare TOML key when it can be one, else a quoted one ("работа", "my.profile")."""
+    if re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        return name
+    return json.dumps(name, ensure_ascii=False)
 
 
 def _toml_value(value: Any) -> str:

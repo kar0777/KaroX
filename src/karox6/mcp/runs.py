@@ -459,8 +459,9 @@ def git_diff(workspace: Path) -> tuple[str | None, list[str]]:
     diff = git("diff", "HEAD", "--no-color", "--", ".")
     if diff.returncode != 0:  # no commits yet
         diff = git("diff", "--no-color", "--", ".")
-    untracked = git("ls-files", "--others", "--exclude-standard", "--", ".")
-    paths = [line for line in untracked.stdout.splitlines() if line and not is_generated(line)]
+    # -z: names as they are (core.quotePath would print "Ж.txt" as "\320\226.txt").
+    untracked = git("ls-files", "-z", "--others", "--exclude-standard", "--", ".")
+    paths = [line for line in untracked.stdout.split("\0") if line and not is_generated(line)]
     return diff.stdout, paths[:500]
 
 

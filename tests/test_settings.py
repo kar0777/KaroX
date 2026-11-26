@@ -83,3 +83,15 @@ def test_cli_reports_bad_config(home, capsys):
     (home / "config.toml").write_text('modle = "x"\n')
     assert cli.main(["run", "x"]) == 2
     assert "unknown setting modle" in capsys.readouterr().err
+
+
+def test_saved_profiles_with_non_bare_names_stay_valid_toml(tmp_path):
+    from karox6.settings import save_settings
+
+    path = tmp_path / "config.toml"
+    profiles = {"работа": {"model": "m1"}, "my.profile": {"model": "m2"}, "plain": {"model": "m3"}}
+    save_settings({"model": "base", "profiles": profiles}, path)
+    save_settings({"provider": "openai-chat"}, path)  # re-reads the file it wrote
+    assert load_settings("работа", path)["model"] == "m1"
+    assert load_settings("my.profile", path)["model"] == "m2"
+    assert "[profiles.plain]" in path.read_text(encoding="utf-8")
