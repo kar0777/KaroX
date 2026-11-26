@@ -14,7 +14,7 @@ from karox6.context.spill import limit_output
 from karox6.tools.base import ToolContext, ToolResult
 from karox6.tools.proc import ProcessRun, clean_text, silence_note
 
-READ_CAP_CHARS = 30_000
+READ_CAP_CHARS = 12_000
 
 
 @dataclass(slots=True)

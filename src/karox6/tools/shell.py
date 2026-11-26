@@ -24,7 +24,7 @@ from karox6.tools.proc import ProcessRun, silence_note
 
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
-INLINE_CHARS = 30_000
+INLINE_CHARS = 12_000
 
 ENV_OVERRIDES = {
     "NO_COLOR": "1",
@@ -314,8 +314,10 @@ def _description(shell: ShellInfo) -> str:
         "as soon as the command ends, while `sleep N` always waits N seconds and a command "
         "detached with nohup or `&` is not tracked as a job. "
         "Long output keeps its head and tail inline and is saved in full to a file whose path "
-        "is reported, so run tests and builds without piping them through `tail` or `head`; "
-        "read that file for omitted lines instead of rerunning the command. Never start "
+        "is reported. Do not pipe output through `tail` or `head` merely to shorten it: both "
+        "ends are already shown, and end-only pipes hide progress. Once a command has "
+        "finished, search that file or read the relevant range for omitted lines instead of "
+        "printing it whole or rerunning the command. Never start "
         "interactive programs (editors, pagers, prompts). Before any "
         "delete or move, check that the target path is the intended one."
     )
