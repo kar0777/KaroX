@@ -36,6 +36,7 @@ from karox6.chat_features import (
 )
 from karox6.core import events as ev
 from karox6.core.digest import brief, clip, explain_error, is_tool_failure, outcome
+from karox6.tools.jobs import incomplete_utf8_tail
 from karox6.tui_markdown import Markdown
 from karox6.tui_text import (
     Palette,
@@ -358,6 +359,8 @@ def expand_file_mentions(text: str, workspace: Path) -> MentionResult:
         size = max(size, len(data))
         truncated = len(data) > cap
         chunk = data[:cap]
+        if truncated:  # do not cut a UTF-8 character in two (it would show as U+FFFD)
+            chunk = chunk[: len(chunk) - incomplete_utf8_tail(chunk)]
         remaining -= len(chunk)
         included = len(chunk)
         if chunk.startswith(b"\xef\xbb\xbf"):

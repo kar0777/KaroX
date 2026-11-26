@@ -86,7 +86,7 @@ class JobManager:
             # A read can end inside a multi-byte UTF-8 character; leave that tail for the
             # next read instead of decoding both halves into replacement characters. A
             # tail that got no continuation since the last read is shown as it is.
-            job.held_bytes = _incomplete_utf8_tail(data)
+            job.held_bytes = incomplete_utf8_tail(data)
             data = data[: len(data) - job.held_bytes]
         else:
             job.held_bytes = 0
@@ -110,7 +110,7 @@ class JobManager:
 NOTICE_TAIL_CHARS = 2_000
 
 
-def _incomplete_utf8_tail(data: bytes) -> int:
+def incomplete_utf8_tail(data: bytes) -> int:
     """Bytes at the end of ``data`` that are a valid but unfinished UTF-8 sequence.
     Invalid bytes (0xFF, a lone 0xC0) are never held back: they surface as U+FFFD."""
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")

@@ -165,3 +165,9 @@ def test_commit_failure_reports_applied(tmp_path: Path, monkeypatch: pytest.Monk
     with pytest.raises(PatchError, match="applied: a"):
         apply_patch(patch("*** Add File: a\n+x\n*** Add File: b\n+y"), tmp_path)
     assert (tmp_path / "a").read_bytes() == b"x\n"
+
+
+def test_first_line_of_a_utf8_bom_file_matches_and_the_bom_is_kept(tmp_path: Path) -> None:
+    (tmp_path / "a").write_bytes(b"\xef\xbb\xbfold\nnext\n")
+    apply_patch(patch("*** Update File: a\n-old\n+new"), tmp_path)
+    assert (tmp_path / "a").read_bytes() == b"\xef\xbb\xbfnew\nnext\n"

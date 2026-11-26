@@ -179,3 +179,18 @@ def test_timeout_respects_the_run_deadline(ctx, monkeypatch):
     assert _time.monotonic() - started < 20
     assert result.is_error
     assert "timed out" in result.content
+
+
+def test_nested_write_larger_than_64_kib_goes_through(ctx, monkeypatch):
+    from karox6.tools.fs import WriteTool
+
+    monkeypatch.setattr(code_module, "find_python", lambda env: sys.executable)
+    result, _ = run_code(
+        ctx,
+        """
+        print(tools.write("big.txt", "Ж" * 40000))
+        """,
+        tools=[WriteTool(), ReadTool()],
+    )
+    assert not result.is_error, result.content
+    assert (ctx.workspace / "big.txt").read_text(encoding="utf-8") == "Ж" * 40000

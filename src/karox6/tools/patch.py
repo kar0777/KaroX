@@ -199,7 +199,10 @@ def _read(path: Path, name: str) -> bytes:
 
 
 def _update(data: bytes, op: _Operation, name: str) -> tuple[bytes, int, int]:
-    text = data.decode("utf-8")
+    # A UTF-8 BOM is not part of the first line (read does not show it): match without it
+    # and put it back on write.
+    bom = data.startswith(b"\xef\xbb\xbf")
+    text = data[3 if bom else 0 :].decode("utf-8")
     newline = "\r\n" if "\r\n" in text else "\n"
     ended = text.endswith("\n")
     lines = _split_lines(text)
@@ -232,7 +235,7 @@ def _update(data: bytes, op: _Operation, name: str) -> tuple[bytes, int, int]:
         added += sum(line.startswith("+") for line in hunk.lines)
         removed += sum(line.startswith("-") for line in hunk.lines)
     result = newline.join(lines) + (newline if ended and lines else "")
-    return result.encode("utf-8"), added, removed
+    return (b"\xef\xbb\xbf" if bom else b"") + result.encode("utf-8"), added, removed
 
 
 def apply_patch(patch_text: str, root: Path) -> PatchResult:

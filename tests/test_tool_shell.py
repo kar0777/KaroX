@@ -439,14 +439,14 @@ def test_pwsh_prints_cyrillic_and_keeps_exit_code(ctx):
 
 
 def test_job_read_keeps_a_split_utf8_character_for_the_next_read(tmp_path):
-    from karox6.tools.jobs import JobManager, _incomplete_utf8_tail
+    from karox6.tools.jobs import JobManager, incomplete_utf8_tail
 
-    assert _incomplete_utf8_tail("aб".encode()[:-1]) == 1
-    assert _incomplete_utf8_tail("😀".encode()[:3]) == 3
-    assert _incomplete_utf8_tail("aб".encode()) == 0
-    assert _incomplete_utf8_tail(b"abc") == 0
-    assert _incomplete_utf8_tail(bytes([97, 98, 0xFF])) == 0  # invalid: never held back
-    assert _incomplete_utf8_tail(bytes([97, 98, 0xC0])) == 0
+    assert incomplete_utf8_tail("aб".encode()[:-1]) == 1
+    assert incomplete_utf8_tail("😀".encode()[:3]) == 3
+    assert incomplete_utf8_tail("aб".encode()) == 0
+    assert incomplete_utf8_tail(b"abc") == 0
+    assert incomplete_utf8_tail(bytes([97, 98, 0xFF])) == 0  # invalid: never held back
+    assert incomplete_utf8_tail(bytes([97, 98, 0xC0])) == 0
 
     log = tmp_path / "job.log"
     word = "проекты".encode()
