@@ -85,8 +85,8 @@ class LoopGuard:
 
 NO_PROGRESS_NOTICE = (
     "You have made no progress for several steps. Pick the single most likely hypothesis, "
-    "make the minimal change for it (or none), run the relevant test, and finish with a "
-    "short summary of what is and is not resolved."
+    "fix it wherever that cause applies (or change nothing), run the relevant test and one "
+    "other affected case, and finish with a short summary of what is and is not resolved."
 )
 
 FINISH_GATE_MAX_STEPS = 8
