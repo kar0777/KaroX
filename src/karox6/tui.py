@@ -102,6 +102,7 @@ _SESSION_COMMANDS = frozenset(
         "/resume",
         "/key",
         "/model",
+        "/effort",
         "/setup",
         "/bridge",
         "/undo",
@@ -180,6 +181,12 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(
         "/reasoning", "/reasoning [show|hide]", "show or hide model reasoning", "Model & Setup"
     ),
+    CommandSpec(
+        "/effort",
+        "/effort [low|medium|high|xhigh|max|off]",
+        "show or change how hard the model reasons",
+        "Model & Setup",
+    ),
     CommandSpec("/key", "/key", "paste the API key (hidden; saved encrypted)", "Model & Setup"),
     CommandSpec("/setup", "/setup", "choose provider, model and key again", "Model & Setup"),
     CommandSpec(
@@ -230,6 +237,14 @@ _UPDATE_ARGS: tuple[tuple[str, str], ...] = (
     ("force", "build and install even when up to date"),
 )
 
+_EFFORT_ARGS: tuple[tuple[str, str], ...] = (
+    ("low", "quick answers, little reasoning"),
+    ("medium", "balanced"),
+    ("high", "think harder (slower, more tokens)"),
+    ("xhigh", "harder still, where the model has it"),
+    ("max", "the most the model offers"),
+    ("off", "the provider's default"),
+)
 _REASONING_ARGS: tuple[tuple[str, str], ...] = (
     ("show", "display model reasoning as it streams"),
     ("hide", "hide model reasoning output"),
@@ -1510,6 +1525,17 @@ class ChatApp:
             await self._bridge(arg)
         elif name == "/update":
             await self._update(arg.lower())
+        elif name == "/effort":
+            low = arg.lower()
+            if low and low not in {value for value, _ in _EFFORT_ARGS} | {"default", "none"}:
+                choices = "|".join(value for value, _ in _EFFORT_ARGS)
+                self.write(self.paint("yellow", f"usage: /effort [{choices}]") + "\n")
+            else:
+                if low:  # the session reads the config at its next request
+                    effort = None if low in ("off", "default", "none") else low
+                    self.config.reasoning_effort = effort
+                now = self.config.reasoning_effort or "provider default"
+                self.write(f"reasoning effort: {now}\n")
         elif name == "/reasoning":
             low = arg.lower()
             if low in ("on", "show", "true", "1"):
@@ -2020,6 +2046,8 @@ def build_completer(*, workspace: Path | None = None, home: Path | None = None) 
                 choices = list(_BRIDGE_ARGS)
             elif cmd == "/reasoning":
                 choices = list(_REASONING_ARGS)
+            elif cmd == "/effort":
+                choices = list(_EFFORT_ARGS)
             elif cmd == "/update":
                 choices = list(_UPDATE_ARGS)
             elif cmd == "/copy":

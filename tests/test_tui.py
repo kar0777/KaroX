@@ -631,3 +631,13 @@ def test_replay_keeps_only_the_last_exchanges(tmp_path):
     assert "› question 2\n" not in term2.text
     assert "› question 3" in term2.text
     assert "answer 12" in term2.text
+
+
+def test_effort_command_changes_the_next_request(tmp_path):
+    term = FakeTerm(["/effort high", "first", "/effort bogus", "/effort off", "second", "/quit"])
+    app, provider = make_app(tmp_path, [Turn(text="one"), Turn(text="two")], term)
+    asyncio.run(app.run())
+    assert [r.reasoning_effort for r in provider.requests] == ["high", None]
+    assert "reasoning effort: high" in term.text
+    assert "usage: /effort [low|medium|high|xhigh|max|off]" in term.text
+    assert "reasoning effort: provider default" in term.text
