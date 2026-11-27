@@ -1,3 +1,12 @@
+## 2026-11-27: dev69 speed screen (bench/prereg_dev69_screen.md) — GO to a fresh-pool confirmation
+- Run 45913961216 (tag s69): dev65 vs dev69 (= dev68 + "do not pipe through tail/head merely to shorten; search
+  the saved log" + shell/job_output inline caps 30k -> 12k chars), 62 scr66 dev tasks x 2 attempts, Haiku 5.5;
+  all 62 tasks valid (task 210's artifact needed a separate download).
+- Geometric wall dev69/dev65 0.858, CI [0.726, 0.996] (rule <= 0.90 and upper < 1.0: met, barely); solved attempts
+  75 vs 82 (rule >= 72: met); cost/solve 0.82x (rule <= 1.05x: met). Wall mean 483 / 435 s, median 210 / 149 s,
+  p90 1521 / 1119 s. Spend $3.69 (dev65 1.951, dev69 1.743) + interview.
+- Dev pool, not a holdout: confirmation on a fresh pool (pool10) against the new shipping dev68 and Claude Code.
+
 ## 2026-11-27: pre-registered pool9 (bench/prereg_pool9.md) — dev68 ADOPTED; dev65 ties Claude Code on solves at 0.66x cost/solve
 - pool9 = 124 fresh tasks (ids 370-493, windows 2026-07-10..09-10), labels 55 FAIR/29 PARTIAL/39 UNFAIR/1 DISPUTED
   fixed before the run. Run 45909555070 (tag p9d68): dev65 + dev68 + Claude Code 2.1.329 side by side, 2 attempts,
