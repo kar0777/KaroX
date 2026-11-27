@@ -397,8 +397,8 @@ def status_bar_fragments(
 
 def key_hints(mode: str) -> list[tuple[str, str]]:
     """The keys worth knowing right now, for the frame of the input box."""
-    if mode == "running":
-        return [("esc", "stop"), ("enter", "queue a message"), ("ctrl+o", "tool output")]
+    if mode == "running":  # "esc stop" is on the activity line right above
+        return [("enter", "queue a message"), ("ctrl+o", "tool output")]
     if mode == "question":
         return [("enter", "answer"), ("esc", "cancel")]
     if mode == "secret":
@@ -411,7 +411,6 @@ def key_hints(mode: str) -> list[tuple[str, str]]:
         ("/", "commands"),
         ("@", "files"),
         ("ctrl+o", "tool output"),
-        ("drag", "copy"),
     ]
 
 
@@ -437,7 +436,7 @@ def box_bottom(width: int, glyph: dict[str, str], hints: list[tuple[str, str]]) 
     for i, (key, what) in enumerate(shown):
         if i:
             middle.append(("subtle", dot))
-        middle += [("muted+bold", key), ("muted", f" {what}")]
+        middle += [("muted", key), ("subtle", f" {what}")]
     middle.append(("", " "))
     used = sum(cell_width(t) for _, t in middle)
     fill = max(width - used - 3, 0)

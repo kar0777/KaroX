@@ -556,6 +556,7 @@ class ChatApp:
         self._stream: str | None = None  # "text" | "reasoning" while a delta stream is open
         self._streamed_text = False
         self._stream_newline = False
+        self._text_before_tools = False  # the model wrote text: a gap before tool lines
         self._initialize = initialize
         self._before_turn = before_turn
         self._session_task: asyncio.Task[Session] | None = None
@@ -1337,6 +1338,9 @@ class ChatApp:
             self._error_shown = False
 
     def _render_tool_finished(self, event: ev.ToolFinished) -> None:
+        if self._text_before_tools:
+            self.write("\n")  # the model's words, then a gap, then what it ran
+            self._text_before_tools = False
         start = self._active_tools.pop(event.call_id, None)
         self._phase = "Model thinking"
         self._had_tools = True
@@ -1346,7 +1350,11 @@ class ChatApp:
         pad = "    " if "/" in name else ""  # a subagent's call
         failed = is_tool_failure(event)
         bullet = p("error" if failed else "success", g["tool"])
-        head = f"{pad}{bullet} {p('bold', name)}" + (f" {target}" if target else "")
+        # The tool line steps back (muted name and target): the model's own words stay
+        # the brightest text on screen; the bullet keeps the success / failure colour.
+        head = f"{pad}{bullet} {p('muted+bold', name)}" + (
+            f" {p('muted', target)}" if target else ""
+        )
         mark = p("error", g["fail"]) if failed else p("success", g["ok"])
         stats = (
             _edit_diff_stats(event.name, start.arguments)
@@ -1453,6 +1461,7 @@ class ChatApp:
     def _end_stream(self) -> None:
         if self._stream is not None:
             if self._stream == "text":
+                self._text_before_tools = True
                 rest = self._md.flush()
                 if self._live is not None:
                     self._live("")

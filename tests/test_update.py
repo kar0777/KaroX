@@ -267,6 +267,28 @@ def test_same_version_new_commits_on_the_same_branch(
     assert found == "6.0.0.dev40 (ddddddd)"
 
 
+def test_a_newer_build_asks_again_instead_of_offering_the_old_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The day-old answer named the head the old build saw; after updating past it the
+    chat offered to "update" to that older commit."""
+    source = update.Source("https://example.test/r.git", "karox6/main")
+    old = update.Installed("6.0.0.dev68", "c" * 40, "karox6/main")
+    monkeypatch.setattr(update, "installed", lambda *a, **k: old)
+    first = lambda _s: ("6.0.0.dev68", "d" * 40)  # noqa: E731
+    assert update.check_cached(tmp_path, source, now=5.0, fetch=first) == "6.0.0.dev68 (ddddddd)"
+    new = update.Installed("6.0.0.dev68", "e" * 40, "karox6/main")  # updated past d...
+    monkeypatch.setattr(update, "installed", lambda *a, **k: new)
+    asked: list[str] = []
+
+    def head(_s: update.Source) -> tuple[str, str]:
+        asked.append("x")
+        return "6.0.0.dev68", "e" * 40
+
+    assert update.check_cached(tmp_path, source, now=6.0, fetch=head) is None
+    assert asked == ["x"]  # asked again although the saved answer was minutes old
+
+
 def test_update_command_reports_errors_as_sentences(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

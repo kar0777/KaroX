@@ -453,10 +453,15 @@ def check_cached(
     if isinstance(state, dict):
         with contextlib.suppress(TypeError, ValueError):
             checked = float(state.get("checked", 0))
+    mine = installed()
+    # The answer is about the build that asked: after an update (any way) the day-old
+    # answer compared the branch's old head with the new build ("update to d582163"
+    # right after installing something newer), so a different build asks again.
     fresh = (
         isinstance(state, dict)
         and state.get("repo") == source.repo
         and state.get("branch") == source.branch
+        and state.get("installed", "") == mine.commit
         and 0 <= now - checked < CHECK_EVERY_S
     )
     if not fresh:
@@ -470,6 +475,7 @@ def check_cached(
             "checked": now,
             "version": version,
             "commit": commit,
+            "installed": mine.commit,
         }
         with contextlib.suppress(OSError):
             home.mkdir(parents=True, exist_ok=True)
@@ -477,7 +483,6 @@ def check_cached(
         _cleanup_old_launchers()
     version = str(state.get("version") or "")
     commit = str(state.get("commit") or "")
-    mine = installed()
     if version and newer(version, mine.version):
         return version
     if (

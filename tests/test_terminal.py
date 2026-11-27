@@ -842,9 +842,7 @@ def test_activity_line_and_keys_follow_the_turn(launch: Launcher) -> None:
     t.wait(lambda _s: "esc stop" in activity(t))
     line = activity(t)
     assert re.search(r"^ \S \S.* +\d+\.\ds · esc stop$", line.rstrip())  # spinner, phase
-    assert (
-        t.lines()[-2].rstrip().endswith("esc stop · enter queue a message · ctrl+o tool output ─╯")
-    )
+    assert t.lines()[-2].rstrip().endswith(" enter queue a message · ctrl+o tool output ─╯")
     t.wait(lambda _s: chat.idle(), 40)
     assert not activity(t).strip()
     assert "enter send" in t.lines()[-2]
@@ -859,7 +857,7 @@ def test_markdown_answers_are_formatted_on_screen(launch: Launcher) -> None:
     chat = launch.start([Reply(text=answer, chunk_size=5)], env=launch.env(COLORTERM="truecolor"))
     t = chat.term
     screen = chat.turn("explain")
-    for line in ("## Result", "The fix is small:", "• one call", "• two", "```python"):
+    for line in ("Result", "The fix is small:", "• one call", "• two", "```python"):
         assert line in screen
     assert "a │ b" in screen
     assert "──┼───" in screen

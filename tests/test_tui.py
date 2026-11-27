@@ -700,3 +700,20 @@ def test_switching_provider_moves_the_bridge_agent_with_its_key(tmp_path):
     assert app.bridge_env == {}  # no key goes to a server that was given none
     app._switch_model("q2")
     assert app.bridge_agent_args[3] == "q2"
+
+
+def test_the_models_words_stand_apart_from_the_tool_lines(tmp_path):
+    term = FakeTerm(["look", "/quit"])
+    turns = [
+        Turn(text="Let me look first.", calls=[("read", {"file_path": "notes.txt"})]),
+        Turn(text="It says alpha."),
+    ]
+    app, _ = make_app(tmp_path, turns, term)
+    (tmp_path / "ws" / "notes.txt").write_text("alpha\n")
+    assert asyncio.run(app.run()) == 0
+    text = term.text
+    words = text.index("Let me look first.")
+    tool = text.index("read notes.txt")
+    between = text[words + len("Let me look first.") : tool]
+    assert between.count("\n") >= 2  # a blank line before what the model ran
+    assert "It says alpha." in text

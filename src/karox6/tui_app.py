@@ -1472,15 +1472,25 @@ class FullScreenTui:
         more = self._more_text
         paint = self._chat_app.paint if self._chat_app is not None else None
         if self._color and paint is not None:
-            rendered = [paint("accent+bold", prefix) + paint("user", _plain_text(lines[0]))]
+            # On a band of its own (dark and light themes): your messages are easy to find
+            # among the answers and tool lines when scrolling back. "Erase to the end of
+            # the line" paints the rest of the row in the band's colour.
+            band = "+user_bg" if paint.theme.sgr("user_bg") else ""
+            fill = "\x1b[K" if band else ""
+            rendered = [
+                paint(f"accent+bold{band}", prefix)
+                + paint(f"user{band}", _plain_text(lines[0]) + fill)
+            ]
             rendered.extend(
-                paint("muted", more) + paint("user", _plain_text(line)) for line in lines[1:]
+                paint(f"muted{band}", more) + paint(f"user{band}", _plain_text(line) + fill)
+                for line in lines[1:]
             )
         else:
             rendered = [f"{prefix}{_plain_text(lines[0])}"]
             rendered.extend(f"{more}{_plain_text(line)}" for line in lines[1:])
         self._transcript.scroll_to_bottom()
-        self.write("\n" + "\n".join(rendered) + "\n")
+        # A blank line before and after: the agent's answer starts apart from the question.
+        self.write("\n" + "\n".join(rendered) + "\n\n")
 
     def write_block(self, folded: str, full: str) -> None:
         """Lines that Ctrl+O switches between their short and their full form."""

@@ -50,6 +50,7 @@ _ITALIC = {"comment"}
 _BACKGROUNDS: dict[str, tuple[str, str]] = {
     "add_bg": ("1e3a2a", "dafbe1"),
     "del_bg": ("44212a", "ffebe9"),
+    "user_bg": ("262b40", "eceff4"),  # the band behind the user's messages
 }
 # Names the chat used before roles existed.
 ALIASES = {

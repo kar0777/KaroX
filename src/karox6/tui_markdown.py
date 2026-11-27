@@ -5,7 +5,7 @@ arrived); the open line can be shown as it grows (:meth:`Markdown.partial`) and 
 replaced by its rendering when it ends, so formatting never jumps around mid-line.
 Tables are held until their last row, then drawn with aligned columns.
 
-What it does: headings (bold, coloured; the ``#`` marks stay, dimmed), bullet and
+What it does: headings (bold, coloured, without the ``#`` marks), bullet and
 numbered lists, block quotes, rules, ``inline code``, **bold**, *italic*, links, fenced
 code with syntax colours (karox6.tui_highlight) and tables. The markdown signs that
 carry meaning when copied (fences, ``#``) stay in the text; without colours the text is
@@ -122,7 +122,7 @@ class Markdown:
         if heading:
             marks = heading.group(1)
             role = "heading" if len(marks) <= 2 else "bold"
-            return p("subtle", marks + " ") + self._inline(heading.group(2), role) + end
+            return self._inline(heading.group(2), role) + end
         if _RULE.match(line):
             return p.frame("─" * max(min(self.columns() - 1, 72), 3)) + end
         bullet = _BULLET.match(line)

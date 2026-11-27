@@ -157,7 +157,7 @@ def test_markdown_renders_the_same_however_it_streams() -> None:
 
 def test_markdown_formats_blocks_and_inline_marks() -> None:
     lines = plain(render(ANSWER, 5)).splitlines()
-    assert lines[0] == "## Plan"
+    assert lines[0] == "Plan"  # a heading without its # marks
     assert lines[2] == "Use make test and then ship it, see docs (https://example.test/d)."
     assert "• first" in lines
     assert "  • nested" in lines
