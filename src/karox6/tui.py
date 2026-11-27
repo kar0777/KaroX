@@ -716,7 +716,7 @@ class ChatApp:
             u = s.usage
             total_tokens = u.input_tokens + u.output_tokens
             used = s.context_tokens() if s.messages else 0
-            window = cfg.effective_window(s._learned_window)
+            window = cfg.effective_window(s.window_hint())
             pct = min(round(used / window * 100), 100) if window else 0
             session_id: str | None = s.session_id
             cost = s.cost_usd if cfg.price else None
@@ -957,6 +957,12 @@ class ChatApp:
             self.write(self.paint("red", f"  cannot read the clipboard: {exc}") + "\n")
             return
         (self._pending_images if to_draft else self._carried).append(path)
+        if self.session.model().vision is False:
+            self.write(
+                self.paint("yellow", f"  {self.config.model} takes no pictures: ")
+                + self.paint("yellow", "it gets a note instead (models.json in the KaroX home)")
+                + "\n"
+            )
         self.write(
             self.paint("dim", f"  {picture_chip(path, number)} — goes with your ")
             + self.paint("dim", "next message (/paste or Ctrl+V adds another)")
@@ -1568,6 +1574,7 @@ class ChatApp:
                 self.config.model = arg
                 self.session.forget_model_state(provider_changed=False)
             self.write(f"model: {self.config.model}\n")
+            self.write(self.paint("dim", f"  {self.session.model().describe()}") + "\n")
         elif name == "/setup":
             await self._setup()
         elif name == "/bridge":
@@ -1827,7 +1834,7 @@ class ChatApp:
 
     def _context_summary(self, *, with_threshold: bool = False) -> str:
         used = self.session.context_tokens() if self.session.messages else 0
-        window = self.config.effective_window(self.session._learned_window)
+        window = self.config.effective_window(self.session.window_hint())
         pct = min(round(used / window * 100), 100) if window else 0
         base = f"{_k(used)} / {_k(window)} ({pct}%)"
         if with_threshold:
@@ -1840,6 +1847,7 @@ class ChatApp:
         lines = [
             f"session    {s.session_id}",
             f"model      {self.config.model} ({self.config.provider_name})",
+            f"knows      {s.model().describe()}",
             f"workspace  {s.workspace}",
             f"messages   {len(s.messages)}",
             f"context    {self._context_summary()}",

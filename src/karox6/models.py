@@ -1,0 +1,163 @@
+"""What KaroX knows about a model: does it take pictures, how large is its window.
+
+Three sources, the first that has a field wins:
+
+1. ``models.json`` in the KaroX home, written by the user::
+
+       {"models": {"zai-org/GLM-5.3-Flash": {"vision": false, "context_window": 200000},
+                   "my-local-*": {"vision": true}}}
+
+   Keys are model names or ``fnmatch`` patterns (case-insensitive).
+2. What a session learned and saved there under ``"learned"`` (a provider that answered
+   "this model does not support images" -> ``{"vision": false}``).
+3. The table below: only facts that hold for every route serving the family. Unknown
+   stays ``None``; callers treat that as "try it" for what the user sent and "do not"
+   for what KaroX would add on its own (tool screenshots).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import fnmatch
+import json
+import os
+import re
+import tempfile
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+
+FILE_NAME = "models.json"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelInfo:
+    vision: bool | None = None  # accepts image input
+    context_window: int | None = None  # tokens the model accepts (None: unknown)
+    source: str = "unknown"  # where the answer came from: user | learned | built-in
+
+    def describe(self) -> str:
+        vision = {True: "yes", False: "no", None: "unknown"}[self.vision]
+        window = f"{self.context_window // 1000}k" if self.context_window else "unknown"
+        return f"pictures: {vision} · window: {window} ({self.source})"
+
+
+# (pattern on the lower-cased model name without a provider prefix, facts)
+_BUILTIN: tuple[tuple[str, dict[str, Any]], ...] = (
+    # Claude: every model since 3 takes pictures; before 4.6 the standard window is 200k
+    # (1M only with a beta header), 4.6 and later are larger than KaroX's working limit.
+    (
+        r"claude-(?:3|3-\d)-|claude-(?:opus|sonnet|haiku)-4(?:-[0-5])?(?:$|-\d{6,}|-latest)",
+        {"vision": True, "context_window": 200_000},
+    ),
+    (r"claude-", {"vision": True}),
+    (r"(?:^|[-_/])(?:fable|mythos)", {"vision": True}),
+    (r"^(?:gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5|gpt-6|o3|o4|chatgpt-4o)", {"vision": True}),
+    (r"^gpt-oss", {"vision": False}),
+    (r"^gpt-3\.5", {"vision": False}),
+    (r"^gemini", {"vision": True}),
+    (r"(?:[-_.]vl(?:[-_.]|$)|vision|llava|pixtral|glm-\d(?:\.\d)?v)", {"vision": True}),
+    # DeepSeek's own API takes text only (chat, reasoner, V3/V4 families).
+    (r"^deepseek", {"vision": False}),
+)
+
+
+def _base_name(model: str) -> str:
+    """``openrouter/deepseek/deepseek-v4.1`` -> ``deepseek-v4.1``; lower case."""
+    return model.strip().lower().rsplit("/", 1)[-1].split(":", 1)[0]
+
+
+def _builtin(model: str) -> dict[str, Any]:
+    name = _base_name(model)
+    found: dict[str, Any] = {}
+    for pattern, facts in _BUILTIN:
+        if re.search(pattern, name):
+            for key, value in facts.items():
+                found.setdefault(key, value)
+    return found
+
+
+def _read(home: Path | None) -> dict[str, Any]:
+    if home is None:
+        return {}
+    try:
+        data = json.loads((home / FILE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _match(table: Any, model: str) -> dict[str, Any]:
+    if not isinstance(table, dict):
+        return {}
+    full, base = model.strip().lower(), _base_name(model)
+    exact = {str(k).lower(): v for k, v in table.items() if isinstance(v, dict)}
+    for key in (full, base):
+        if key in exact:
+            return exact[key]
+    for key, facts in exact.items():
+        if fnmatch.fnmatchcase(full, key) or fnmatch.fnmatchcase(base, key):
+            return facts
+    return {}
+
+
+def _clean(facts: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if isinstance(facts.get("vision"), bool):
+        out["vision"] = facts["vision"]
+    window = facts.get("context_window")
+    if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+        out["context_window"] = window
+    return out
+
+
+def model_info(model: str, home: Path | None = None) -> ModelInfo:
+    data = _read(home)
+    info = ModelInfo()
+    # Lowest priority first: each later source overwrites what it knows.
+    for source, found in (
+        ("built-in", _builtin(model)),
+        ("learned", _match(data.get("learned"), model)),
+        ("user", _match(data.get("models"), model)),
+    ):
+        facts = _clean(found)
+        if facts:
+            info = replace(info, **facts, source=source)
+    return info
+
+
+def remember(home: Path | None, model: str, **facts: Any) -> None:
+    """Save what a session found out about ``model`` (best effort, atomic write)."""
+    if home is None:
+        return
+    data = _read(home)
+    stored = data.get("learned")
+    learned: dict[str, Any] = stored if isinstance(stored, dict) else {}
+    entry = dict(learned.get(model) or {})
+    entry.update(_clean(facts))
+    learned[model] = entry
+    data["learned"] = learned
+    with contextlib.suppress(OSError):
+        home.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=home, prefix=".models-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=1, ensure_ascii=False)
+            os.replace(tmp, home / FILE_NAME)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+
+
+_NO_IMAGES = re.compile(
+    r"image|vision|multimodal|multi-modal|image_url|content type|unsupported content",
+    re.IGNORECASE,
+)
+
+
+def rejects_images(code: str, message: str) -> bool:
+    """A provider error that says the model does not take pictures."""
+    return code in ("bad_request", "unsupported", "invalid_request") and bool(
+        _NO_IMAGES.search(message)
+    )

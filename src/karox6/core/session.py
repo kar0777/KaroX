@@ -41,7 +41,7 @@ from karox6.core.loopguard import (
     WorkspaceMonitor,
     finish_gate_message,
 )
-from karox6.core.messages import IMAGE_TOKENS, Message, ToolCall, Usage
+from karox6.core.messages import IMAGE_TOKENS, Message, ToolCall, Usage, image_note
 from karox6.core.prompt import build_system_prompt
 from karox6.core.review import (
     REVIEW_APPEND,
@@ -62,6 +62,7 @@ from karox6.core.store import (
     SessionStore,
     new_session_id,
 )
+from karox6.models import ModelInfo, model_info, rejects_images, remember
 from karox6.providers.base import (
     UNAVAILABLE_STATUSES,
     Delta,
@@ -196,6 +197,7 @@ class Session:
         self._effort: str | None = None  # eased reasoning effort after an all-thinking cut
         self._deadline: float | None = None  # monotonic end of the current run
         self._learned_window: int | None = None  # from a context-window error
+        self._model_facts: tuple[str, ModelInfo] | None = None  # (model, what is known)
         if not self.resumed:
             self.store.append(
                 "meta",
@@ -330,7 +332,9 @@ class Session:
                     # The conversation outgrew what the provider accepts (our estimate was
                     # low, or the route's real window is smaller than configured): shrink
                     # it once and retry instead of losing the run.
-                    if exc.code == "context_window":
+                    if self._images_refused(exc, emit):
+                        recovered = True  # the same request again, pictures as notes
+                    elif exc.code == "context_window":
                         recovered = await self._recover_overflow(emit)
                     else:
                         recovered = shrinks < MAX_SERVER_SHRINKS and self._shrink_for_server(
@@ -616,6 +620,8 @@ class Session:
 
     def _request(self, *, allow_tools: bool = True) -> ModelRequest:
         messages = self._replay_view(self.messages)
+        if self.model().vision is False:
+            messages = _without_images(messages)
         return ModelRequest(
             model=self.config.model,
             system=self.system_prompt,
@@ -996,6 +1002,24 @@ class Session:
             self._last_input_tokens = self._last_cached_tokens = 0
             self._chars_since_measure = 0
 
+    def _images_refused(self, exc: ProviderError, emit: Callable[[ev.Event], None]) -> bool:
+        """The provider said the model takes no pictures: remember it (for this model,
+        in the KaroX home) and send without them. Once: a second refusal is an error."""
+        if self.model().vision is False or not rejects_images(exc.code, str(exc.args[0])):
+            return False
+        if not any(m.images for m in self.messages):
+            return False
+        remember(self.config.home, self.config.model, vision=False)
+        self._model_facts = (self.config.model, replace(self.model(), vision=False))
+        emit(
+            ev.Notice(
+                kind="no_images",
+                text=f"{self.config.model} does not take pictures: sent without them "
+                "(remembered; models.json in the KaroX home changes it)",
+            )
+        )
+        return True
+
     def forget_model_state(self, *, provider_changed: bool) -> None:
         """After /model or /setup: what the session learned about the old model (its
         smaller context window, the size of the last request) does not apply to the new
@@ -1003,6 +1027,7 @@ class Session:
         signatures, encrypted reasoning items, the reasoning field's name) is dropped,
         since another API rejects or misreads it. The conversation itself stays."""
         self._learned_window = None
+        self._model_facts = None
         self._last_input_tokens = 0
         self._last_cached_tokens = 0
         self._effort = None
@@ -1165,8 +1190,21 @@ class Session:
         emit(ev.Compacted(mode="prune", tokens_before=before, tokens_after=after))
         return after
 
+    def model(self) -> ModelInfo:
+        """What is known about the configured model (re-read after /model)."""
+        name = self.config.model
+        if self._model_facts is None or self._model_facts[0] != name:
+            self._model_facts = (name, model_info(name, self.config.home))
+        return self._model_facts[1]
+
+    def window_hint(self) -> int | None:
+        """The window this session must stay under besides the configured one: what a
+        context-window error taught it, or the model's known window."""
+        known = [w for w in (self._learned_window, self.model().context_window) if w]
+        return min(known) if known else None
+
     def _threshold(self) -> int:
-        return self.config.compaction_threshold(self._learned_window)
+        return self.config.compaction_threshold(self.window_hint())
 
     async def _recover_overflow(self, emit: Callable[[ev.Event], None]) -> bool:
         """After a context-window error: learn the smaller window, prune every big tool
@@ -1193,7 +1231,7 @@ class Session:
             summarized = await self._summarize(
                 estimate_tokens(self.messages, self.system_prompt),
                 emit,
-                head_budget=min(self.config.effective_window(self._learned_window), sent) // 2,
+                head_budget=min(self.config.effective_window(self.window_hint()), sent) // 2,
             )
         except ProviderError as exc:
             if exc.code != "context_window":
@@ -1402,3 +1440,21 @@ def _command_text(arguments: str) -> str:
     command: str = data["command"]
     workdir = data.get("workdir")
     return f"cd {workdir}; {command}" if isinstance(workdir, str) and workdir else command
+
+
+def _without_images(messages: list[Message]) -> list[Message]:
+    """Copies of ``messages`` with each picture replaced by a line of text: for a model
+    that takes none (the stored conversation keeps them)."""
+    out: list[Message] = []
+    for m in messages:
+        if not m.images:
+            out.append(m)
+            continue
+        notes = " ".join(
+            image_note(image).replace(
+                "is no longer available", "not shown: this model takes no pictures"
+            )
+            for image in m.images
+        )
+        out.append(replace(m, images=[], content=f"{m.content}\n{notes}".strip()))
+    return out
