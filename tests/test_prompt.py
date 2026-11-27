@@ -120,3 +120,14 @@ def test_project_instructions_never_exceed_the_budget_across_roots(tmp_path):
     assert "a" * 100 in text
     assert "b" * 100 not in text
     assert len(text) < INSTRUCTIONS_MAX_CHARS + 1_000
+
+
+def test_git_bash_paths_are_explained_for_windows_programs(tmp_path):
+    from karox6.core.prompt import environment_block
+    from karox6.tools.shell import ShellInfo
+
+    def block(flavor):
+        return environment_block(tmp_path, ShellInfo("bash", "bash", flavor))
+
+    assert "cygpath -w" in block("git-bash")
+    assert "cygpath" not in block("bash")

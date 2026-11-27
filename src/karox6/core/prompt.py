@@ -72,6 +72,11 @@ def environment_block(workspace: Path, shell: ShellInfo) -> str:
         f"- Date: {time.strftime('%Y-%m-%d')}",
         f"- {git_summary(workspace)}",
     ]
+    if shell.flavor == "git-bash":
+        lines.append(
+            "- Windows programs (python, node) do not understand Git Bash paths such as "
+            "/tmp/x or /c/x: pass them `cygpath -w` paths"
+        )
     hint = python_hint()
     if hint:
         lines.append(f"- {hint}")

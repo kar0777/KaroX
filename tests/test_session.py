@@ -390,6 +390,29 @@ def test_files_changed_write_edit(tmp_path):
     assert (tmp_path / "a.txt").read_text() == "new"
 
 
+def test_each_run_reports_its_own_files_and_usage(tmp_path):
+    provider = ScriptedProvider(
+        [
+            Turn(calls=[("write", {"file_path": "a.txt", "content": "one"})]),
+            Turn(text="done"),
+            Turn(text="nothing to change"),
+            Turn(calls=[("edit", {"file_path": "a.txt", "old_string": "one", "new_string": "2"})]),
+            Turn(text="done"),
+        ]
+    )
+    session = Session(config(tmp_path), provider)
+    first = finish(run(session))
+    assert first.run_files == ["a.txt"]
+    assert first.run_usage == first.usage
+    second = finish(run(session))
+    assert second.files_changed == ["a.txt"]  # the session's list
+    assert second.run_files == []  # this run changed nothing
+    assert second.run_usage["requests"] == 1 < second.usage["requests"]
+    assert second.run_cost_usd is None  # no price configured
+    third = finish(run(session))  # the same file changed again: this run's change too
+    assert third.run_files == ["a.txt"]
+
+
 def test_files_changed_shell_git(tmp_path):
     if not shutil.which("git"):
         pytest.skip("git unavailable")

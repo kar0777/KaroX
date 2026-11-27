@@ -34,6 +34,9 @@ ENV_OVERRIDES = {
     "GIT_TERMINAL_PROMPT": "0",
     "PYTHONUNBUFFERED": "1",
     "PYTHONIOENCODING": "utf-8",
+    # open(path, "w") without an encoding wrote in the ANSI code page (cp1251...) and
+    # failed on the first character outside it; UTF-8 mode makes it UTF-8 everywhere
+    "PYTHONUTF8": "1",
 }
 
 

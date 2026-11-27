@@ -155,5 +155,8 @@ class RunFinished(Event):
     elapsed_s: float
     usage: dict[str, int]
     cost_usd: float | None
-    files_changed: list[str] = field(default_factory=list)
+    files_changed: list[str] = field(default_factory=list)  # during the whole session
     session_id: str = ""
+    run_usage: dict[str, int] = field(default_factory=dict)  # this run only
+    run_files: list[str] | None = None  # changed by this run (None: not known)
+    run_cost_usd: float | None = None  # this run only

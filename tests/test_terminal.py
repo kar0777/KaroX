@@ -112,6 +112,7 @@ class Launcher:
         env.update(
             KAROX_HOME=str(self.home),
             KAROX_API_KEY="test-key",
+            KAROX_MODEL_CATALOG="0",
             PYTHONPATH=str(SRC),
             TERM="xterm-256color",
         )

@@ -149,7 +149,9 @@ def test_stdin_closed(ctx):
     assert result.meta["exit_code"] != 0
 
 
-@pytest.mark.parametrize(("name", "value"), [("NO_COLOR", "1"), ("PAGER", "cat")])
+@pytest.mark.parametrize(
+    ("name", "value"), [("NO_COLOR", "1"), ("PAGER", "cat"), ("PYTHONUTF8", "1")]
+)
 def test_environment(ctx, name, value):
     result = shell(ctx, command=python(f"import os; print(os.environ[{name!r}])"))
     assert result.content.startswith(value + "\n")

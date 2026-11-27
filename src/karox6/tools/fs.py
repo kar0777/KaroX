@@ -162,10 +162,7 @@ def _read_file(
         kind = IMAGE_TYPES.get(path.suffix.lower())
         if kind is not None and len(data) <= IMAGE_MAX_BYTES:
             # A picture: shown to a model that takes pictures, right after this result.
-            note = (
-                f"{shown} is a picture ({kind}, {len(data)} bytes); it follows this result "
-                "if this model takes pictures."
-            )
+            note = f"{shown} is a picture ({kind}, {len(data)} bytes); it follows this result."
             return ToolResult(note, images=[path]), 0
         return (
             ToolResult(f"Error: {shown} is a binary file ({len(data)} bytes).", is_error=True),
@@ -269,7 +266,9 @@ class WriteTool:
         ctx.files.record_write(path)
         lines = content.count("\n") + (0 if content.endswith("\n") or not content else 1)
         verb = "Updated" if existed else "Created"
-        return ToolResult(f"{verb} {shown} ({lines} lines).", meta={"path": str(path)})
+        return ToolResult(
+            f"{verb} {shown} ({lines} lines).{_outside_note(ctx, path)}", meta={"path": str(path)}
+        )
 
 
 class EditTool:
@@ -377,9 +376,20 @@ class EditTool:
             # 1-based line where the replaced text began (the chat numbers its preview)
             meta["line"] = text.count("\n", 0, text.find(old_n)) + 1
         return ToolResult(
-            f"Edited {shown}: replaced {count} occurrence{plural}{note}.{snippet}{copies}",
+            f"Edited {shown}: replaced {count} occurrence{plural}{note}."
+            f"{_outside_note(ctx, path)}{snippet}{copies}",
             meta=meta,
         )
+
+
+def _outside_note(ctx: ToolContext, path: Path) -> str:
+    """A file outside the workspace: said once per result, so work on a scratch copy is
+    not mistaken for a change to the project."""
+    try:
+        path.relative_to(ctx.workspace)
+    except ValueError:
+        return " (outside the workspace)"
+    return ""
 
 
 async def _copies_note(ctx: ToolContext, path: Path, old: str, new: str) -> str:

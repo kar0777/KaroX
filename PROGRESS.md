@@ -2584,3 +2584,31 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   base URL); config.toml rewrites are atomic with a .bak; picker PageUp/PageDown lost to the transcript's
   eager keys; odd JSON (non-lists, 1e999) crashed. Left: /key on a profile with api_key_env stays behind the
   variable at the next start (documented behaviour: the environment wins).
+
+### Pictures and the user's aquarium session — 2026-11-27
+- The user's chat (deepseek-v4-1-flash-1017, "fix every problem in the aquarium", 79 min,
+  136 tool calls) was audited by a council: Codex gpt-6.1-sol (session audit, $0.41) and Gemini 4 Neon
+  (capability sources research). Five `read` results of PNG screenshots never reached the model ("I can't
+  view images"): the built-in "^deepseek -> no pictures" was outdated (V4.1 Flash, 2026-09-10, is natively
+  multimodal; DeepSeek changelog) and unknown vision withheld tool pictures.
+- Now: the open catalog models.dev (MIT; what OpenCode and Goose use) is downloaded at most once a day in a
+  daemon thread and kept as a 0.4 MB digest `model-catalog.json` (karox6/model_catalog.py): this server's
+  entry for the model (by API host), else "takes pictures" when >= 80% of the routes serving the name say
+  so (never "no" from other routes: hosts serve multimodal models text-only, e.g. OpenRouter's
+  deepseek-v4-flash). Priority user > learned > provider list > catalog > built-in. Off with
+  `model_catalog = false` / KAROX_MODEL_CATALOG=0 (tests set it). Built-in: DeepSeek V4.1 Flash sees,
+  V3/R1/Coder do not, chat/reasoner/V4 names unknown.
+- Tool pictures go to every model not known to refuse them; a refusal is learned and the request is sent
+  again without them (Neon's recommendation too: optimistic send + refusal learning).
+- Other session findings fixed in general form: the turn footer showed the session's totals (the second
+  turn claimed "2 files changed" and 44.9M input tokens) -> run_usage / run_files / run_cost_usd on
+  run_finished, the footer shows this turn and how many files are outside the workspace; write/edit
+  results say "(outside the workspace)" (78 minutes of edits went to a %TEMP% copy); shell env PYTHONUTF8=1
+  (open(..., "w") failed in cp1251); a Git Bash prompt line that Windows programs need `cygpath -w` paths
+  (Python got /tmp/... four times). Not changed, by design or without evidence: the progress guard fires
+  once per run and counts new shell commands as progress (bench-tuned); one 658 s first-token wait from
+  the provider (silent thinking is allowed up to the request timeout); compaction at 320k (the run peaked at 276k).
+- Codex review (gpt-6.1-terra, $0.05): 6 findings; fixed: route votes lost when two providers share a host,
+  routes without modalities did not count against "yes", redirects followed, run cost cumulative. Not
+  changed: mtime+size run-file detection (ns mtimes), concurrent refresh of the digest (worst case an older
+  digest for a day).

@@ -855,6 +855,7 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
             if app is None:
                 app = make_app()
             _start_update_check(args, home, app)
+            _start_catalog_refresh(args, home, app)
             try:
                 return await app.run(banner=banner)
             finally:
@@ -903,6 +904,36 @@ def _start_update_check(args: argparse.Namespace, home: Path, app: Any) -> None:
                 loop.call_soon_threadsafe(app.notice_update, found)
 
     threading.Thread(target=check, name="karox-update-check", daemon=True).start()
+
+
+def _start_catalog_refresh(args: argparse.Namespace, home: Path, app: Any) -> None:
+    """Download the open model catalog (which models take pictures, their windows; see
+    karox6.model_catalog) at most once a day, in a daemon thread; the session looks its
+    model up again when a new digest arrived. Off with ``model_catalog = false`` or
+    KAROX_MODEL_CATALOG=0."""
+    import asyncio
+    import threading
+
+    from karox6 import model_catalog
+
+    wanted = os.environ.get("KAROX_MODEL_CATALOG", "")
+    if wanted == "0" or (wanted != "1" and getattr(args, "model_catalog", True) is False):
+        return
+    if not model_catalog.due(home):
+        return
+    loop = asyncio.get_running_loop()
+
+    def reread() -> None:
+        session = getattr(app, "session", None)
+        if session is not None:
+            session.reread_model_facts()
+
+    def fetch() -> None:
+        with contextlib.suppress(Exception):
+            if model_catalog.refresh(home):
+                loop.call_soon_threadsafe(reread)
+
+    threading.Thread(target=fetch, name="karox-model-catalog", daemon=True).start()
 
 
 def _session_config(

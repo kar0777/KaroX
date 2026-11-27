@@ -89,8 +89,13 @@ still works in 400k unless you raise the limit.
 The answer comes from `models.json` in the KaroX home (yours first), then from what a
 session learned, then from what the provider's model list said (read by `/model` and the
 setup: Mistral, OpenRouter, Gemini and others give the window and image input; the picker
-shows it as `1M · pictures`), then from built-in facts (Claude, GPT-4o and later, Gemini and `-VL`
-models see; gpt-oss and DeepSeek do not):
+shows it as `1M · pictures`), then from the open model catalog
+[models.dev](https://models.dev) (downloaded at most once a day in the background and kept
+as `model-catalog.json`; this server's entry for the model, else "takes pictures" when
+nearly all providers serving the name say so), then from built-in facts (Claude, GPT-4o and
+later, Gemini, `-VL` models and DeepSeek V4.1 Flash see; gpt-oss and DeepSeek V3/R1 do
+not). `model_catalog = false` in `config.toml` (or `KAROX_MODEL_CATALOG=0`) turns the
+download off:
 
 ```json
 {"models": {"zai-org/GLM-5.3-Flash": {"vision": false, "context_window": 200000},
@@ -100,7 +105,7 @@ models see; gpt-oss and DeepSeek do not):
 A model that takes no pictures gets a short note in their place. When a provider refuses
 pictures, KaroX writes `{"vision": false}` for that model under `"learned"` and sends the
 request again without them. Pictures from tools (a screenshot, an MCP browser, `read` of a
-`.png`) are shown only to a model known to see them.
+`.png`) go to every model not known to refuse them; a refusal is learned the same way.
 
 ## Chat
 

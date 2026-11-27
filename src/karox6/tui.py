@@ -1426,18 +1426,26 @@ class ChatApp:
         return f"{self.paint('green', f'+{added}')} {self.paint('red', f'-{removed}')}"
 
     def _footer(self, event: ev.RunFinished) -> str:
-        usage = event.usage
+        # this turn's numbers: the session's totals made a later turn look like it had
+        # changed files it never touched (and spent every earlier turn's tokens)
+        usage = event.run_usage or event.usage
+        files = event.files_changed if event.run_files is None else event.run_files
         g = self.glyph
         parts = [
             f"{event.steps} steps",
             f"{event.elapsed_s:.0f}s",
             f"{_k(usage.get('input_tokens', 0))} in / {_k(usage.get('output_tokens', 0))} out",
         ]
-        if event.cost_usd is not None:
-            parts.append(f"${event.cost_usd:.4f}")
-        if event.files_changed:
-            count = len(event.files_changed)
-            parts.append(f"{count} file{'s' if count != 1 else ''} changed (/diff)")
+        cost = event.run_cost_usd if event.run_usage else event.cost_usd
+        if cost is not None:
+            parts.append(f"${cost:.4f}")
+        if files:
+            count = len(files)
+            outside = sum(1 for f in files if Path(f).is_absolute())
+            text = f"{count} file{'s' if count != 1 else ''} changed"
+            if outside:
+                text += f", {outside} outside the workspace"
+            parts.append(f"{text} (/diff)")
         done = event.status == "completed"
         head = self.paint(
             "success" if done else "warning", f"{g['ok'] if done else g['warn']} {event.status}"

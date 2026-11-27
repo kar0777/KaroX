@@ -423,3 +423,13 @@ def test_resolve_maps_msys_paths_on_windows(ctx):
     assert ctx.resolve("/d/work/a.py") != Path("D:/work/a.py")
     ctx.shell = ShellInfo("bash", "wsl-bash", "bash")  # a non-MSYS bash too
     assert ctx.resolve("/d/work/a.py") != Path("D:/work/a.py")
+
+
+def test_a_file_outside_the_workspace_is_said_to_be(ctx, tmp_path):
+    inside = call(WriteTool(), ctx, file_path="new.txt", content="a\n")
+    assert "outside the workspace" not in inside.content
+    scratch = tmp_path / "scratch" / "copy.txt"
+    written = call(WriteTool(), ctx, file_path=str(scratch), content="a\n")
+    assert written.content.endswith("(outside the workspace)")
+    edited = call(EditTool(), ctx, file_path=str(scratch), old_string="a", new_string="b")
+    assert "(outside the workspace)" in edited.content

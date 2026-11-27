@@ -302,6 +302,11 @@ class Session:
         gate_cap_notified = False
         gate_text = ""  # pre-gate answer preserved across every exit path
         start_output_tokens = self.usage.output_tokens
+        start_usage = self.usage.to_dict()
+        start_cost = self.cost_usd
+        start_files: dict[str, tuple[int, int] | None] = {}
+        with contextlib.suppress(Exception):
+            start_files = await asyncio.to_thread(self._file_stamps, None)
         need_monitor = self.config.progress_guard or (
             self.config.finish_gate and not self.config.review and not self._is_read_only()
         )
@@ -498,6 +503,13 @@ class Session:
                         status=status,
                     )
             final_text = final_text or gate_text
+            run_files: list[str] | None = None
+            with contextlib.suppress(Exception):
+                now_files = await asyncio.to_thread(self._file_stamps, files_changed)
+                run_files = [
+                    p for p, stamp in now_files.items() if start_files.get(p, ...) != stamp
+                ]
+            now_usage = self.usage.to_dict()
             finished = ev.RunFinished(
                 status=status,
                 reason=reason,
@@ -508,10 +520,28 @@ class Session:
                 cost_usd=round(self.cost_usd, 6) if self.config.price else None,
                 files_changed=files_changed,
                 session_id=self.session_id,
+                run_usage={k: v - start_usage.get(k, 0) for k, v in now_usage.items()},
+                run_cost_usd=(round(self.cost_usd - start_cost, 6) if self.config.price else None),
+                run_files=run_files,
             )
             with contextlib.suppress(Exception):
                 self.store.append("event", event=finished.to_dict())
             emit(finished)
+
+    def _file_stamps(self, paths: list[str] | None) -> dict[str, tuple[int, int] | None]:
+        """(mtime, size) of each changed file (``None``: gone), to tell which of them
+        this run changed: the session's list grows over every run."""
+        if paths is None:
+            paths = self.files.changed_files()
+        out: dict[str, tuple[int, int] | None] = {}
+        for raw in paths:
+            path = Path(raw) if Path(raw).is_absolute() else self.workspace / raw
+            try:
+                st = path.stat()
+                out[raw] = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                out[raw] = None
+        return out
 
     def _is_read_only(self) -> bool:
         return bool(self.tools) and all(t.read_only for t in self.tools)
@@ -632,9 +662,10 @@ class Session:
         vision = self.model().vision
         if vision is False:
             messages = _without_images(messages)
-        # Pictures from tool results only go to a model known to see them (a guess
-        # would turn every screenshot into a failed request).
-        messages = _tool_pictures(messages, show=vision is True)
+        # Pictures from tool results go to every model not known to refuse them: a
+        # provider that refuses is remembered (_images_refused) and the request goes
+        # again without them, while withholding them blinds a model that sees.
+        messages = _tool_pictures(messages, show=vision is not False)
         return ModelRequest(
             model=self.config.model,
             system=self.system_prompt,

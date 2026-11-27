@@ -117,10 +117,10 @@ def test_what_the_list_says_about_each_model(monkeypatch, tmp_path):
     info = model_info("deepseek-v4-1-flash-1017", tmp_path, here)
     assert (info.vision, info.context_window, info.source) == (True, 1048576, "provider")
     assert model_info("or/some-model", tmp_path, here).vision is False
-    assert model_info("deepseek-v4-1-flash", tmp_path, here).vision is False  # exact name only
+    assert model_info("deepseek-v4-1-flash", tmp_path, here).source == "built-in"  # exact name
     # another server serving the same name: what this list said does not apply there
     other = model_info("deepseek-v4-1-flash-1017", tmp_path, "https://api.deepseek.com/v1")
-    assert (other.vision, other.source) == (False, "built-in")
+    assert (other.context_window, other.source) == (None, "built-in")
     remember(tmp_path, "deepseek-v4-1-flash-1017", vision=False)  # a refusal beats the list
     assert model_info("deepseek-v4-1-flash-1017", tmp_path, here).vision is False
 

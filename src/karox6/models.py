@@ -13,9 +13,11 @@ Four sources, the first that has a field wins:
 3. What the provider's model list said, saved there under ``"provider"`` per server
    when the list was read (Mistral, OpenRouter, Gemini... give the window and image
    input); it applies only to requests to that same server.
-4. The table below: only facts that hold for every route serving the family. Unknown
-   stays ``None``; callers treat that as "try it" for what the user sent and "do not"
-   for what KaroX would add on its own (tool screenshots).
+4. The open model catalog (models.dev, see karox6.model_catalog): this server's entry
+   for the model, else what every provider serving the name agrees on.
+5. The table below: only facts that hold for every route serving the family. Unknown
+   stays ``None``; callers treat that as "try it": a provider that refuses pictures is
+   remembered under ``"learned"`` and the request goes again without them.
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from karox6 import model_catalog
+
 FILE_NAME = "models.json"
 
 
@@ -37,7 +41,7 @@ FILE_NAME = "models.json"
 class ModelInfo:
     vision: bool | None = None  # accepts image input
     context_window: int | None = None  # tokens the model accepts (None: unknown)
-    source: str = "unknown"  # where it came from: user | learned | provider | built-in
+    source: str = "unknown"  # user | learned | provider | catalog | built-in
 
     def describe(self) -> str:
         vision = {True: "yes", False: "no", None: "unknown"}[self.vision]
@@ -68,8 +72,11 @@ _BUILTIN: tuple[tuple[str, dict[str, Any]], ...] = (
     (r"^gpt-3\.5", {"vision": False}),
     (r"^gemini", {"vision": True}),
     (r"(?:[-_.]vl(?:[-_.]|$)|vision|llava|pixtral|glm-\d(?:\.\d)?v)", {"vision": True}),
-    # DeepSeek's own API takes text only (chat, reasoner, V3/V4 families).
-    (r"^deepseek", {"vision": False}),
+    # DeepSeek: V4.1 Flash (2026-09) is natively multimodal; the V3 / R1 / Coder
+    # generations take text only. deepseek-chat / -reasoner and V4 names have been
+    # re-pointed between models (and routes differ), so they stay unknown here.
+    (r"^deepseek-(?:v4[.-]1-flash|flash)", {"vision": True}),
+    (r"^deepseek-(?:v3|r1|coder|v2|llm)", {"vision": False}),
 )
 
 
@@ -146,6 +153,7 @@ def model_info(model: str, home: Path | None = None, server: str | None = None) 
     # Lowest priority first: each later source overwrites what it knows.
     for source, found in (
         ("built-in", _builtin(model)),
+        ("catalog", model_catalog.lookup(home, model, server)),
         ("provider", _exact(listed, model)),
         ("learned", _match(data.get("learned"), model)),
         ("user", _match(data.get("models"), model)),

@@ -23,8 +23,10 @@ from karox6.providers.scripted import ScriptedProvider, Turn
         ("gpt-5.2", True, None),
         ("gpt-oss-120b", False, None),
         ("gemini-3-pro", True, None),
-        ("deepseek-v4.1-flash", False, None),
-        ("deepseek/deepseek-chat:free", False, None),
+        ("deepseek-v4.1-flash", True, None),  # V4.1 Flash is multimodal
+        ("deepseek-flash", True, None),
+        ("deepseek/deepseek-chat:free", None, None),  # re-pointed between models
+        ("deepseek-r1-distill", False, None),
         ("Qwen/Qwen3-VL-235B", True, None),
         ("zai-org/GLM-5.3-Flash", None, None),
         ("some-local-model", None, None),
@@ -88,7 +90,7 @@ def _run(session, prompt, images):
 
 def test_a_model_without_vision_gets_a_note_instead_of_the_picture(tmp_path):
     provider = ScriptedProvider([Turn(text="ok")])
-    config = SessionConfig(model="deepseek-v4.1-flash", workspace=tmp_path, home=tmp_path / "h")
+    config = SessionConfig(model="deepseek-r1", workspace=tmp_path, home=tmp_path / "h")
     session = Session(config, provider)
     _run(session, "what is this?", _picture(tmp_path))
     sent = provider.requests[0].messages[-1]
@@ -135,7 +137,8 @@ def _picture_tool(tmp_path):
 
 @pytest.mark.parametrize(
     ("model", "shown"),
-    [("claude-haiku-5-5", True), ("zai-org/GLM-5.3-Flash", False), ("deepseek-v4.1", False)],
+    # unknown is tried (a refusal is learned and the request goes again without them)
+    [("claude-haiku-5-5", True), ("zai-org/GLM-5.3-Flash", True), ("deepseek-r1", False)],
 )
 def test_tool_pictures_follow_the_results_only_for_a_model_that_sees(tmp_path, model, shown):
     provider = ScriptedProvider([Turn(calls=[("shot", {}), ("shot", {})]), Turn(text="done")])
@@ -164,3 +167,18 @@ def test_read_of_a_picture_file_attaches_it(tmp_path, ctx):
     assert not result.is_error
     assert "is a picture (image/png" in result.content
     assert [str(p) for p in result.images] == [path]
+
+
+def test_an_unknown_model_that_refuses_tool_pictures_learns_it(tmp_path):
+    refusal = ProviderError("bad_request", "image input is not supported", status=400)
+    provider = ScriptedProvider(
+        [Turn(calls=[("shot", {})]), Turn(error=refusal), Turn(text="done")]
+    )
+    home = tmp_path / "h"
+    config = SessionConfig(model="some-local-model", workspace=tmp_path, home=home)
+    session = Session(config, provider, extra_tools=[_picture_tool(tmp_path)])
+    events = _run(session, "look", None)
+    assert events[-1].status == "completed"
+    assert provider.requests[1].messages[-1].images  # tried: the model may see
+    assert not any(m.images for m in provider.requests[2].messages)  # then without them
+    assert model_info("some-local-model", home).vision is False

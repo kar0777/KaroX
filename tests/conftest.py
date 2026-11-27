@@ -24,3 +24,4 @@ def _isolated_home(tmp_path_factory, monkeypatch):
     """No test reads the user's real ~/.karox6 (config, saved API key)."""
     home = tmp_path_factory.mktemp("karox_home")
     monkeypatch.setenv("KAROX_HOME", str(home))
+    monkeypatch.setenv("KAROX_MODEL_CATALOG", "0")  # no test downloads models.dev

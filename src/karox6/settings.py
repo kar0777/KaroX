@@ -53,6 +53,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "progress_guard": (bool,),
     "command_wait_cap": (int,),
     "update_check": (bool,),
+    "model_catalog": (bool,),
     "update_repo": (str,),
     "update_branch": (str,),
     "theme": (str,),
