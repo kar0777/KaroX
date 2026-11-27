@@ -10,8 +10,9 @@ Four sources, the first that has a field wins:
    Keys are model names or ``fnmatch`` patterns (case-insensitive).
 2. What a session learned and saved there under ``"learned"`` (a provider that answered
    "this model does not support images" -> ``{"vision": false}``).
-3. What the provider's model list said, saved there under ``"provider"`` when the list
-   was read (Mistral, OpenRouter, Gemini... give the window and image input).
+3. What the provider's model list said, saved there under ``"provider"`` per server
+   when the list was read (Mistral, OpenRouter, Gemini... give the window and image
+   input); it applies only to requests to that same server.
 4. The table below: only facts that hold for every route serving the family. Unknown
    stays ``None``; callers treat that as "try it" for what the user sent and "do not"
    for what KaroX would add on its own (tool screenshots).
@@ -130,13 +131,22 @@ def _clean(facts: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def model_info(model: str, home: Path | None = None) -> ModelInfo:
+def server_key(base_url: str | None) -> str:
+    """The server a provider's facts belong to: its URL without a trailing slash."""
+    return (base_url or "").strip().rstrip("/").lower()
+
+
+def model_info(model: str, home: Path | None = None, server: str | None = None) -> ModelInfo:
     data = _read(home)
     info = ModelInfo()
+    listed: Any = {}
+    if server:
+        by_server = data.get("provider")
+        listed = by_server.get(server_key(server)) if isinstance(by_server, dict) else {}
     # Lowest priority first: each later source overwrites what it knows.
     for source, found in (
         ("built-in", _builtin(model)),
-        ("provider", _exact(data.get("provider"), model)),
+        ("provider", _exact(listed, model)),
         ("learned", _match(data.get("learned"), model)),
         ("user", _match(data.get("models"), model)),
     ):
@@ -160,10 +170,12 @@ def remember(home: Path | None, model: str, **facts: Any) -> None:
     _write(home, data)
 
 
-def remember_listed(home: Path | None, listed: dict[str, dict[str, Any]]) -> None:
-    """Save what a provider's model list said (model -> facts); a model it says nothing
+def remember_listed(
+    home: Path | None, server: str | None, listed: dict[str, dict[str, Any]]
+) -> None:
+    """Save what ``server``'s model list said (model -> facts); a model it says nothing
     about keeps what was saved before."""
-    if home is None:
+    if home is None or not server:
         return
     found = {model: _clean(facts) for model, facts in listed.items()}
     found = {model: facts for model, facts in found.items() if facts}
@@ -171,11 +183,14 @@ def remember_listed(home: Path | None, listed: dict[str, dict[str, Any]]) -> Non
         return
     data = _read(home)
     stored = data.get("provider")
-    table: dict[str, Any] = stored if isinstance(stored, dict) else {}
+    servers: dict[str, Any] = stored if isinstance(stored, dict) else {}
+    old = servers.get(server_key(server))
+    table: dict[str, Any] = dict(old) if isinstance(old, dict) else {}
     if all(table.get(m) == f for m, f in found.items()):
         return  # nothing new: no write
     table.update(found)
-    data["provider"] = table
+    servers[server_key(server)] = table
+    data["provider"] = servers
     _write(home, data)
 
 

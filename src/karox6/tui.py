@@ -1785,8 +1785,15 @@ class ChatApp:
         self.config.model = model
         self.config.provider_name = kind
         self.key_name = key_name
-        if self.bridge_env:
-            self.bridge_env = {name: key or "" for name in self.bridge_env}
+        # The bridge agent talks to this provider now (never the old server with the new
+        # key, nor the new server with the old one).
+        self.bridge_agent_args = ["--provider", kind, "--model", model]
+        if base_url:
+            self.bridge_agent_args += ["--base-url", base_url]
+        self.bridge_env = {}
+        if key:
+            self.bridge_agent_args += ["--api-key-env", "KAROX_BRIDGE_API_KEY"]
+            self.bridge_env = {"KAROX_BRIDGE_API_KEY": key}
         with contextlib.suppress(Exception):
             await old.aclose()
         self.write(f"now using {model}\n")
@@ -1830,7 +1837,9 @@ class ChatApp:
             line = f"no saved provider {arg!r} (saved: {names})"
             self.write(self.paint("yellow", line) + "\n")
             return
-        key_name = str(table.get("saved_key") or "")
+        # A profile written by hand has no saved_key: its own name, never the unnamed key
+        # (that one belongs to whatever an older setup saved, maybe another server).
+        key_name = str(table.get("saved_key") or arg)
         env = table.get("api_key_env")
         key = os.environ.get(env) if isinstance(env, str) and env else None
         key = key or load_key(self.config.home, key_name)
@@ -1926,6 +1935,9 @@ class ChatApp:
         self._switch_model(chosen)
 
     def _switch_model(self, chosen: str) -> None:
+        args = self.bridge_agent_args
+        if "--model" in args and args.index("--model") + 1 < len(args):
+            args[args.index("--model") + 1] = chosen  # the bridge agent uses it too
         if chosen != self.config.model:
             self.config.model = chosen
             self.session.forget_model_state(provider_changed=False)

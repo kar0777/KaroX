@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import os
 import re
 import sys
@@ -22,8 +23,15 @@ FILE = "credentials"
 
 
 def key_path(home: Path, name: str = "") -> Path:
-    slug = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-")
-    return home / (f"{FILE}-{slug}" if slug else FILE)
+    """``credentials`` for no name, ``credentials-<name>`` for a plain name; any other name
+    (dots, capitals, Cyrillic...) gets a hash of itself, so two names never share a file."""
+    if not name:
+        return home / FILE
+    if re.fullmatch(r"[a-z0-9_-]+", name):
+        return home / f"{FILE}-{name}"
+    slug = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-") or "provider"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:10]
+    return home / f"{FILE}-{slug}-{digest}"
 
 
 def save_key(home: Path, key: str, name: str = "") -> Path:

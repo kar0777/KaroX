@@ -1242,7 +1242,9 @@ class Session:
         """What is known about the configured model (re-read after /model)."""
         name = self.config.model
         if self._model_facts is None or self._model_facts[0] != name:
-            self._model_facts = (name, model_info(name, self.config.home))
+            server = getattr(self.provider, "base_url", None)
+            server = server if isinstance(server, str) else None
+            self._model_facts = (name, model_info(name, self.config.home, server))
         return self._model_facts[1]
 
     def window_hint(self) -> int | None:

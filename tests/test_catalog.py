@@ -113,12 +113,16 @@ def test_what_the_list_says_about_each_model(monkeypatch, tmp_path):
     assert models == ["deepseek-v4-1-flash-1017", "or/some-model", "plain-model"]  # no OCR
     assert notes == {"deepseek-v4-1-flash-1017": "1M · pictures", "or/some-model": "128k"}
 
-    info = model_info("deepseek-v4-1-flash-1017", tmp_path)
+    here = "https://x.test/v1/"  # the same server, however its URL is written
+    info = model_info("deepseek-v4-1-flash-1017", tmp_path, here)
     assert (info.vision, info.context_window, info.source) == (True, 1048576, "provider")
-    assert model_info("or/some-model", tmp_path).vision is False
-    assert model_info("deepseek-v4-1-flash", tmp_path).vision is False  # only the exact name
+    assert model_info("or/some-model", tmp_path, here).vision is False
+    assert model_info("deepseek-v4-1-flash", tmp_path, here).vision is False  # exact name only
+    # another server serving the same name: what this list said does not apply there
+    other = model_info("deepseek-v4-1-flash-1017", tmp_path, "https://api.deepseek.com/v1")
+    assert (other.vision, other.source) == (False, "built-in")
     remember(tmp_path, "deepseek-v4-1-flash-1017", vision=False)  # a refusal beats the list
-    assert model_info("deepseek-v4-1-flash-1017", tmp_path).vision is False
+    assert model_info("deepseek-v4-1-flash-1017", tmp_path, here).vision is False
 
 
 def test_gemini_and_anthropic_windows(monkeypatch):
@@ -141,3 +145,38 @@ def test_gemini_and_anthropic_windows(monkeypatch):
     )
     (gemini,) = asyncio.run(list_entries("gemini", None, "k"))
     assert (gemini.context_window, gemini.note()) == (2097152, "2M")
+
+
+def test_a_redirect_to_another_server_is_not_followed(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if request.url.host == "x.test" and request.url.path == "/v1/models":
+            return httpx.Response(302, headers={"location": "https://x.test/v1/models/"})
+        if request.url.host == "x.test":
+            return httpx.Response(302, headers={"location": "https://evil.test/steal"})
+        return httpx.Response(200, json={"data": [{"id": "m"}]})
+
+    _serve(monkeypatch, handler)
+    with pytest.raises(CatalogError, match="another server"):
+        asyncio.run(list_models("anthropic", "https://x.test", "secret"))
+    assert seen == ["https://x.test/v1/models?limit=1000", "https://x.test/v1/models/"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"data": 5}',
+        b'{"data": [{"id": "m", "context_length": 1e999}]}',
+        b'{"models": "x"}',
+        b"[1, 2]",
+    ],
+)
+def test_odd_lists_do_not_crash(monkeypatch, body):
+    _serve(monkeypatch, lambda request: httpx.Response(200, content=body))
+    try:
+        models = asyncio.run(list_models("openai-chat", "http://x.test/v1", None))
+    except CatalogError:
+        return
+    assert models == ["m"]

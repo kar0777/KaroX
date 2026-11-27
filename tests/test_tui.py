@@ -670,3 +670,33 @@ def test_export_writes_the_conversation_as_markdown(tmp_path):
     assert "- `read` notes.txt" in text
     assert "## KaroX\n\nIt says alpha." in text
     assert "\x1b" not in text
+
+
+def test_switching_provider_moves_the_bridge_agent_with_its_key(tmp_path):
+    term = FakeTerm(["/quit"])
+    old = ["--provider", "openai-chat", "--model", "test", "--base-url", "http://a.test/v1"]
+    app, _ = make_app(
+        tmp_path,
+        [],
+        term,
+        bridge_agent_args=[*old, "--api-key-env", "KAROX_BRIDGE_API_KEY"],
+        bridge_env={"KAROX_BRIDGE_API_KEY": "sk-a"},
+    )
+    assert asyncio.run(app.run()) == 0
+    asyncio.run(app._use("anthropic", "https://b.test", "claude-x", "sk-b", "b"))
+    assert app.bridge_agent_args == [
+        "--provider",
+        "anthropic",
+        "--model",
+        "claude-x",
+        "--base-url",
+        "https://b.test",
+        "--api-key-env",
+        "KAROX_BRIDGE_API_KEY",
+    ]
+    assert app.bridge_env == {"KAROX_BRIDGE_API_KEY": "sk-b"}
+    asyncio.run(app._use("openai-chat", "http://local.test/v1", "q", None, "local"))
+    assert "--api-key-env" not in app.bridge_agent_args
+    assert app.bridge_env == {}  # no key goes to a server that was given none
+    app._switch_model("q2")
+    assert app.bridge_agent_args[3] == "q2"

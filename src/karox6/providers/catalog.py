@@ -6,6 +6,7 @@ of typing a name from memory. A server without such a list just yields an error 
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -80,9 +81,9 @@ async def list_entries(
         params = {}
     found: list[ModelEntry] = []
     try:
-        async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=False) as client:
             for _ in range(MAX_PAGES):
-                response = await client.get(url, headers=headers, params=params)
+                response = await _get(client, url, headers, params)
                 status = response.status_code
                 if status in (401, 403):
                     raise CatalogError(f"the server refused the key (HTTP {status})")
@@ -92,7 +93,10 @@ async def list_entries(
                     data = response.json()
                 except ValueError as exc:
                     raise CatalogError("the model list is not JSON") from exc
-                found += _entries(kind, data)
+                try:
+                    found += _entries(kind, data)
+                except (TypeError, ValueError, AttributeError) as exc:
+                    raise CatalogError("the model list has an unexpected shape") from exc
                 cursor = _next_page(kind, data)
                 if not cursor:
                     break
@@ -105,12 +109,32 @@ async def list_entries(
     return sorted(unique.values(), key=lambda e: e.id.lower())
 
 
+MAX_REDIRECTS = 3
+
+
+async def _get(
+    client: httpx.AsyncClient, url: str, headers: dict[str, str], params: dict[str, str]
+) -> httpx.Response:
+    """GET that follows a redirect only on the same server: the key headers
+    (x-api-key, x-goog-api-key) must never go to another host."""
+    target = httpx.URL(url)
+    for _ in range(MAX_REDIRECTS + 1):
+        response = await client.get(target, headers=headers, params=params)
+        if not response.is_redirect:
+            return response
+        moved = target.join(response.headers.get("location", ""))
+        if (moved.scheme, moved.host, moved.port) != (target.scheme, target.host, target.port):
+            raise CatalogError(f"the model list moved to another server ({moved.host})")
+        target, params = moved, {}
+    raise CatalogError("the model list redirects too often")
+
+
 def _entries(kind: str, data: Any) -> list[ModelEntry]:
     if not isinstance(data, dict):
         return []
     if kind == "gemini":
         out = []
-        for m in data.get("models") or []:
+        for m in _list(data.get("models")):
             if not isinstance(m, dict) or not isinstance(m.get("name"), str):
                 continue
             methods = m.get("supportedGenerationMethods") or ["generateContent"]
@@ -122,7 +146,7 @@ def _entries(kind: str, data: Any) -> list[ModelEntry]:
     if items is None:
         items = data.get("models")  # Ollama's /api/tags shape, some proxies
     out = []
-    for m in items or []:
+    for m in _list(items):
         if isinstance(m, str):
             out.append(ModelEntry(m))
         elif isinstance(m, dict):
@@ -166,8 +190,14 @@ def _described(name: str, m: dict[str, Any]) -> ModelEntry:
     return ModelEntry(name, window, vision, chat)
 
 
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _int(value: Any) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if not math.isfinite(value) or not 0 < value < 1e12:
         return None
     return int(value)
 
@@ -238,7 +268,7 @@ async def fetch(
 
     raw = await (lister or list_entries)(kind, base_url, api_key)
     entries = [e if isinstance(e, ModelEntry) else ModelEntry(str(e)) for e in raw]
-    remember_listed(home, {e.id: e.facts() for e in entries})
+    remember_listed(home, base_url, {e.id: e.facts() for e in entries})
     chat = chat_entries(entries)
     return [e.id for e in chat], {e.id: e.note() for e in chat if e.note()}
 

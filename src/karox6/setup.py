@@ -129,8 +129,8 @@ async def _saved(talk: _Talk, name: str, table: dict[str, Any]) -> Choice | None
     home, write = talk.home, talk.write
     provider = str(table.get("provider") or "openai-chat")
     base_url = str(table.get("base_url") or "")
-    # A provider saved by an older setup has no key name: its key is the unnamed one.
-    key_name = str(table.get("saved_key") or "")
+    # A profile written by hand has no key name: its own name, never the unnamed key.
+    key_name = str(table.get("saved_key") or name)
     key = load_key(home, key_name)
     if key is None and not table.get("api_key_env"):
         key = (await talk.read_secret("API key (hidden; Enter to skip): ")).strip() or None

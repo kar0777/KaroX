@@ -137,3 +137,27 @@ def test_switching_providers_replaces_the_old_ones_keys(tmp_path):
     assert saved_providers(path) == {
         "a": {"provider": "openai-chat", "base_url": "http://a/v1", "model": "m"}
     }
+
+
+def test_key_files_never_collide_or_fall_back(tmp_path):
+    from karox6.credentials import key_path
+
+    names = ["a.b", "a-b", "A-b", "работа", "работа2", "plain_name"]
+    paths = {key_path(tmp_path, n) for n in names}
+    assert len(paths) == len(names)
+    assert key_path(tmp_path, "работа") != key_path(tmp_path)  # never the unnamed key
+    assert key_path(tmp_path, "mistral").name == "credentials-mistral"  # as saved before
+
+
+def test_a_hand_written_profile_never_gets_the_unnamed_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAROX_CONFIG", str(tmp_path / "config.toml"))
+    (tmp_path / "config.toml").write_text(
+        '[profiles.local]\nmodel = "q"\nbase_url = "http://127.0.0.1:1/v1"\n', encoding="utf-8"
+    )
+    home = tmp_path / "home"
+    save_key(home, "sk-other-server")  # an older setup's key for some other server
+    read, secret, out = _talk(["1", ""], key="")
+    choice = asyncio.run(run_setup(read, secret, out.append, home, lister=_no_list))
+    assert choice.key is None
+    assert choice.name == "local"
+    assert (tmp_path / "config.toml.bak").is_file()  # the hand-written file is kept

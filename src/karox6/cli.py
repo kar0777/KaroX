@@ -850,6 +850,8 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
                     choice.model,
                 )
                 args.saved_key = choice.name
+                if choice.key:  # what was just typed, not a variable set for another server
+                    args.api_key_env = None
             if app is None:
                 app = make_app()
             _start_update_check(args, home, app)

@@ -141,7 +141,18 @@ def save_settings(
             lines += ["", f"[profiles.{_toml_key(name)}]"]
             lines += [f"{k} = {_toml_value(v)}" for k, v in table.items()]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    text = "\n".join(lines) + "\n"
+    try:
+        old = path.read_text(encoding="utf-8")
+    except OSError:
+        old = None
+    if old == text:
+        return path
+    if old is not None:  # what the user had (comments included) stays one step back
+        path.with_name(path.name + ".bak").write_text(old, encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
     return path
 
 

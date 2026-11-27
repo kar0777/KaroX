@@ -2576,3 +2576,11 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   models are dropped by the provider's own flag. The picker shows `1M · pictures`. Live on Mistral: 37 of 63
   models are chat; deepseek-v4-1-flash-1017 there = 1M + pictures (the built-in "DeepSeek: no pictures"
   is right only for DeepSeek's own API). Bench runs are unaffected (they never read a model list).
+- Codex review of the day's provider work (gpt-6.1-terra, $0.09): 10 findings, all real, all fixed with
+  tests: the bridge agent kept the old server while getting the new key; the model-list GET followed
+  redirects with x-api-key / x-goog-api-key to another host; key file names could collide (a.b / a-b) or a
+  Cyrillic profile name fell back to the unnamed key; hand-written profiles used the unnamed key; first-run
+  setup kept a variable configured for another server; provider facts were not tied to the server (now per
+  base URL); config.toml rewrites are atomic with a .bak; picker PageUp/PageDown lost to the transcript's
+  eager keys; odd JSON (non-lists, 1e999) crashed. Left: /key on a profile with api_key_env stays behind the
+  variable at the next start (documented behaviour: the environment wins).

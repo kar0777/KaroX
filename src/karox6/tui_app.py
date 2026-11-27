@@ -1855,14 +1855,18 @@ class FullScreenTui:
 
             return handler
 
-        keys.add("up", filter=in_pick)(_move(-1))
-        keys.add("c-p", filter=in_pick)(_move(-1))
-        keys.add("down", filter=in_pick)(_move(1))
-        keys.add("c-n", filter=in_pick)(_move(1))
-        keys.add("tab", filter=in_pick)(_move(1))
-        keys.add("s-tab", filter=in_pick)(_move(-1))
-        keys.add("pageup", filter=in_pick)(_move(-PICK_ROWS))
-        keys.add("pagedown", filter=in_pick)(_move(PICK_ROWS))
+        # eager, like the transcript's PageUp/PageDown: while picking, these move the list.
+        for name, delta in (
+            ("up", -1),
+            ("c-p", -1),
+            ("s-tab", -1),
+            ("down", 1),
+            ("c-n", 1),
+            ("tab", 1),
+            ("pageup", -PICK_ROWS),
+            ("pagedown", PICK_ROWS),
+        ):
+            keys.add(name, eager=True, filter=in_pick)(_move(delta))
 
         @keys.add("enter", filter=in_pick)
         def _pick_enter(event: KeyPressEvent) -> None:
