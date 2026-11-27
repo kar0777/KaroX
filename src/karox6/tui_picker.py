@@ -20,6 +20,7 @@ class PickState:
     items: list[str]
     current: str | None = None  # marked, and where the cursor starts
     allow_typed: bool = True  # Enter on a query that matches nothing returns the query
+    notes: dict[str, str] = field(default_factory=dict)  # shown dim beside an item
     query: str = ""
     index: int = 0
     top: int = 0
@@ -82,14 +83,21 @@ class PickState:
         out: Fragments = []
         words = [w for w in self.query.lower().split() if w]
         end = min(self.top + ROWS, len(self._shown))
+        visible = self._shown[self.top : end]
+        pad = max(len(i) + (2 if i == self.current else 0) for i in visible) + 2
         for n in range(self.top, end):
             item = self._shown[n]
             here = n == self.index
             row = "class:pick-current" if here else "class:pick-item"
             out.append((row, f" {pointer} " if here else "   "))
             out += _emphasised(item, words, row)
+            used = len(item)
             if item == self.current:
                 out.append((f"{row} class:pick-mark", f" {mark}"))
+                used += 2
+            note = self.notes.get(item)
+            if note:
+                out.append((f"{row} class:pick-note", " " * (pad - used) + note))
             more = ""
             if n == self.top and self.top > 0:
                 more = "  ↑ more"

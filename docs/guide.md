@@ -87,7 +87,9 @@ still works in 400k unless you raise the limit.
 
 `/status` and `/model` show whether the model takes pictures and how large its window is.
 The answer comes from `models.json` in the KaroX home (yours first), then from what a
-session learned, then from built-in facts (Claude, GPT-4o and later, Gemini and `-VL`
+session learned, then from what the provider's model list said (read by `/model` and the
+setup: Mistral, OpenRouter, Gemini and others give the window and image input; the picker
+shows it as `1M · pictures`), then from built-in facts (Claude, GPT-4o and later, Gemini and `-VL`
 models see; gpt-oss and DeepSeek do not):
 
 ```json

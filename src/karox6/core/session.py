@@ -1064,6 +1064,10 @@ class Session:
         )
         return True
 
+    def reread_model_facts(self) -> None:
+        """models.json changed (a provider's model list was read): look the model up again."""
+        self._model_facts = None
+
     def forget_model_state(self, *, provider_changed: bool) -> None:
         """After /model or /setup: what the session learned about the old model (its
         smaller context window, the size of the last request) does not apply to the new

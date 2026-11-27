@@ -409,6 +409,7 @@ def test_key_is_hidden_and_setup_switches_the_model(launch: Launcher) -> None:
     t.wait("now using fake-two")
     t.line("/model")  # the picker starts on the current model
     t.wait("Model (2)")
+    assert "128k · pictures" in t.text()  # what the list says about fake-two
     t.key("up")
     t.key("enter")
     t.wait("model: fake-one")

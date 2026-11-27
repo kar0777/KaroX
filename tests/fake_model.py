@@ -47,7 +47,8 @@ class _Handler(BaseHTTPRequestHandler):
         if not self.path.rstrip("/").endswith("/models"):
             self.send_error(404)
             return
-        data = json.dumps({"data": [{"id": "fake-one"}, {"id": "fake-two"}]}).encode()
+        two = {"id": "fake-two", "context_length": 131072, "capabilities": {"vision": True}}
+        data = json.dumps({"data": [{"id": "fake-one"}, two]}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(data)))

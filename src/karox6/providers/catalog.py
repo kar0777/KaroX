@@ -7,6 +7,9 @@ of typing a name from memory. A server without such a list just yields an error 
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -19,10 +22,47 @@ class CatalogError(Exception):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class ModelEntry:
+    """One model of a provider's list, with what the list says about it."""
+
+    id: str
+    context_window: int | None = None
+    vision: bool | None = None
+    chat: bool | None = None  # False: the provider says it does not chat (embeddings...)
+
+    def note(self) -> str:
+        """``1M · pictures``: what a picker shows beside the name."""
+        parts = []
+        if self.context_window:
+            from karox6.models import window_text
+
+            parts.append(window_text(self.context_window))
+        if self.vision:
+            parts.append("pictures")
+        return " · ".join(parts)
+
+    def facts(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.context_window:
+            out["context_window"] = self.context_window
+        if self.vision is not None:
+            out["vision"] = self.vision
+        return out
+
+
 async def list_models(
     kind: str, base_url: str | None, api_key: str | None, *, timeout_s: float = TIMEOUT_S
 ) -> list[str]:
     """Model ids the provider lists for this key, sorted; CatalogError when it cannot say."""
+    entries = await list_entries(kind, base_url, api_key, timeout_s=timeout_s)
+    return [e.id for e in entries]
+
+
+async def list_entries(
+    kind: str, base_url: str | None, api_key: str | None, *, timeout_s: float = TIMEOUT_S
+) -> list[ModelEntry]:
+    """The provider's models with what its list says about them, sorted by name."""
     if kind == "anthropic":
         url = (base_url or "https://api.anthropic.com").rstrip("/") + "/v1/models"
         headers = {"anthropic-version": "2023-06-01"}
@@ -38,7 +78,7 @@ async def list_models(
         url = (base_url or "https://api.openai.com/v1").rstrip("/") + "/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         params = {}
-    found: list[str] = []
+    found: list[ModelEntry] = []
     try:
         async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
             for _ in range(MAX_PAGES):
@@ -52,7 +92,7 @@ async def list_models(
                     data = response.json()
                 except ValueError as exc:
                     raise CatalogError("the model list is not JSON") from exc
-                found += _ids(kind, data)
+                found += _entries(kind, data)
                 cursor = _next_page(kind, data)
                 if not cursor:
                     break
@@ -61,10 +101,11 @@ async def list_models(
         raise CatalogError(f"cannot reach {url}: {type(exc).__name__}") from exc
     if not found:
         raise CatalogError("the server listed no models")
-    return sorted(dict.fromkeys(found), key=str.lower)
+    unique = {e.id: e for e in found}
+    return sorted(unique.values(), key=lambda e: e.id.lower())
 
 
-def _ids(kind: str, data: Any) -> list[str]:
+def _entries(kind: str, data: Any) -> list[ModelEntry]:
     if not isinstance(data, dict):
         return []
     if kind == "gemini":
@@ -74,7 +115,8 @@ def _ids(kind: str, data: Any) -> list[str]:
                 continue
             methods = m.get("supportedGenerationMethods") or ["generateContent"]
             if "generateContent" in methods:
-                out.append(m["name"].removeprefix("models/"))
+                name = m["name"].removeprefix("models/")
+                out.append(ModelEntry(name, _int(m.get("inputTokenLimit"))))
         return out
     items = data.get("data")
     if items is None:
@@ -82,12 +124,59 @@ def _ids(kind: str, data: Any) -> list[str]:
     out = []
     for m in items or []:
         if isinstance(m, str):
-            out.append(m)
+            out.append(ModelEntry(m))
         elif isinstance(m, dict):
             name = m.get("id") or m.get("name") or m.get("model")
             if isinstance(name, str) and name:
-                out.append(name)
+                out.append(_described(name, m))
     return out
+
+
+# Where OpenAI-compatible lists put the window: Mistral, OpenRouter, Groq/Together, vLLM,
+# Anthropic.
+_WINDOW_KEYS = (
+    "max_context_length",
+    "context_length",
+    "context_window",
+    "max_model_len",
+    "max_input_tokens",
+)
+
+
+def _described(name: str, m: dict[str, Any]) -> ModelEntry:
+    window = None
+    for key in _WINDOW_KEYS:
+        window = _int(m.get(key))
+        if window:
+            break
+    top = m.get("top_provider")
+    if not window and isinstance(top, dict):
+        window = _int(top.get("context_length"))
+    vision: bool | None = None
+    chat: bool | None = None
+    caps = m.get("capabilities")
+    if isinstance(caps, dict):
+        vision = _flag(caps.get("vision", caps.get("image_input")))
+        chat = _flag(caps.get("completion_chat", caps.get("chat")))
+    arch = m.get("architecture")
+    if vision is None and isinstance(arch, dict):
+        modalities = arch.get("input_modalities")
+        if isinstance(modalities, list) and modalities:
+            vision = "image" in modalities
+    return ModelEntry(name, window, vision, chat)
+
+
+def _int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        return None
+    return int(value)
+
+
+def _flag(value: Any) -> bool | None:
+    """``true`` / ``{"supported": true}`` -> True; anything else unknown."""
+    if isinstance(value, dict):
+        value = value.get("supported")
+    return value if isinstance(value, bool) else None
 
 
 def _next_page(kind: str, data: Any) -> dict[str, str] | None:
@@ -126,6 +215,32 @@ _NOT_CHAT = re.compile(
 
 def chat_models(models: list[str]) -> list[str]:
     return [m for m in models if not _NOT_CHAT.search(m)]
+
+
+def chat_entries(entries: Sequence[ModelEntry]) -> list[ModelEntry]:
+    """The models one can chat with: what the provider marks as not chatting and what the
+    name says is an embedding/speech/OCR model are left out (all, when that leaves none)."""
+    kept = [e for e in entries if e.chat is not False and not _NOT_CHAT.search(e.id)]
+    return kept or list(entries)
+
+
+async def fetch(
+    kind: str,
+    base_url: str | None,
+    api_key: str | None,
+    home: Path | None,
+    lister: Any = None,
+) -> tuple[list[str], dict[str, str]]:
+    """The chat models to pick from and a note per model (``1M · pictures``); what the
+    list says about each model is saved for the session (karox6.models, source
+    "provider"). ``lister`` replaces the HTTP call (tests): it may return names only."""
+    from karox6.models import remember_listed
+
+    raw = await (lister or list_entries)(kind, base_url, api_key)
+    entries = [e if isinstance(e, ModelEntry) else ModelEntry(str(e)) for e in raw]
+    remember_listed(home, {e.id: e.facts() for e in entries})
+    chat = chat_entries(entries)
+    return [e.id for e in chat], {e.id: e.note() for e in chat if e.note()}
 
 
 def columns(models: list[str], width: int = 100, mark: str | None = None) -> list[str]:

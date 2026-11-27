@@ -84,3 +84,60 @@ def test_chat_models_and_columns():
     assert lines[0].split() == ["1.", "m1", "4.", "m4", "7.", "m7"]  # numbers go down
     assert "2. m2 *" in lines[1]
     assert columns([]) == []
+
+
+MISTRAL_LIKE = {
+    "data": [
+        {
+            "id": "deepseek-v4-1-flash-1017",
+            "capabilities": {"completion_chat": True, "vision": True},
+            "max_context_length": 1048576,
+        },
+        {"id": "mistral-ocr-latest", "capabilities": {"completion_chat": False, "vision": True}},
+        {
+            "id": "or/some-model",
+            "context_length": 131072,
+            "architecture": {"input_modalities": ["text"]},
+        },
+        {"id": "plain-model"},
+    ]
+}
+
+
+def test_what_the_list_says_about_each_model(monkeypatch, tmp_path):
+    from karox6.models import model_info, remember
+    from karox6.providers.catalog import fetch
+
+    _serve(monkeypatch, lambda request: httpx.Response(200, json=MISTRAL_LIKE))
+    models, notes = asyncio.run(fetch("openai-chat", "https://x.test/v1", "k", tmp_path))
+    assert models == ["deepseek-v4-1-flash-1017", "or/some-model", "plain-model"]  # no OCR
+    assert notes == {"deepseek-v4-1-flash-1017": "1M · pictures", "or/some-model": "128k"}
+
+    info = model_info("deepseek-v4-1-flash-1017", tmp_path)
+    assert (info.vision, info.context_window, info.source) == (True, 1048576, "provider")
+    assert model_info("or/some-model", tmp_path).vision is False
+    assert model_info("deepseek-v4-1-flash", tmp_path).vision is False  # only the exact name
+    remember(tmp_path, "deepseek-v4-1-flash-1017", vision=False)  # a refusal beats the list
+    assert model_info("deepseek-v4-1-flash-1017", tmp_path).vision is False
+
+
+def test_gemini_and_anthropic_windows(monkeypatch):
+    from karox6.providers.catalog import list_entries
+
+    def handler(request):
+        if "anthropic" in request.url.host:
+            caps = {"image_input": {"supported": True}}
+            item = {"id": "claude-x", "max_input_tokens": 200000, "capabilities": caps}
+            return httpx.Response(200, json={"data": [item]})
+        item = {"name": "models/gemini-9", "inputTokenLimit": 2097152}
+        return httpx.Response(200, json={"models": [item]})
+
+    _serve(monkeypatch, handler)
+    (claude,) = asyncio.run(list_entries("anthropic", None, "k"))
+    assert (claude.context_window, claude.vision, claude.note()) == (
+        200000,
+        True,
+        "200k · pictures",
+    )
+    (gemini,) = asyncio.run(list_entries("gemini", None, "k"))
+    assert (gemini.context_window, gemini.note()) == (2097152, "2M")

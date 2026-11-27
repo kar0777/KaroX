@@ -576,9 +576,10 @@ class ChatApp:
         self.key_name = ""  # the saved key of this provider (credentials-<name>)
         # The full-screen list picker (title, items, current) -> choice or None; without
         # it /model and /provider print numbered lists.
-        self.picker: Callable[[str, list[str], str | None], Awaitable[str | None]] | None = None
+        self.picker: Callable[..., Awaitable[str | None]] | None = None
         self._model_list: tuple[Any, list[str] | None] | None = None  # server, its models
         self._shown_models: list[str] = []  # what a number in /model picks from
+        self._model_notes: dict[str, str] = {}  # model -> "1M · pictures" (from the list)
         self._checkpoints: Checkpoints | None = None
         self._turns: list[_TurnRecord] = []  # what /undo can take back, oldest first
         self._undone: list[tuple[_TurnRecord, list[Message]]] = []  # what /redo can put back
@@ -1844,7 +1845,7 @@ class ChatApp:
 
     async def _provider_models(self) -> list[str] | None:
         """The current provider's chat models (cached per server); None when it has no list."""
-        from karox6.providers.catalog import CatalogError, chat_models, list_models
+        from karox6.providers.catalog import CatalogError, fetch
 
         where = (self.config.provider_name, getattr(self.provider, "base_url", None))
         if not where[1]:
@@ -1852,9 +1853,11 @@ class ChatApp:
         if self._model_list is not None and self._model_list[0] == where:
             return self._model_list[1]  # also a failure: asked once per server
         found: list[str] | None
+        key = getattr(self.provider, "api_key", None)
         try:
-            models = await list_models(where[0], where[1], getattr(self.provider, "api_key", None))
-            found = chat_models(models) or models
+            found, self._model_notes = await fetch(where[0], where[1], key, self.config.home)
+            # What the list said (window, pictures) is in models.json now: read it again.
+            self.session.reread_model_facts()
         except CatalogError as exc:
             self.write(self.paint("yellow", f"no model list: {_plain_text(str(exc))}") + "\n")
             found = None
@@ -1894,7 +1897,9 @@ class ChatApp:
         if not arg:
             models = await self._provider_models()
             if models and self.picker is not None:
-                picked = await self.picker("Model", models, self.config.model)
+                picked = await self.picker(
+                    "Model", models, self.config.model, notes=self._model_notes
+                )
                 if picked is not None:
                     self._switch_model(picked)
                 return

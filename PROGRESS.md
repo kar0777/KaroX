@@ -2567,3 +2567,12 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   (GET /models; Anthropic /v1/models with paging; Gemini v1beta/models, generateContent only), filtered by
   typing; /models [TEXT] in the chat. Live: Dahl lists 3 models. Tests: test_catalog.py, test_setup.py, two
   ConPTY setup tests. Version not bumped (dev69 is the pool10 candidate).
+- Follow-ups the same day: the whole list in columns, a name for an own server, a Mistral preset; then a
+  full-screen picker for /model, /provider and /setup (arrows, typing filters, Enter, Esc; tui_picker.py).
+- The provider's list now also feeds the model registry (models.json "provider" section; priority user >
+  learned > provider > built-in, exact names only): window and image input from Mistral
+  (max_context_length, capabilities.vision/completion_chat), OpenRouter (context_length,
+  architecture.input_modalities), vLLM/Groq, Anthropic (max_input_tokens), Gemini (inputTokenLimit). Non-chat
+  models are dropped by the provider's own flag. The picker shows `1M · pictures`. Live on Mistral: 37 of 63
+  models are chat; deepseek-v4-1-flash-1017 there = 1M + pictures (the built-in "DeepSeek: no pictures"
+  is right only for DeepSeek's own API). Bench runs are unaffected (they never read a model list).

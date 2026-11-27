@@ -55,3 +55,11 @@ def test_draws_the_cursor_the_mark_and_the_match():
     p.set_query("")
     assert _text(p.lines(">", "*")).splitlines() == [" > glm-5 *", "   glm-5-pro"]
     assert "Model (2)" in _text(p.header(" · "))
+
+
+def test_notes_line_up_beside_the_names():
+    p = PickState(
+        "Model", ["a", "long-name"], "a", notes={"a": "1M · pictures", "long-name": "128k"}
+    )
+    rows = _text(p.lines(">", "*")).splitlines()
+    assert rows == [" > a *        1M · pictures", "   long-name  128k"]

@@ -878,6 +878,7 @@ def _build_style(color: bool, theme: Theme | None = None) -> Style:
             "pick-match": "bold underline",
             "pick-mark": t("accent") if "#" not in current else "",
             "pick-dim": t("muted"),
+            "pick-note": t("muted"),
         }
     )
 
@@ -1379,12 +1380,13 @@ class FullScreenTui:
         current: str | None = None,
         *,
         allow_typed: bool = True,
+        notes: dict[str, str] | None = None,
     ) -> str | None:
         """A choice from ``items`` (arrows, typing filters, Enter); None on Esc. With
         ``allow_typed``, Enter on a filter that matches nothing returns the typed text."""
         if self._closed or (self._app_task is not None and self._app_task.done()):
             raise EOFError
-        self._pick = PickState(title, list(items), current, allow_typed)
+        self._pick = PickState(title, list(items), current, allow_typed, notes=dict(notes or {}))
         self._pick_buffer.reset()
         self._transcript.scroll_to_bottom()
         self._set_mode("pick")

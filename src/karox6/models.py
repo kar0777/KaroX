@@ -1,6 +1,6 @@
 """What KaroX knows about a model: does it take pictures, how large is its window.
 
-Three sources, the first that has a field wins:
+Four sources, the first that has a field wins:
 
 1. ``models.json`` in the KaroX home, written by the user::
 
@@ -10,7 +10,9 @@ Three sources, the first that has a field wins:
    Keys are model names or ``fnmatch`` patterns (case-insensitive).
 2. What a session learned and saved there under ``"learned"`` (a provider that answered
    "this model does not support images" -> ``{"vision": false}``).
-3. The table below: only facts that hold for every route serving the family. Unknown
+3. What the provider's model list said, saved there under ``"provider"`` when the list
+   was read (Mistral, OpenRouter, Gemini... give the window and image input).
+4. The table below: only facts that hold for every route serving the family. Unknown
    stays ``None``; callers treat that as "try it" for what the user sent and "do not"
    for what KaroX would add on its own (tool screenshots).
 """
@@ -34,12 +36,20 @@ FILE_NAME = "models.json"
 class ModelInfo:
     vision: bool | None = None  # accepts image input
     context_window: int | None = None  # tokens the model accepts (None: unknown)
-    source: str = "unknown"  # where the answer came from: user | learned | built-in
+    source: str = "unknown"  # where it came from: user | learned | provider | built-in
 
     def describe(self) -> str:
         vision = {True: "yes", False: "no", None: "unknown"}[self.vision]
-        window = f"{self.context_window // 1000}k" if self.context_window else "unknown"
+        window = window_text(self.context_window) if self.context_window else "unknown"
         return f"pictures: {vision} · window: {window} ({self.source})"
+
+
+def window_text(tokens: int) -> str:
+    """131072 -> "128k", 200000 -> "200k", 1048576 -> "1M"."""
+    unit = 1024 if tokens % 1024 == 0 else 1000
+    if tokens >= 1000 * unit:
+        return f"{tokens / unit**2:.3g}M"
+    return f"{round(tokens / unit)}k"
 
 
 # (pattern on the lower-cased model name without a provider prefix, facts)
@@ -101,6 +111,15 @@ def _match(table: Any, model: str) -> dict[str, Any]:
     return {}
 
 
+def _exact(table: Any, model: str) -> dict[str, Any]:
+    """The provider's facts are about exactly this name (no prefix stripping, no patterns:
+    another route serving a similar name may differ)."""
+    if not isinstance(table, dict):
+        return {}
+    facts = table.get(model.strip())
+    return facts if isinstance(facts, dict) else {}
+
+
 def _clean(facts: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if isinstance(facts.get("vision"), bool):
@@ -117,6 +136,7 @@ def model_info(model: str, home: Path | None = None) -> ModelInfo:
     # Lowest priority first: each later source overwrites what it knows.
     for source, found in (
         ("built-in", _builtin(model)),
+        ("provider", _exact(data.get("provider"), model)),
         ("learned", _match(data.get("learned"), model)),
         ("user", _match(data.get("models"), model)),
     ):
@@ -137,6 +157,29 @@ def remember(home: Path | None, model: str, **facts: Any) -> None:
     entry.update(_clean(facts))
     learned[model] = entry
     data["learned"] = learned
+    _write(home, data)
+
+
+def remember_listed(home: Path | None, listed: dict[str, dict[str, Any]]) -> None:
+    """Save what a provider's model list said (model -> facts); a model it says nothing
+    about keeps what was saved before."""
+    if home is None:
+        return
+    found = {model: _clean(facts) for model, facts in listed.items()}
+    found = {model: facts for model, facts in found.items() if facts}
+    if not found:
+        return
+    data = _read(home)
+    stored = data.get("provider")
+    table: dict[str, Any] = stored if isinstance(stored, dict) else {}
+    if all(table.get(m) == f for m, f in found.items()):
+        return  # nothing new: no write
+    table.update(found)
+    data["provider"] = table
+    _write(home, data)
+
+
+def _write(home: Path, data: dict[str, Any]) -> None:
     with contextlib.suppress(OSError):
         home.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=home, prefix=".models-", suffix=".json")

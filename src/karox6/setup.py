@@ -16,13 +16,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from karox6.credentials import load_key, save_key
-from karox6.providers.catalog import CatalogError, chat_models, columns, list_models, pick
+from karox6.providers.catalog import CatalogError, columns, fetch, pick
 from karox6.settings import save_provider, saved_providers
 
 ReadLine = Callable[[str], Awaitable[str]]
 Write = Callable[[str], None]
-Lister = Callable[[str, str, str | None], Awaitable[list[str]]]
-Picker = Callable[[str, list[str], str | None], Awaitable[str | None]]
+Lister = Callable[[str, str, str | None], Awaitable[list[Any]]]  # names or ModelEntry
+Picker = Callable[..., Awaitable[str | None]]  # (title, items, current, notes=...)
 
 SHOW_ALL = 300  # a list this long is printed whole; a longer one is filtered by typing
 
@@ -183,23 +183,20 @@ async def _model(
     """The model: picked from the provider's list when it has one, else typed."""
     write = talk.write
     models: list[str] = []
+    notes: dict[str, str] = {}
     write("asking the provider for its models...\n")
     try:
-        models = await (talk.lister or list_models)(provider, base_url, key)
+        models, notes = await fetch(provider, base_url, key, talk.home, talk.lister)
     except CatalogError as exc:
         write(f"  no list ({exc}); type the model's name\n")
     if models:
-        chat = chat_models(models) or models
-        hidden = len(models) - len(chat)
-        models = chat
         if talk.picker is not None:
-            picked = await talk.picker("Model", models, default or None)
+            picked = await talk.picker("Model", models, default or None, notes=notes)
             if picked is None:
                 write("setup cancelled\n")
             return picked
         _show(write, models, default)
-        note = f" ({hidden} embedding/speech/OCR models not shown)" if hidden else ""
-        write(f"  {len(models)} models{note}: a number, a name or part of one\n")
+        write(f"  {len(models)} models: a number, a name or part of one\n")
     for _ in range(10):
         prompt = f"Model [{default}]: " if default else "Model: "
         typed = (await talk.read_line(prompt)).strip()
