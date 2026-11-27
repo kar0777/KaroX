@@ -65,3 +65,22 @@ def test_pick():
     assert pick(models, "deepseek") == (None, ["deepseek-chat", "deepseek-reasoner"])
     assert pick(models, "seek chat") == (None, ["deepseek-chat"])
     assert pick(models, "9") == (None, [])
+
+
+def test_chat_models_and_columns():
+    from karox6.providers.catalog import chat_models, columns
+
+    names = [
+        "codestral-2508",
+        "mistral-embed",
+        "mistral-ocr-4",
+        "voxtral-mini-tts-3",
+        "voxtral-mini-transcribe-3",
+        "mistral-moderation-2603",
+        "mistral-large-4",
+    ]
+    assert chat_models(names) == ["codestral-2508", "mistral-large-4"]
+    lines = columns([f"m{i}" for i in range(1, 8)], width=40, mark="m2")
+    assert lines[0].split() == ["1.", "m1", "4.", "m4", "7.", "m7"]  # numbers go down
+    assert "2. m2 *" in lines[1]
+    assert columns([]) == []

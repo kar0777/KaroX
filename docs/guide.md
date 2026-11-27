@@ -131,7 +131,7 @@ window the symbols are limited to what its fonts draw.
 | `/compact` | shrink the conversation to free context |
 | `/new`, `/clear` | start a fresh session; clear the screen |
 | `/sessions`, `/resume [ID\|last]` | list and continue saved sessions |
-| `/model [NAME]`, `/models [TEXT]` | change the model; the provider's models |
+| `/model [NAME\|NUMBER]`, `/models [TEXT]` | the model and the provider's list; switch |
 | `/provider [NAME]`, `/setup`, `/key` | saved providers, set up a provider, the API key |
 | `/approve ask\|allow\|deny` | how destructive commands are handled |
 | `/reasoning` | show or hide the model's reasoning |

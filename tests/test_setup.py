@@ -70,7 +70,7 @@ async def _two_models(kind, base_url, key):
 def test_every_provider_is_kept_with_its_own_key(tmp_path, monkeypatch):
     monkeypatch.setenv("KAROX_CONFIG", str(tmp_path / "config.toml"))
     home = tmp_path / "home"
-    read, secret, out = _talk(["7", "https://inference.dahl.global/v1", "glm 5.3", "2"])
+    read, secret, out = _talk(["8", "https://inference.dahl.global/v1", "", "glm 5.3", "2"])
     choice = asyncio.run(run_setup(read, secret, out.append, home, lister=_two_models))
     assert (choice.model, choice.name) == ("glm-5.3-pro", "dahl")
     assert "3. qwen3-coder" in "".join(out)

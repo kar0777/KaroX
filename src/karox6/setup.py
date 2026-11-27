@@ -16,14 +16,14 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from karox6.credentials import load_key, save_key
-from karox6.providers.catalog import CatalogError, list_models, pick
+from karox6.providers.catalog import CatalogError, chat_models, columns, list_models, pick
 from karox6.settings import save_provider, saved_providers
 
 ReadLine = Callable[[str], Awaitable[str]]
 Write = Callable[[str], None]
 Lister = Callable[[str, str, str | None], Awaitable[list[str]]]
 
-SHOW_ALL = 40  # a list this long is printed whole; a longer one is filtered by typing
+SHOW_ALL = 300  # a list this long is printed whole; a longer one is filtered by typing
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,7 @@ PRESETS = (
     ),
     Preset("OpenAI", "openai", "openai-chat", "https://api.openai.com/v1", ""),
     Preset("OpenRouter", "openrouter", "openai-chat", "https://openrouter.ai/api/v1", ""),
+    Preset("Mistral", "mistral", "openai-chat", "https://api.mistral.ai/v1", ""),
     Preset("Anthropic", "anthropic", "anthropic", "https://api.anthropic.com", ""),
     Preset("Google Gemini", "gemini", "gemini", "https://generativelanguage.googleapis.com", ""),
     Preset("Other OpenAI-compatible server", "", "openai-chat", "", ""),
@@ -138,7 +139,11 @@ async def _new(talk: _Talk, preset: Preset) -> Choice | None:
         if not base_url:
             write("setup cancelled\n")
             return None
-    name = preset.name or _name_for(base_url)
+    name = preset.name
+    if not name:  # the user's own server: they say what to call it
+        guess = _name_for(base_url)
+        typed = (await talk.read_line(f"Name for this provider [{guess}]: ")).strip()
+        name = _clean_name(typed) or guess
     old = load_key(home, name)
     ask = "API key (hidden; Enter keeps the saved one): "
     if not old:
@@ -170,11 +175,12 @@ async def _model(
     except CatalogError as exc:
         write(f"  no list ({exc}); type the model's name\n")
     if models:
-        if len(models) <= SHOW_ALL:
-            for i, m in enumerate(models, 1):
-                write(f"  {i}. {m}\n")
-        else:
-            write(f"  {len(models)} models; type part of a name to see the matching ones\n")
+        chat = chat_models(models) or models
+        hidden = len(models) - len(chat)
+        models = chat
+        _show(write, models, default)
+        note = f" ({hidden} embedding/speech/OCR models not shown)" if hidden else ""
+        write(f"  {len(models)} models{note}: a number, a name or part of one\n")
     for _ in range(10):
         prompt = f"Model [{default}]: " if default else "Model: "
         typed = (await talk.read_line(prompt)).strip()
@@ -194,12 +200,21 @@ async def _model(
         if len(matches) == 1:
             return matches[0]
         models = matches
-        for i, m in enumerate(models[:SHOW_ALL], 1):
-            write(f"  {i}. {m}\n")
-        if len(models) > SHOW_ALL:
-            write(f"  ... {len(models) - SHOW_ALL} more; type more of the name\n")
+        _show(write, models, default)
     write("setup cancelled\n")
     return None
+
+
+def _show(write: Write, models: list[str], default: str) -> None:
+    for line in columns(models[:SHOW_ALL], mark=default):
+        write(line + "\n")
+    if len(models) > SHOW_ALL:
+        write(f"  ... {len(models) - SHOW_ALL} more; type part of a name\n")
+
+
+def _clean_name(text: str) -> str:
+    """A provider name that works as a profile and a file name: letters, digits, - and _."""
+    return "-".join("".join(c if c.isalnum() or c in "-_" else " " for c in text).split()).lower()
 
 
 def _host(table: dict[str, Any]) -> str:

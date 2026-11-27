@@ -189,7 +189,12 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "save the conversation as Markdown (default: karox-<session>.md here)",
         "Workspace & Context",
     ),
-    CommandSpec("/model", "/model [NAME]", "show or change the model", "Model & Setup"),
+    CommandSpec(
+        "/model",
+        "/model [NAME|NUMBER]",
+        "the model and the provider's list; switch to another",
+        "Model & Setup",
+    ),
     CommandSpec("/models", "/models [TEXT]", "the models this provider offers", "Model & Setup"),
     CommandSpec(
         "/provider",
@@ -569,6 +574,8 @@ class ChatApp:
         self._fork_source: dict[str, Any] | None = None  # --fork: history to start from
         self.replay_on_start = False  # --resume: show the saved conversation at the start
         self.key_name = ""  # the saved key of this provider (credentials-<name>)
+        self._model_list: tuple[Any, list[str] | None] | None = None  # server, its models
+        self._shown_models: list[str] = []  # what a number in /model picks from
         self._checkpoints: Checkpoints | None = None
         self._turns: list[_TurnRecord] = []  # what /undo can take back, oldest first
         self._undone: list[tuple[_TurnRecord, list[Message]]] = []  # what /redo can put back
@@ -1581,11 +1588,7 @@ class ChatApp:
         elif name == "/key":
             await self._set_key()
         elif name == "/model":
-            if arg and arg != self.config.model:
-                self.config.model = arg
-                self.session.forget_model_state(provider_changed=False)
-            self.write(f"model: {self.config.model}\n")
-            self.write(self.paint("dim", f"  {self.session.model().describe()}") + "\n")
+            await self._model(arg)
         elif name == "/models":
             await self._models(arg)
         elif name == "/provider":
@@ -1815,17 +1818,43 @@ class ChatApp:
         if key is None:
             self.write(self.paint("yellow", "  no key saved for it: /key adds one") + "\n")
 
-    async def _models(self, arg: str) -> None:
-        from karox6.providers.catalog import CatalogError, list_models, pick
+    async def _provider_models(self) -> list[str] | None:
+        """The current provider's chat models (cached per server); None when it has no list."""
+        from karox6.providers.catalog import CatalogError, chat_models, list_models
 
+        where = (self.config.provider_name, getattr(self.provider, "base_url", None))
+        if not where[1]:
+            return None  # not a server KaroX talks to over HTTP (a scripted test provider)
+        if self._model_list is not None and self._model_list[0] == where:
+            return self._model_list[1]  # also a failure: asked once per server
+        found: list[str] | None
         try:
-            models = await list_models(
-                self.config.provider_name,
-                getattr(self.provider, "base_url", None),
-                getattr(self.provider, "api_key", None),
-            )
+            models = await list_models(where[0], where[1], getattr(self.provider, "api_key", None))
+            found = chat_models(models) or models
         except CatalogError as exc:
             self.write(self.paint("yellow", f"no model list: {_plain_text(str(exc))}") + "\n")
+            found = None
+        self._model_list = (where, found)
+        return found
+
+    def _show_models(self, models: list[str], hint: str) -> None:
+        from karox6.providers.catalog import columns
+
+        shown = models[:MODELS_SHOWN]
+        width = self._columns() if self._columns else 100
+        for line in columns(shown, width=width, mark=self.config.model):
+            self.write(line + "\n")
+        more = ""
+        if len(models) > len(shown):
+            more = f"{len(models) - len(shown)} more (/models TEXT filters); "
+        self.write(self.paint("dim", f"  {more}{hint}") + "\n")
+        self._shown_models = shown
+
+    async def _models(self, arg: str) -> None:
+        from karox6.providers.catalog import pick
+
+        models = await self._provider_models()
+        if models is None:
             return
         if arg:
             chosen, matches = pick(models, arg)
@@ -1833,14 +1862,38 @@ class ChatApp:
         if not models:
             self.write(f"no model matches {arg!r}\n")
             return
-        shown = models[:MODELS_SHOWN]
-        for m in shown:
-            mark = "*" if m == self.config.model else " "
-            self.write(f" {mark} {m}\n")
-        more = ""
-        if len(models) > len(shown):
-            more = f"{len(models) - len(shown)} more (/models TEXT filters); "
-        self.write(self.paint("dim", f"  {more}/model NAME switches") + "\n")
+        self._show_models(models, "/model NUMBER or NAME switches")
+
+    async def _model(self, arg: str) -> None:
+        from karox6.providers.catalog import pick
+
+        if not arg:
+            self.write(f"model: {self.config.model}\n")
+            self.write(self.paint("dim", f"  {self.session.model().describe()}") + "\n")
+            models = await self._provider_models()
+            if models:
+                self._show_models(models, "/model NUMBER or NAME (or part of one) switches")
+            return
+        chosen: str | None = None
+        if arg.isdigit() and self._shown_models and 1 <= int(arg) <= len(self._shown_models):
+            chosen = self._shown_models[int(arg) - 1]
+        else:
+            models = await self._provider_models() or []
+            found, matches = pick(models, arg) if models and not arg.isdigit() else (None, [])
+            if found is None and len(matches) == 1:
+                found = matches[0]
+            if found is None and len(matches) > 1:
+                self._show_models(matches, "/model NUMBER picks one of these")
+                return
+            chosen = found or arg
+            if found is None and models:
+                note = f"  {arg} is not in the provider's list; using it as typed"
+                self.write(self.paint("yellow", note) + "\n")
+        if chosen != self.config.model:
+            self.config.model = chosen
+            self.session.forget_model_state(provider_changed=False)
+        self.write(f"model: {self.config.model}\n")
+        self.write(self.paint("dim", f"  {self.session.model().describe()}") + "\n")
 
     async def _bridge(self, arg: str) -> None:
         from karox6.bridge import BridgeError

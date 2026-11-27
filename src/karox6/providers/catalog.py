@@ -6,6 +6,7 @@ of typing a name from memory. A server without such a list just yields an error 
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -113,3 +114,31 @@ def pick(models: list[str], text: str) -> tuple[str | None, list[str]]:
             return m, []
     words = text.lower().split()
     return None, [m for m in models if all(w in m.lower() for w in words)]
+
+
+# Models that do not chat (embeddings, speech, OCR, moderation, images): left out of the
+# lists people pick a coding model from.
+_NOT_CHAT = re.compile(
+    r"embed|moderation|\bocr\b|-ocr|tts|transcri|whisper|realtime|dall-e|image-gen|rerank",
+    re.IGNORECASE,
+)
+
+
+def chat_models(models: list[str]) -> list[str]:
+    return [m for m in models if not _NOT_CHAT.search(m)]
+
+
+def columns(models: list[str], width: int = 100, mark: str | None = None) -> list[str]:
+    """Numbered names in as many columns as fit ``width`` (numbers go down the columns);
+    ``mark`` gets a star."""
+    if not models:
+        return []
+    cells = [f"{i}. {m}{' *' if m == mark else ''}" for i, m in enumerate(models, 1)]
+    cell = max(len(c) for c in cells) + 3
+    count = max(1, min(4, (width - 2) // cell))
+    rows = -(-len(cells) // count)
+    lines = []
+    for r in range(rows):
+        row = [cells[c * rows + r] for c in range(count) if c * rows + r < len(cells)]
+        lines.append("  " + "".join(x.ljust(cell) for x in row).rstrip())
+    return lines
