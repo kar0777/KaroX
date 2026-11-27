@@ -23,6 +23,9 @@ class ToolResult:
     content: str
     is_error: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
+    # Picture files the result shows (a screenshot, an image file read): the session
+    # copies them and a model that takes pictures sees them after the result.
+    images: list[Path] = field(default_factory=list)
 
 
 @dataclass(slots=True)

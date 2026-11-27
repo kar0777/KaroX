@@ -14,7 +14,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import shutil
 import time
+import uuid
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -41,7 +43,14 @@ from karox6.core.loopguard import (
     WorkspaceMonitor,
     finish_gate_message,
 )
-from karox6.core.messages import IMAGE_TOKENS, Message, ToolCall, Usage, image_note
+from karox6.core.messages import (
+    IMAGE_TOKENS,
+    IMAGE_TYPES,
+    Message,
+    ToolCall,
+    Usage,
+    image_note,
+)
 from karox6.core.prompt import build_system_prompt
 from karox6.core.review import (
     REVIEW_APPEND,
@@ -620,8 +629,12 @@ class Session:
 
     def _request(self, *, allow_tools: bool = True) -> ModelRequest:
         messages = self._replay_view(self.messages)
-        if self.model().vision is False:
+        vision = self.model().vision
+        if vision is False:
             messages = _without_images(messages)
+        # Pictures from tool results only go to a model known to see them (a guess
+        # would turn every screenshot into a failed request).
+        messages = _tool_pictures(messages, show=vision is True)
         return ModelRequest(
             model=self.config.model,
             system=self.system_prompt,
@@ -744,6 +757,7 @@ class Session:
         started = time.monotonic()
         tool = self._lookup(call.name)
         meta: dict[str, Any] = {}
+        pictures: list[Path] = []
         if tool is None:
             names = ", ".join(self._tool_map)
             content, is_error = (
@@ -762,6 +776,7 @@ class Session:
                 try:
                     result = await tool.run(args, ctx)
                     content, is_error, meta = result.content, result.is_error, result.meta
+                    pictures = list(result.images)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -791,7 +806,33 @@ class Session:
             tool_call_id=call.id,
             name=tool.name if tool is not None else call.name,
             is_error=is_error,
+            images=self._keep_pictures(pictures, meta),
         )
+
+    def _keep_pictures(self, pictures: list[Path], meta: dict[str, Any]) -> list[dict[str, str]]:
+        """Copy a tool result's pictures into the session (later requests send the same
+        bytes whatever happens to the originals); a screenshot arrives as PNG bytes."""
+        shot = meta.pop("image_png", None)
+        if not pictures and not isinstance(shot, bytes | bytearray):
+            return []
+        folder = self.store.dir / "images"
+        kept: list[dict[str, str]] = []
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if isinstance(shot, bytes | bytearray):
+                target = folder / f"tool-{uuid.uuid4().hex[:12]}.png"
+                target.write_bytes(bytes(shot))
+                kept.append({"path": str(target), "media_type": "image/png"})
+            for source in pictures[:MAX_TOOL_PICTURES]:
+                suffix = source.suffix.lower()
+                if suffix not in IMAGE_TYPES:
+                    continue
+                target = folder / f"tool-{uuid.uuid4().hex[:12]}{suffix}"
+                shutil.copyfile(source, target)
+                kept.append({"path": str(target), "media_type": IMAGE_TYPES[suffix]})
+        except OSError:
+            pass  # the text result still says what the picture was
+        return kept
 
     def _make_approver(self, emit: Callable[[ev.Event], None]) -> Approver:
         counter = 0
@@ -1457,4 +1498,39 @@ def _without_images(messages: list[Message]) -> list[Message]:
             for image in m.images
         )
         out.append(replace(m, images=[], content=f"{m.content}\n{notes}".strip()))
+    return out
+
+
+MAX_TOOL_PICTURES = 4  # per tool result
+
+
+def _tool_pictures(messages: list[Message], *, show: bool) -> list[Message]:
+    """Tool messages carry text only on the wire (most APIs take no pictures there): the
+    pictures of a run of results follow it as one user message, or are left out."""
+    if not any(m.role == "tool" and m.images for m in messages):
+        return messages
+    out: list[Message] = []
+    waiting: list[tuple[str, dict[str, str]]] = []
+
+    def flush() -> None:
+        if waiting:
+            names = ", ".join(dict.fromkeys(name for name, _ in waiting))
+            text = f"[pictures from the tool results above: {names}]"
+            out.append(
+                Message(
+                    "user", text, images=[i for _, i in waiting], meta={"kind": "tool_pictures"}
+                )
+            )
+            waiting.clear()
+
+    for m in messages:
+        if m.role == "tool" and m.images:
+            out.append(replace(m, images=[]))
+            if show:
+                waiting.extend((m.name or "tool", image) for image in m.images)
+            continue
+        if m.role != "tool":
+            flush()
+        out.append(m)
+    flush()
     return out

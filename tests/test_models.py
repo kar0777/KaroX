@@ -116,3 +116,50 @@ def test_a_refused_picture_is_learned_and_the_request_sent_again(tmp_path):
     config2 = SessionConfig(model="claude-haiku-5-5", workspace=tmp_path, home=home)
     session2 = Session(config2, ScriptedProvider([Turn(error=other)]))
     assert _run(session2, "hi", None)[-1].status == "error"  # no pictures were sent
+
+
+def _picture_tool(tmp_path):
+    from karox6.tools.base import ToolResult
+
+    shot = _picture(tmp_path)[0]["path"]
+
+    class Shot:
+        name, description, parameters, read_only = "shot", "take a picture", {}, True
+
+        async def run(self, args, ctx):
+            return ToolResult("took a picture", images=[__import__("pathlib").Path(shot)])
+
+    return Shot()
+
+
+@pytest.mark.parametrize(
+    ("model", "shown"),
+    [("claude-haiku-5-5", True), ("zai-org/GLM-5.3-Flash", False), ("deepseek-v4.1", False)],
+)
+def test_tool_pictures_follow_the_results_only_for_a_model_that_sees(tmp_path, model, shown):
+    provider = ScriptedProvider([Turn(calls=[("shot", {}), ("shot", {})]), Turn(text="done")])
+    config = SessionConfig(model=model, workspace=tmp_path, home=tmp_path / "h")
+    session = Session(config, provider, extra_tools=[_picture_tool(tmp_path)])
+    assert _run(session, "look", None)[-1].status == "completed"
+    sent = provider.requests[1].messages
+    roles = [m.role for m in sent]
+    stored = [m for m in session.messages if m.role == "tool"]
+    assert all(len(m.images) == 1 for m in stored)  # kept in the session either way
+    assert all(not m.images for m in sent if m.role == "tool")  # never on the wire there
+    if shown:
+        assert roles[-3:] == ["tool", "tool", "user"]
+        assert len(sent[-1].images) == 2
+        assert "pictures from the tool results above: shot" in sent[-1].content
+    else:
+        assert roles[-2:] == ["tool", "tool"]
+        assert not any(m.images for m in sent)
+
+
+def test_read_of_a_picture_file_attaches_it(tmp_path, ctx):
+    from karox6.tools.fs import ReadTool
+
+    path = _picture(ctx.workspace)[0]["path"]
+    result = asyncio.run(ReadTool().run({"file_path": path}, ctx))
+    assert not result.is_error
+    assert "is a picture (image/png" in result.content
+    assert [str(p) for p in result.images] == [path]

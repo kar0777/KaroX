@@ -464,11 +464,12 @@ class McpTool:
             )
         except (McpClientError, httpx.HTTPError, OSError) as exc:
             return ToolResult(f"MCP server {server.name} failed: {exc}", is_error=True)
-        text = render_result(result, save_dir=ctx.spill_dir, name=self.name)
+        pictures: list[Path] = []
+        text = render_result(result, save_dir=ctx.spill_dir, name=self.name, saved=pictures)
         inline, _ = limit_output(
             text, spill_dir=ctx.spill_dir, name=self.name, max_chars=INLINE_CHARS
         )
-        return ToolResult(inline, is_error=bool(result.get("isError")))
+        return ToolResult(inline, is_error=bool(result.get("isError")), images=pictures)
 
 
 def tool_name(server: str, tool: str) -> str:
@@ -477,15 +478,23 @@ def tool_name(server: str, tool: str) -> str:
 
 
 def render_result(
-    result: dict[str, Any], *, save_dir: Path | None = None, name: str = "mcp"
+    result: dict[str, Any],
+    *,
+    save_dir: Path | None = None,
+    name: str = "mcp",
+    saved: list[Path] | None = None,
 ) -> str:
+    """The result as text; saved pictures are added to ``saved`` when it is given."""
     parts: list[str] = []
     for block in result.get("content") or []:
         if not isinstance(block, dict):
             continue
         kind = block.get("type")
         if kind in ("image", "audio") and save_dir is not None:
-            parts.append(_save_media(block, save_dir, name, len(parts) + 1))
+            text, path = _save_media(block, save_dir, name, len(parts) + 1)
+            parts.append(text)
+            if path is not None and saved is not None and block.get("type") == "image":
+                saved.append(path)
         elif kind == "text":
             parts.append(str(block.get("text", "")))
         elif kind == "resource":
@@ -510,7 +519,9 @@ _MEDIA_EXT = {
 }
 
 
-def _save_media(block: dict[str, Any], save_dir: Path, name: str, number: int) -> str:
+def _save_media(
+    block: dict[str, Any], save_dir: Path, name: str, number: int
+) -> tuple[str, Path | None]:
     """An image or audio block: its bytes go to a file the model can name to the user (or
     open with a tool) instead of being dropped."""
     kind = str(block.get("type"))
@@ -518,9 +529,9 @@ def _save_media(block: dict[str, Any], save_dir: Path, name: str, number: int) -
     try:
         data = base64.b64decode(str(block.get("data") or ""), validate=True)
     except (binascii.Error, ValueError):
-        return f"[{kind} content omitted: not valid base64]"
+        return f"[{kind} content omitted: not valid base64]", None
     if not data:
-        return f"[{kind} content omitted: empty]"
+        return f"[{kind} content omitted: empty]", None
     ext = _MEDIA_EXT.get(mime, ".bin")
     stem = _NAME_RX.sub("_", name)[:60]
     path = save_dir / f"{stem}-{time.strftime('%H%M%S')}-{number}-{uuid.uuid4().hex[:8]}{ext}"
@@ -528,8 +539,8 @@ def _save_media(block: dict[str, Any], save_dir: Path, name: str, number: int) -
         save_dir.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
     except OSError as exc:
-        return f"[{kind} content omitted: cannot save it ({exc})]"
-    return f"[{kind} {mime or 'of unknown type'}, {len(data)} bytes, saved to {path}]"
+        return f"[{kind} content omitted: cannot save it ({exc})]", None
+    return f"[{kind} {mime or 'of unknown type'}, {len(data)} bytes, saved to {path}]", path
 
 
 def call_timeout(spec: dict[str, Any]) -> float:

@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from karox6.core.messages import IMAGE_MAX_BYTES, IMAGE_TYPES
 from karox6.tools.atomic import write_atomic
 from karox6.tools.base import ToolContext, ToolResult
 from karox6.tools.clones import TIME_BUDGET_S, copies_note, find_copies
@@ -158,6 +159,14 @@ def _read_file(
     except OSError as exc:
         return ToolResult(f"Error: cannot read {shown}: {exc}", is_error=True), 0
     if _is_binary(data):
+        kind = IMAGE_TYPES.get(path.suffix.lower())
+        if kind is not None and len(data) <= IMAGE_MAX_BYTES:
+            # A picture: shown to a model that takes pictures, right after this result.
+            note = (
+                f"{shown} is a picture ({kind}, {len(data)} bytes); it follows this result "
+                "if this model takes pictures."
+            )
+            return ToolResult(note, images=[path]), 0
         return (
             ToolResult(f"Error: {shown} is a binary file ({len(data)} bytes).", is_error=True),
             0,

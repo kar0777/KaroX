@@ -75,6 +75,23 @@ tokens; they enable cost display and `--max-cost`).
 working budget. History is compacted near the smaller of the two, so a 1M-token model
 still works in 400k unless you raise the limit.
 
+### What KaroX knows about the model
+
+`/status` and `/model` show whether the model takes pictures and how large its window is.
+The answer comes from `models.json` in the KaroX home (yours first), then from what a
+session learned, then from built-in facts (Claude, GPT-4o and later, Gemini and `-VL`
+models see; gpt-oss and DeepSeek do not):
+
+```json
+{"models": {"zai-org/GLM-5.3-Flash": {"vision": false, "context_window": 200000},
+            "my-local-*": {"vision": true}}}
+```
+
+A model that takes no pictures gets a short note in their place. When a provider refuses
+pictures, KaroX writes `{"vision": false}` for that model under `"learned"` and sends the
+request again without them. Pictures from tools (a screenshot, an MCP browser, `read` of a
+`.png`) are shown only to a model known to see them.
+
 ## Chat
 
 `karox chat` (or plain `karox` in a terminal) opens a full-screen chat: the conversation
