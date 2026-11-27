@@ -4,8 +4,8 @@ Written 2026-11-27 before pool10 exists (collection of its windows has just star
 (bench/PROGRESS.md 2026-11-27) and the pool9 adoption of dev68.
 
 **Pool.** pool10 = every RED/GREEN-valid candidate of collect_fresh windows 2026-06-10..07-10 and 2026-05-10..06-10
-(earlier pools excluded), ids frozen in `pool10_frozen.json` before the run; FAIR labels by the same two blind Codex
-auditors and merge rule as pool7-9, fixed in `fair_pools.json` before the run. Trajectories never read except for
+(earlier pools excluded), ids 494-607 (114 tasks) frozen in `pool10_frozen.json` (bench commit 31eef72) before the run; FAIR labels by the same two blind Codex
+auditors and merge rule as pool7-9, fixed in `fair_pools.json` before the run: 49 FAIR / 22 PARTIAL / 35 UNFAIR / 8 DISPUTED. Trajectories never read except for
 infra failures.
 
 **Arms (side by side per task).** karox6 = 6.0.0.dev68 (shipping), karox6b = 6.0.0.dev69 (steps/dev69: dev68 +
