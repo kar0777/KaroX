@@ -581,3 +581,53 @@ def test_sessions_list_never_replays_control_sequences_from_a_title(tmp_path):
     assert "there" in line
     assert "\x1b]0" not in line
     assert "\x1b[2J" not in line
+
+
+def test_resume_shows_the_conversation_where_it_stopped(tmp_path):
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / "notes.txt").write_text("alpha\n")
+    first = [Turn(calls=[("read", {"file_path": "notes.txt"})]), Turn(text="It says alpha.")]
+    term = FakeTerm(["what is in notes.txt?", "/quit"])
+    app, _ = make_app(tmp_path, first, term)
+    asyncio.run(app.run())
+
+    term2 = FakeTerm(["/resume last", "/quit"])
+    app2, _ = make_app(tmp_path, [], term2)
+    asyncio.run(app2.run())
+    shown = term2.text
+    assert "› what is in notes.txt?" in shown
+    assert "read notes.txt" in shown
+    assert "It says alpha." in shown
+    assert shown.index("what is in notes.txt?") < shown.index("It says alpha.")
+    assert shown.index("It says alpha.") < shown.index("resumed ")
+
+    # --resume at start shows it before the first prompt; only the last turns are shown
+    term3 = FakeTerm(["/quit"])
+    app3, _ = make_app(tmp_path, [], term3)
+    app3._initialize = _resume_last(tmp_path)
+    app3.replay_on_start = True
+    asyncio.run(app3.run())
+    assert "› what is in notes.txt?" in term3.text
+
+
+def _resume_last(tmp_path):
+    from karox6.core.store import resume_kwargs
+
+    async def init(app):
+        return resume_kwargs(tmp_path / "home", "last", workspace=tmp_path / "ws")
+
+    return init
+
+
+def test_replay_keeps_only_the_last_exchanges(tmp_path):
+    turns = [Turn(text=f"answer {n}") for n in range(13)]
+    term = FakeTerm([f"question {n}" for n in range(13)] + ["/quit"])
+    app, _ = make_app(tmp_path, turns, term)
+    asyncio.run(app.run())
+    term2 = FakeTerm(["/resume last", "/quit"])
+    app2, _ = make_app(tmp_path, [], term2)
+    asyncio.run(app2.run())
+    assert "… 6 earlier messages not shown" in term2.text
+    assert "› question 2\n" not in term2.text
+    assert "› question 3" in term2.text
+    assert "answer 12" in term2.text

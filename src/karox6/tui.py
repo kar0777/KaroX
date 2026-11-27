@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from karox6.bridge import Bridge
     from karox6.core.checkpoint import Checkpoints
     from karox6.core.config import SessionConfig
-    from karox6.core.messages import Message
+    from karox6.core.messages import Message, ToolCall
     from karox6.core.session import Session
     from karox6.tools.base import ApprovalRequest, Tool
     from karox6.tui_theme import Theme
@@ -115,6 +115,7 @@ DIFF_CAP = 40_000
 _EXIT_LINE = re.compile(r"^\[exit code:\s*-?\d+")
 _CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MENTION_MAX_BYTES = 64 * 1024
+REPLAY_TURNS = 10  # exchanges a resumed session shows
 MENTION_TOTAL_BYTES = 128 * 1024
 
 
@@ -532,6 +533,7 @@ class ChatApp:
         self.snapshots = snapshots  # record the workspace around each turn (for /undo)
         self._prefill = prefill  # puts text into the input line (an undone message)
         self._fork_source: dict[str, Any] | None = None  # --fork: history to start from
+        self.replay_on_start = False  # --resume: show the saved conversation at the start
         self._checkpoints: Checkpoints | None = None
         self._turns: list[_TurnRecord] = []  # what /undo can take back, oldest first
         self._undone: list[tuple[_TurnRecord, list[Message]]] = []  # what /redo can put back
@@ -601,6 +603,13 @@ class ChatApp:
         (the full-screen app puts it into its very first frame)."""
         if banner:
             self.write(self._banner())
+        if self.replay_on_start:
+            try:
+                await self._ensure_session()
+            except (ValueError, FileNotFoundError) as exc:  # an unknown id: said once here
+                self.write(self.paint("red", str(exc)) + "\n")
+            else:
+                self.replay_history()
         if self.snapshots:
             # The first snapshot reads the whole project: start it while the user types.
             self._warmup = asyncio.ensure_future(self._snapshot())
@@ -1029,6 +1038,42 @@ class ChatApp:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(record.after), SNAPSHOT_AFTER_WAIT_S)
 
+    def replay_history(self, turns: int = REPLAY_TURNS) -> None:
+        """A resumed session: its last ``turns`` exchanges as they looked when they ran
+        (messages, answers, one line per tool call), so the user sees where it stopped."""
+        p, g = self.paint, self.glyph
+        messages = [m for m in self.session.messages if m.role != "system"]
+        asked = [i for i, m in enumerate(messages) if m.role == "user" and not m.meta.get("kind")]
+        if not asked:
+            return
+        start = asked[-turns] if len(asked) > turns else 0
+        if start:
+            self.write(p("muted", f"… {start} earlier messages not shown") + "\n")
+        calls: dict[str, ToolCall] = {}
+        for m in messages[start:]:
+            if m.role == "user":
+                if m.meta.get("kind") in (None, "compaction"):
+                    lines = _plain_text(m.content).split("\n")
+                    if m.meta.get("kind"):
+                        lines = ["(summary of the earlier conversation)"]
+                    self._end_stream()
+                    head = p("accent+bold", g["prompt"]) + p("user", lines[0])
+                    rest = [p("muted", g["more"]) + p("user", line) for line in lines[1:]]
+                    self.write("\n".join([head, *rest]) + "\n")
+            elif m.role == "assistant":
+                if m.content.strip():
+                    self.render(ev.AssistantMessage(step=0, text=m.content))
+                for call in m.tool_calls:
+                    calls[call.id] = call
+                    self.render(ev.ToolStarted(call.id, call.name, call.arguments))
+            elif m.role == "tool":
+                made = calls.pop(m.tool_call_id or "", None)
+                name = made.name if made is not None else (m.name or "tool")
+                self.render(ev.ToolFinished(m.tool_call_id or "", name, m.is_error, m.content, -1))
+        self._end_stream()
+        self._active_tools.clear()  # calls the history has no result for
+        self._had_tools = False
+
     def _forget_turns(self) -> None:
         self._turns.clear()
         self._undone.clear()
@@ -1223,7 +1268,12 @@ class ChatApp:
             detail = p("error" if failed else "muted", summary)
         else:
             detail = self._paint_diff_stats(*stats)
-        took = p("muted", f"{g['dot']}{event.duration_ms / 1000:.1f}s")
+        # A replayed call (duration -1) took no time now: no duration shown.
+        took = (
+            p("muted", f"{g['dot']}{event.duration_ms / 1000:.1f}s")
+            if event.duration_ms >= 0
+            else ""
+        )
         line = f"{head}  {mark}" + (f" {detail}" if detail else "") + f"{took}\n"
         short = [line]
         full = [line]
@@ -1441,6 +1491,7 @@ class ChatApp:
                 self.session = self._new_session(**kwargs)
                 self._forget_turns()
                 count = len(self.session.messages)
+                self.replay_history()
                 self.write(f"resumed {self.session.session_id} ({count} messages)\n")
         elif name == "/approve":
             if arg in APPROVAL_MODES:

@@ -815,6 +815,7 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
         )
         if ui is not None:
             ui.attach_app(created)
+        created.replay_on_start = bool(args.resume)
         return created
 
     app: ChatApp | None = None
