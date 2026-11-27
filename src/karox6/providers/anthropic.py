@@ -118,6 +118,8 @@ class AnthropicProvider(StreamProvider):
         )
         if effort and adaptive_thinking(request.model):
             body["thinking"] = {"type": "adaptive"}
+            if effort == "xhigh" and re.search(r"-4[-.]6(?!\d)", request.model):
+                effort = "high"  # 4.6 has no xhigh (HTTP 400); max it does have
             body["output_config"] = {"effort": effort}
         elif budget:
             body["thinking"] = {"type": "enabled", "budget_tokens": budget}

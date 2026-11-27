@@ -553,3 +553,12 @@ def test_closing_a_wrapped_server_ends_the_server_under_the_wrapper(tmp_path):
     asyncio.run(go())
     child = int(pid_file.read_text())
     assert not alive(child)
+
+
+def test_media_from_calls_in_the_same_second_never_overwrite(tmp_path):
+    png = "iVBORw0KGgo="
+    result = {"content": [{"type": "image", "data": png, "mimeType": "image/png"}]}
+    one = render_result(result, save_dir=tmp_path, name="t")
+    two = render_result(result, save_dir=tmp_path, name="t")
+    assert one != two
+    assert len(list(tmp_path.iterdir())) == 2

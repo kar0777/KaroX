@@ -32,6 +32,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -522,7 +523,7 @@ def _save_media(block: dict[str, Any], save_dir: Path, name: str, number: int) -
         return f"[{kind} content omitted: empty]"
     ext = _MEDIA_EXT.get(mime, ".bin")
     stem = _NAME_RX.sub("_", name)[:60]
-    path = save_dir / f"{stem}-{time.strftime('%H%M%S')}-{number}{ext}"
+    path = save_dir / f"{stem}-{time.strftime('%H%M%S')}-{number}-{uuid.uuid4().hex[:8]}{ext}"
     try:
         save_dir.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)

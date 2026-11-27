@@ -17,6 +17,7 @@ import re
 import stat
 import sys
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -561,7 +562,10 @@ class ChatApp:
         self._turns: list[_TurnRecord] = []  # what /undo can take back, oldest first
         self._undone: list[tuple[_TurnRecord, list[Message]]] = []  # what /redo can put back
         self._pending_images: list[Path] = []  # pictures waiting for the next message
-        self._next_images: list[Path] | None = None  # set: a queued message's own pictures
+        self._next_images: list[Path] | None = None  # set: a sent message's own pictures
+        # Pictures a command attached (/paste, or a sent command's draft pictures): they go
+        # with the next message whatever its draft holds.
+        self._carried: list[Path] = []
         self._warmup: asyncio.Future[str | None] | None = None
         self.session: Session
         if initialize is None:
@@ -652,8 +656,8 @@ class ChatApp:
                 continue
             exit_armed = False
             if self._next_images is not None and (not text or text.startswith("/")):
-                # A queued command takes no pictures: they wait for the next message.
-                self._pending_images[:0] = self._next_images
+                # A command takes no pictures: they go with the next message.
+                self._carried += self._next_images
                 self._next_images = None
             if not text:
                 continue
@@ -909,10 +913,11 @@ class ChatApp:
     def _attach_images(self, text: str) -> tuple[str, list[dict[str, str]]]:
         """Pictures for this message: the ones waiting from /paste, then the ones its
         text names. Each is copied into the session; the text keeps an [image N] mark."""
-        if self._next_images is not None:  # a queued message: the draft's stay put
+        if self._next_images is not None:  # its own pictures: the draft's stay put
             pending, self._next_images = self._next_images, None
         else:
             pending, self._pending_images = self._pending_images, []
+        pending, self._carried = [*self._carried, *pending], []
         found = find_images(text, self.session.workspace, already=len(pending))
         for warning in found.warnings:
             self.write(self.paint("yellow", f"  {_plain_text(warning)}") + "\n")
@@ -930,14 +935,19 @@ class ChatApp:
             self.write(self.paint("dim", "  " + " ".join(labels)) + "\n")
         return found.text, images
 
-    async def paste_image(self) -> None:
-        """``/paste`` (Alt+V): keep the clipboard's picture for the next message."""
+    async def paste_image(self, *, to_draft: bool = True) -> None:
+        """Alt+V / Ctrl+V (``to_draft``) or ``/paste``: keep the clipboard's picture for
+        the next message."""
         from karox6.clipboard import ClipboardError, grab_image, in_daemon_thread
 
         await self._ensure_session()
-        number = len(self._pending_images) + 1
+        number = len(self._pending_images) + len(self._carried) + 1
         stamp = time.strftime("%H%M%S")
-        target = self.session.store.dir / "images" / f"clipboard-{stamp}-{number}.png"
+        target = (
+            self.session.store.dir
+            / "images"
+            / f"clipboard-{stamp}-{number}-{uuid.uuid4().hex[:8]}.png"
+        )
         try:
             path = await in_daemon_thread(grab_image, target)
         except ClipboardError as exc:
@@ -946,11 +956,9 @@ class ChatApp:
         except OSError as exc:
             self.write(self.paint("red", f"  cannot read the clipboard: {exc}") + "\n")
             return
-        self._pending_images.append(path)
+        (self._pending_images if to_draft else self._carried).append(path)
         self.write(
-            self.paint(
-                "dim", f"  {picture_chip(path, len(self._pending_images))} — goes with your "
-            )
+            self.paint("dim", f"  {picture_chip(path, number)} — goes with your ")
             + self.paint("dim", "next message (/paste or Ctrl+V adds another)")
             + "\n"
         )
@@ -958,14 +966,19 @@ class ChatApp:
     # -- clipboard ---------------------------------------------------------------------
 
     def images_for_next(self, images: list[Path]) -> None:
-        """The message read next was queued with these pictures: it takes them instead
-        of the ones waiting in the current draft."""
+        """The line read next was sent with these pictures: it takes them instead of
+        the ones in the draft being typed now."""
         self._next_images = list(images)
 
     @property
     def pending_images(self) -> list[Path]:
         """The pictures waiting to go with the next message (the UI shows their chips)."""
         return self._pending_images
+
+    @property
+    def carried_images(self) -> list[Path]:
+        """Pictures a command attached; they go with the next message too."""
+        return self._carried
 
     async def _copy(self, arg: str) -> None:
         """``/copy``, ``/copy code``, ``/copy N``: an answer or its last code block
@@ -1508,7 +1521,7 @@ class ChatApp:
             focus = f"\n\nPay special attention to: {arg}" if arg else ""
             await self.turn(INIT_PROMPT + focus, label="/init" + (f" {arg}" if arg else ""))
         elif name == "/paste":
-            await self.paste_image()
+            await self.paste_image(to_draft=False)
         elif name == "/copy":
             await self._copy(arg)
         elif name == "/export":

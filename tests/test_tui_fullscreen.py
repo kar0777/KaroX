@@ -1245,3 +1245,67 @@ def test_type_ahead_keeps_alt_enter_and_each_message_its_own_pictures(
                 assert await asyncio.wait_for(running, 3) == 0
 
     run_timed(go())
+
+
+def test_two_quick_enters_and_a_queued_paste_keep_pictures_with_the_right_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from karox6 import clipboard
+
+    monkeypatch.setattr(clipboard, "grab_text", lambda: None)
+    monkeypatch.setattr(clipboard, "grab_image", _png)
+
+    async def go() -> None:
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class GatedTool:
+            name, description, parameters, read_only = "wait", "gated tool", {}, True
+
+            async def run(self, args: dict[str, object], ctx: object) -> ToolResult:
+                started.set()
+                await release.wait()
+                return ToolResult("released")
+
+        out = ScreenOutput()
+        with create_pipe_input() as keys:
+            ui = FullScreenTui(
+                workspace=tmp_path / "ws",
+                home=tmp_path / "home",
+                input=keys,
+                output=out,
+                complete_in_thread=False,
+            )
+            replies = [Turn(text="a"), Turn(text="b"), Turn(calls=[("wait", {})])]
+            replies += [Turn(text="waited"), Turn(text="c")]
+            app, provider = make_full_app(tmp_path, replies, ui, extra_tools=[GatedTool()])
+            async with ui:
+                running = asyncio.create_task(app.run())
+                await eventually(lambda: ui.mode == "prompt")
+                keys.send_text("\x16")
+                await eventually(lambda: len(app.pending_images) == 1)
+                # Two Enters before the chat loop has taken the first line (two reads;
+                # in one read the second is a pasted line end).
+                for line in ("A", "B"):
+                    ui.input_buffer.text = line
+                    ui._submit(None)
+                await eventually(lambda: len(provider.requests) == 2 and ui.mode == "prompt")
+                assert len(provider.requests[0].messages[-1].images) == 1
+                assert provider.requests[1].messages[-1].images == []
+
+                # /paste queued during a turn: its picture goes with the next message
+                keys.send_text("go\r")
+                await asyncio.wait_for(started.wait(), 3)
+                await eventually(lambda: ui.mode == "running")
+                for line in ("/paste", "what is it?"):
+                    ui.input_buffer.text = line
+                    ui._submit(None)
+                assert len(ui._queued_inputs) == 2
+                release.set()
+                await eventually(lambda: "\nc" in ui.transcript.plain_text)
+                asked = provider.requests[-1].messages[-1]
+                assert "what is it?" in str(asked.content)
+                assert len(asked.images) == 1
+                keys.send_text("/quit\r")
+                assert await asyncio.wait_for(running, 3) == 0
+
+    run_timed(go())

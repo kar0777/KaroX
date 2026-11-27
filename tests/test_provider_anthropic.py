@@ -317,3 +317,10 @@ def test_effort_uses_adaptive_thinking_on_models_that_reject_a_budget(model, ada
         assert "output_config" not in body
     plain = ModelRequest(model, "", [Message("user", "hi")])
     assert "thinking" not in AnthropicProvider("https://example.test", "key").build_body(plain)
+
+
+def test_xhigh_falls_back_to_high_on_4_6():
+    for model, sent in (("claude-sonnet-4-6", "high"), ("claude-opus-4-7", "xhigh")):
+        request = ModelRequest(model, "", [Message("user", "hi")], reasoning_effort="xhigh")
+        body = AnthropicProvider("https://example.test", "key").build_body(request)
+        assert body["output_config"] == {"effort": sent}

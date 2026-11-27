@@ -1018,7 +1018,10 @@ class FullScreenTui:
         in_question = Condition(lambda: self._mode == "question")
         in_secret = Condition(lambda: self._mode == "secret")
         has_attach = Condition(
-            lambda: self._chat_app is not None and bool(self._chat_app.pending_images)
+            lambda: (
+                self._chat_app is not None
+                and bool(self._chat_app.pending_images or self._chat_app.carried_images)
+            )
         )
 
         inside = HSplit(
@@ -1495,7 +1498,8 @@ class FullScreenTui:
         """The pictures waiting to go with the next message, inside the input box."""
         from karox6.chat_features import picture_chip
 
-        pend = self._chat_app.pending_images if self._chat_app is not None else []
+        chat = self._chat_app
+        pend = [*chat.carried_images, *chat.pending_images] if chat is not None else []
         chips = "  ".join(picture_chip(path, i + 1) for i, path in enumerate(pend))
         return self._roles([("muted", f" {chips}")])
 
@@ -1882,14 +1886,17 @@ class FullScreenTui:
         buf.cancel_completion()
         buf.reset()
         self._end_draft()
+        # The draft's pictures go with this line, not with whichever is read next (a
+        # second Enter can come before the chat loop has taken the first line).
+        images: list[Path] = []
+        if self._chat_app is not None and (self._read_future is not None or text.strip()):
+            images = list(self._chat_app.pending_images)
+            self._chat_app.pending_images.clear()
         if self._read_future is not None and not self._read_future.done():
             self._echo_user_message(shown)
+            if self._chat_app is not None:
+                self._chat_app.images_for_next(images)
             self._read_future.set_result(text)
         elif text.strip():
-            # The draft's pictures go with this message, not whichever is read next.
-            images: list[Path] = []
-            if self._chat_app is not None:
-                images = list(self._chat_app.pending_images)
-                self._chat_app.pending_images.clear()
             self._queued_inputs.append((text, images))
             self.invalidate()  # the status bar counts what is waiting
