@@ -93,7 +93,7 @@ def test_slash_command_and_argument_completion(tmp_path):
     assert "cop" in co["/copy"].lower()
 
     ex = [c.text for c in _complete(completer, "/ex")]
-    assert ex == ["/exit"]
+    assert ex == ["/export", "/exit"]
 
     approve = {c.text: c.display_meta_text for c in _complete(completer, "/approve ")}
     assert set(approve) == {"ask", "allow", "deny"}
