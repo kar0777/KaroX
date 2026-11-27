@@ -912,7 +912,8 @@ class FullScreenTui:
         self._read_future: asyncio.Future[str] | None = None
         self._question_future: asyncio.Future[str] | None = None
         self._closed = False  # _stop ran: reads after it get EOF, never a dead future
-        self._queued_inputs: deque[str | BaseException] = deque()
+        # Messages sent while a turn runs, each with the pictures attached to its draft.
+        self._queued_inputs: deque[tuple[str, list[Path]] | BaseException] = deque()
         self._copy_fn = copy_to_clipboard
         self._pastes = PasteChunks()
         self._large_ok: str | None = None  # the draft whose size the user confirmed
@@ -1271,8 +1272,11 @@ class FullScreenTui:
             item = self._queued_inputs.popleft()
             if isinstance(item, BaseException):
                 raise item
-            self._echo_user_message(item)
-            return item
+            text, images = item
+            if self._chat_app is not None:
+                self._chat_app.images_for_next(images)
+            self._echo_user_message(text)
+            return text
         if self._app_task is not None and self._app_task.done():
             raise EOFError
         loop = asyncio.get_running_loop()
@@ -1437,7 +1441,7 @@ class FullScreenTui:
             room = self._width() - 6 - sum(cell_width(t) for _, t in tail) - 24
             left += [("", clip_cells(_plain_text(phase), max(room, 10))), *tail]
         right: list[tuple[str, str]] = []
-        queued = sum(1 for item in self._queued_inputs if isinstance(item, str))
+        queued = sum(1 for item in self._queued_inputs if isinstance(item, tuple))
         if queued and self._turn_active:
             right += [("warning", f"{queued} queued"), ("muted", " (esc clears)")]
         below = 0 if self._transcript.follow else self._transcript.lines_below
@@ -1669,7 +1673,6 @@ class FullScreenTui:
 
         # -- running turn interrupt --
 
-        @keys.add("escape", eager=True, filter=in_running)
         @keys.add("c-c", eager=True, filter=in_running)
         @keys.add("<sigint>", eager=True, filter=in_running)
         def _stop_turn(event: KeyPressEvent) -> None:
@@ -1677,6 +1680,24 @@ class FullScreenTui:
             if self._turn_interrupt_fn is not None:
                 self._turn_interrupt_fn()
             event.app.invalidate()
+
+        @keys.add("escape", eager=True, filter=in_running)
+        def _escape_running(event: KeyPressEvent) -> None:
+            # Alt+Enter and Alt+V arrive as Escape plus the key in one read. Escape is
+            # eager (a stop must not wait for a possible second key), so the pair is
+            # recognised here: a two-key binding would never see its second key.
+            pending = event.key_processor.input_queue
+            if pending and not is_searching():
+                nxt = pending[0].key
+                if nxt in (Keys.ControlM, Keys.ControlJ):
+                    pending.popleft()
+                    self._input_buffer.insert_text("\n")
+                    return
+                if nxt == "v":
+                    pending.popleft()
+                    self._attach_clipboard_image()
+                    return
+            _stop_turn(event)
 
         # -- inline question & secret dialogs --
 
@@ -1731,6 +1752,8 @@ class FullScreenTui:
             buf.cancel_completion()
             buf.reset()
             self._end_draft()
+            if self._chat_app is not None:
+                self._chat_app.pending_images.clear()  # their chips sat in the cleared box
             exc = _PromptInterrupt(empty=empty)
             if self._read_future is not None and not self._read_future.done():
                 self._read_future.set_exception(exc)
@@ -1754,7 +1777,7 @@ class FullScreenTui:
             del event
             self._input_buffer.cancel_completion()
 
-        @keys.add("escape", "enter", filter=in_prompt & ~is_searching)
+        @keys.add("escape", "enter", filter=in_prompt & ~is_searching)  # running: see above
         def _alt_enter(event: KeyPressEvent) -> None:
             del event
             self._input_buffer.insert_text("\n")
@@ -1850,5 +1873,10 @@ class FullScreenTui:
             self._echo_user_message(shown)
             self._read_future.set_result(text)
         elif text.strip():
-            self._queued_inputs.append(text)
+            # The draft's pictures go with this message, not whichever is read next.
+            images: list[Path] = []
+            if self._chat_app is not None:
+                images = list(self._chat_app.pending_images)
+                self._chat_app.pending_images.clear()
+            self._queued_inputs.append((text, images))
             self.invalidate()  # the status bar counts what is waiting

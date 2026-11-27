@@ -536,6 +536,7 @@ class ChatApp:
         self._turns: list[_TurnRecord] = []  # what /undo can take back, oldest first
         self._undone: list[tuple[_TurnRecord, list[Message]]] = []  # what /redo can put back
         self._pending_images: list[Path] = []  # pictures waiting for the next message
+        self._next_images: list[Path] | None = None  # set: a queued message's own pictures
         self._warmup: asyncio.Future[str | None] | None = None
         self.session: Session
         if initialize is None:
@@ -618,6 +619,10 @@ class ChatApp:
                     self.write("Press Ctrl+C again to exit.\n")
                 continue
             exit_armed = False
+            if self._next_images is not None and (not text or text.startswith("/")):
+                # A queued command takes no pictures: they wait for the next message.
+                self._pending_images[:0] = self._next_images
+                self._next_images = None
             if not text:
                 continue
             if text.startswith("/"):
@@ -872,7 +877,10 @@ class ChatApp:
     def _attach_images(self, text: str) -> tuple[str, list[dict[str, str]]]:
         """Pictures for this message: the ones waiting from /paste, then the ones its
         text names. Each is copied into the session; the text keeps an [image N] mark."""
-        pending, self._pending_images = self._pending_images, []
+        if self._next_images is not None:  # a queued message: the draft's stay put
+            pending, self._next_images = self._next_images, None
+        else:
+            pending, self._pending_images = self._pending_images, []
         found = find_images(text, self.session.workspace, already=len(pending))
         for warning in found.warnings:
             self.write(self.paint("yellow", f"  {_plain_text(warning)}") + "\n")
@@ -916,6 +924,11 @@ class ChatApp:
         )
 
     # -- clipboard ---------------------------------------------------------------------
+
+    def images_for_next(self, images: list[Path]) -> None:
+        """The message read next was queued with these pictures: it takes them instead
+        of the ones waiting in the current draft."""
+        self._next_images = list(images)
 
     @property
     def pending_images(self) -> list[Path]:

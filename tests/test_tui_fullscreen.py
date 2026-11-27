@@ -1158,3 +1158,90 @@ def test_copy_command_writes_the_answer_through_the_clipboard_fn(tmp_path: Path)
                 assert await asyncio.wait_for(running, 3) == 0
 
     run_timed(go())
+
+
+# -- typing ahead while a turn runs: Alt+Enter, and pictures stay with their message --
+
+
+def test_type_ahead_keeps_alt_enter_and_each_message_its_own_pictures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from karox6 import clipboard
+
+    monkeypatch.setattr(clipboard, "grab_text", lambda: None)
+    monkeypatch.setattr(clipboard, "grab_image", _png)
+
+    async def go() -> None:
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class GatedTool:
+            name, description, parameters, read_only = "wait", "gated tool", {}, True
+
+            async def run(self, args: dict[str, object], ctx: object) -> ToolResult:
+                started.set()
+                await release.wait()
+                return ToolResult("released")
+
+        out = ScreenOutput()
+        with create_pipe_input() as keys:
+            ui = FullScreenTui(
+                workspace=tmp_path / "ws",
+                home=tmp_path / "home",
+                input=keys,
+                output=out,
+                complete_in_thread=False,
+            )
+            app, provider = make_full_app(
+                tmp_path,
+                [
+                    Turn(calls=[("wait", {})]),
+                    Turn(text="turn one over"),
+                    Turn(text="answer A"),
+                    Turn(text="answer B"),
+                ],
+                ui,
+                extra_tools=[GatedTool()],
+            )
+            async with ui:
+                running = asyncio.create_task(app.run())
+                await eventually(lambda: ui.mode == "prompt")
+                keys.send_text("go\r")
+                await asyncio.wait_for(started.wait(), 3)
+                await eventually(lambda: ui.mode == "running")
+
+                # Alt+Enter (Escape + Enter in one read) is a newline, not a stop.
+                keys.send_text("first\x1b\rline")
+                await eventually(lambda: ui.input_buffer.text == "first\nline")
+                assert ui.mode == "running"
+                assert "! stopped" not in ui.transcript.plain_text
+
+                # A picture, then the message is queued: the picture goes with it.
+                keys.send_text("\x16")
+                await eventually(lambda: len(app.pending_images) == 1)
+                keys.send_text("\r")
+                await eventually(lambda: not app.pending_images)
+                # The next draft gets its own picture and is not sent yet.
+                keys.send_text("\x1bv")  # Alt+V while running attaches too
+                await eventually(lambda: len(app.pending_images) == 1)
+                keys.send_text("second")
+
+                release.set()
+                await eventually(lambda: "answer A" in ui.transcript.plain_text)
+                first = provider.requests[2].messages[-1]
+                assert "first\nline" in str(first.content)
+                assert len(first.images) == 1
+                assert len(app.pending_images) == 1  # still waiting with "second"
+                keys.send_text("\r")
+                await eventually(lambda: "answer B" in ui.transcript.plain_text)
+                assert len(provider.requests[3].messages[-1].images) == 1
+
+                # Ctrl+C clears the draft and the pictures whose chips sat in it.
+                await eventually(lambda: ui.mode == "prompt")
+                keys.send_text("\x16")
+                await eventually(lambda: len(app.pending_images) == 1)
+                keys.send_text("third\x03")
+                await eventually(lambda: not app.pending_images)
+                keys.send_text("/quit\r")
+                assert await asyncio.wait_for(running, 3) == 0
+
+    run_timed(go())

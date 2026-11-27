@@ -516,6 +516,27 @@ def test_a_message_typed_while_the_agent_works_waits_its_turn(launch: Launcher) 
     assert "queued" not in activity(t)
 
 
+def test_alt_enter_while_the_agent_works_is_a_newline_not_a_stop(launch: Launcher) -> None:
+    replies = [
+        Reply(text="slow " * 60, chunk_size=10, chunk_delay=0.05),
+        Reply(text="got both lines"),
+    ]
+    chat = launch.start(replies)
+    t = chat.term
+    t.line("first")
+    t.wait("slow slow")
+    t.send("top")
+    time.sleep(0.3)
+    t.send("\x1b\r")  # Alt+Enter: Escape and Enter in one read
+    time.sleep(0.3)
+    t.send("bottom")
+    time.sleep(0.4)
+    t.key("enter")
+    t.wait("got both lines", 40)
+    assert "! stopped" not in t.text()
+    assert chat.last_user_message() == "top\nbottom"
+
+
 # -- input ----------------------------------------------------------------------------
 
 
