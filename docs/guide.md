@@ -110,6 +110,7 @@ window the symbols are limited to what its fonts draw.
 | `/model [NAME]`, `/setup`, `/key` | change the model, the provider, the API key |
 | `/approve ask\|allow\|deny` | how destructive commands are handled |
 | `/reasoning` | show or hide the model's reasoning |
+| `/export [FILE]` | save the conversation as Markdown (default `karox-<session>.md` in the project) |
 | `/effort [LEVEL]` | how hard the model reasons: low, medium, high, xhigh, max or off (from its next request) |
 | `/update [check\|force]` | install the newest KaroX (see "Staying up to date") |
 | `/help`, `/quit` | help; leave (Ctrl+D works too) |

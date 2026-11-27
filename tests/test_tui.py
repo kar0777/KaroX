@@ -653,3 +653,20 @@ def test_replay_shows_a_failed_command_as_failed(tmp_path):
     app2, _ = make_app(tmp_path, [], term2)
     asyncio.run(app2.run())
     assert "✗ exit 3" in term2.text
+
+
+def test_export_writes_the_conversation_as_markdown(tmp_path):
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / "notes.txt").write_text("alpha\n")
+    turns = [Turn(calls=[("read", {"file_path": "notes.txt"})]), Turn(text="It says alpha.")]
+    asked = "what is in \x1b]0;x\x07notes.txt?"
+    term = FakeTerm(["/export", asked, "/export out/chat.md", "/quit"])
+    app, _ = make_app(tmp_path, turns, term)
+    asyncio.run(app.run())
+    assert "nothing to export yet" in term.text
+    text = (tmp_path / "ws" / "out" / "chat.md").read_text(encoding="utf-8")
+    assert text.startswith(f"# KaroX session {app.session.session_id}")
+    assert "## You\n\nwhat is in notes.txt?" in text
+    assert "- `read` notes.txt" in text
+    assert "## KaroX\n\nIt says alpha." in text
+    assert "\x1b" not in text

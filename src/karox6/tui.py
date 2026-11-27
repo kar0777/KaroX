@@ -110,6 +110,7 @@ _SESSION_COMMANDS = frozenset(
         "/fork",
         "/mcp",
         "/paste",
+        "/export",
     )
 )
 DIFF_CAP = 40_000
@@ -176,6 +177,12 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "/copy",
         "/copy [N|code]",
         "copy the last answer to the clipboard (N-th back, or its last code block)",
+        "Workspace & Context",
+    ),
+    CommandSpec(
+        "/export",
+        "/export [FILE]",
+        "save the conversation as Markdown (default: karox-<session>.md here)",
         "Workspace & Context",
     ),
     CommandSpec("/model", "/model [NAME]", "show or change the model", "Model & Setup"),
@@ -1097,6 +1104,25 @@ class ChatApp:
         self._active_tools.clear()  # calls the history has no result for
         self._had_tools = False
 
+    def _export(self, arg: str) -> None:
+        from karox6.chat_features import conversation_markdown
+
+        session = self.session
+        if not any(m.role == "user" for m in session.messages):
+            self.write("nothing to export yet\n")
+            return
+        target = Path(arg).expanduser() if arg else Path(f"karox-{session.session_id}.md")
+        if not target.is_absolute():
+            target = Path(self.config.workspace) / target
+        title = f"KaroX session {session.session_id} ({self.config.model})"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(conversation_markdown(session.messages, title), encoding="utf-8")
+        except OSError as exc:
+            self.write(self.paint("red", f"cannot write {target}: {exc}") + "\n")
+            return
+        self.write(f"exported to {_plain_text(str(target))}\n")
+
     def _forget_turns(self) -> None:
         self._turns.clear()
         self._undone.clear()
@@ -1485,6 +1511,8 @@ class ChatApp:
             await self.paste_image()
         elif name == "/copy":
             await self._copy(arg)
+        elif name == "/export":
+            self._export(arg)
         elif name == "/mcp":
             self.write(mcp_report(self.mcp, self.paint, self.glyph, arg))
         elif name == "/sessions":

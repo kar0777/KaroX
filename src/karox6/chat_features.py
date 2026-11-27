@@ -295,3 +295,42 @@ def closest_command(name: str, commands: list[str]) -> str | None:
         return starts[0]
     near = difflib.get_close_matches(name, commands, n=1, cutoff=0.6)
     return near[0] if near else None
+
+
+EXPORT_OUTPUT_LINES = 40
+
+
+def conversation_markdown(messages: list[Any], title: str) -> str:
+    """The conversation as Markdown for ``/export``: what was asked, what was answered and
+    each tool call with the start of its output. Harness notes and the system prompt stay
+    out; control sequences never reach the file."""
+    from karox6.core.digest import brief
+
+    out = [f"# {title}", ""]
+    names: dict[str, str] = {}
+    for m in messages:
+        if m.role == "user":
+            kind = m.meta.get("kind")
+            if kind == "compaction":
+                out += ["## Summary of the earlier conversation", "", _plain_text(m.content), ""]
+            elif not kind:
+                out += ["## You", "", _plain_text(m.content), ""]
+        elif m.role == "assistant":
+            if m.content.strip():
+                out += ["## KaroX", "", _plain_text(m.content).strip(), ""]
+            for call in m.tool_calls:
+                names[call.id] = call.name
+                target = _plain_text(brief(call.arguments))
+                out.append(f"- `{call.name}` {target}".rstrip())
+        elif m.role == "tool":
+            lines = _plain_text(m.content).rstrip("\n").splitlines()
+            if not lines:
+                continue
+            shown = lines[:EXPORT_OUTPUT_LINES]
+            if len(lines) > len(shown):
+                shown.append(f"… {len(lines) - len(shown)} more lines")
+            fence = "````" if any(line.startswith("```") for line in shown) else "```"
+            label = "error" if m.is_error else "output"
+            out += ["", f"  {label} of `{names.get(m.tool_call_id or '', m.name or 'tool')}`:", ""]
+            out += [f"  {fence}", *(f"  {line}" for line in shown), f"  {fence}", ""]
+    return "\n".join(out).rstrip() + "\n"
