@@ -47,6 +47,7 @@ from karox6.tui_text import (
     _k,
     _plain_text,
     banner_text,
+    clip_cells,
 )
 
 if TYPE_CHECKING:
@@ -1251,8 +1252,10 @@ class ChatApp:
         shell = base in ("bash", "shell", "powershell", "pwsh", "job_output")
         if not shell and not is_tool_failure(event):
             return []
+        # clip_cells, not digest.clip: that one squeezes whitespace for one-line
+        # summaries and flattened the indentation of code and diffs here.
         lines = [
-            clip(_plain_text(line.expandtabs(4)).rstrip(), 400)
+            clip_cells(_plain_text(line.expandtabs(4)).rstrip(), 400)
             for line in event.output.strip("\n").splitlines()
         ]
         lines = [line for line in lines if line.strip() and not _EXIT_LINE.match(line)]

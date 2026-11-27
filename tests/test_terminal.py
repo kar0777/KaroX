@@ -825,8 +825,9 @@ def test_tool_output_is_folded_and_ctrl_o_unfolds_it(launch: Launcher) -> None:
     chat.turn("run")
     t.wait("… 6 lines (ctrl+o to expand)")
     assert "row 2" not in t.text()
-    joined = "".join(t.lines())  # the long command wraps
-    assert re.search(r"● bash .*python.*  ✓ exit 0 · row 5 · [0-9.]+s", joined)
+    # The long command wraps; a wrap that falls on a space drops it from the joined text.
+    joined = "".join(t.lines())
+    assert re.search(r"● bash .*python.* ? ?✓ ?exit 0 · row 5 · [0-9.]+s", joined)
     t.send("\x0f")  # Ctrl+O
     t.wait("└ row 0")
     assert all(f"    row {i}" in t.text() for i in range(1, 6))
@@ -834,6 +835,21 @@ def test_tool_output_is_folded_and_ctrl_o_unfolds_it(launch: Launcher) -> None:
     t.send("\x0f")
     t.wait("… 6 lines (ctrl+o to expand)")
     assert "row 2" not in t.text()
+
+
+def test_unfolded_tool_output_keeps_its_indentation(launch: Launcher) -> None:
+    # Code and diffs printed by a command must keep their leading and inner spaces.
+    python = sys.executable.replace("\\", "/")
+    command = f"{python} -c \"print('top'); print('    four'); print('-    minus'); print('end')\""
+    chat = launch.start([Reply(calls=[("bash", {"command": command})]), Reply(text="ran it")])
+    t = chat.term
+    chat.turn("run")
+    t.wait("… 4 lines (ctrl+o to expand)")
+    t.send("\x0f")  # Ctrl+O
+    t.wait("└ top")
+    screen = t.text()
+    assert "        four" in screen  # 4 of the block + 4 of the output
+    assert "    -    minus" in screen
 
 
 def test_update_notice_in_the_conversation_and_the_status_bar(launch: Launcher) -> None:

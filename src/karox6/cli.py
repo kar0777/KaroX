@@ -1277,6 +1277,9 @@ class _TextRenderer:
             self._streamed = False
         if self._open_text and kind != "reasoning_delta":
             sys.stdout.write("\n")
+            # Flushed before the stderr line below: with both streams in one pipe
+            # (`2>&1 | ...`) the tool line was glued to the end of the reply.
+            sys.stdout.flush()
             self._open_text = False
         if kind == "tool_started":
             sys.stderr.write(f"> {data['name']} {_brief(data['arguments'])}\n")
