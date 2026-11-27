@@ -2531,3 +2531,22 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   PR scope choices). Implication: ~60% of remaining failures are unreachable for any agent that only sees the
   issue; realistic solve headroom on pool5 is ~13 tasks (the "inferable" ones: sibling paths, boundaries,
   codebase invariants). analysis/issue_audit/neon.md.
+
+## 2026-11-27: TUI + MCP fixes while the Anthropic lane is closed ($0, from Codex + Devin audits)
+- TUI: unfolded tool output keeps indentation; headless reply no longer glued to the next tool line (pipe);
+  Alt+Enter / Alt+V work while the agent runs (Escape is eager there, ESC+CR stopped the turn); a message
+  queued during a turn keeps its own pictures; Ctrl+C drops the draft's pictures; a resize keeps a scrolled-up
+  view on the same text; /sessions titles never replay control sequences; /resume and --resume replay the last
+  10 exchanges; /effort sets the reasoning effort mid-session. Each with a test that fails without the fix
+  (two in a real ConPTY).
+- MCP client: MCP-Protocol-Version = the negotiated revision; resources-only servers connect (no tools/list);
+  no 50-page cap; ${VAR}/${env:VAR} in env/args/headers/url; legacy type "sse" gets a clear error; image/audio
+  results saved to files instead of dropped; same-named tools get a suffix instead of one vanishing; Windows
+  closes the whole npx.cmd -> cmd -> node tree.
+- Anthropic provider: reasoning effort on 4.6+/5.x/Fable uses thinking adaptive + output_config.effort
+  (budget_tokens is a 400 on 4.7+/5.x, Haiku 5.5 included).
+- Not changed on purpose: MCP server Origin bypass with a token, session adoption after restart, lenient
+  version header (strict spec would break connector hosts / reconnects). Deferred: inline-mode streaming of a
+  partial line; images in tool results to the model (needs a per-model vision flag: GLM/DeepSeek Flash have
+  none); outbound OAuth and bidirectional SSE in the MCP client (L-size).
+- Live check of real npx MCP servers was blocked by the permission classifier (downloads npm packages).
