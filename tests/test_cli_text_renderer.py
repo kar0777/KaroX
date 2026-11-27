@@ -11,7 +11,7 @@ from karox6.core.events import AssistantMessage, TextDelta, ToolStarted
 
 
 class _Pipe:
-    """One pipe behind stdout (buffered until flush) and stderr (written at once), like `2>&1 | cat`."""
+    """One pipe behind stdout (buffered until flush) and stderr (unbuffered): `2>&1 | cat`."""
 
     def __init__(self) -> None:
         self.out = ""
