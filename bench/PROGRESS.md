@@ -1,3 +1,14 @@
+## 2026-11-27: pool9 extension (bench/prereg_pool9_opencode.md) — OpenCode on Haiku ties KaroX on solves and cost
+- Pilot ocpil (dev tasks 75,76,78): 3/3 trials with rewards and gateway cost lines -> gate passed. Run 45912362507
+  (tag p9oc): OpenCode V2 2.3.2, Haiku 5.5 via the same anthropic gateway, pool9 x 2 attempts; 123 valid (456 drop).
+- O1 (dev65 leads OC on solves): NO. FAIR 40.5 vs 40.0, +0.9 pp CI [-6.5, +8.3]; ALL 45.5 vs 46.0.
+- O2 (dev65 cheaper): NO. cost/solve $0.0282 vs $0.0287 = 0.99x, CI [0.88, 1.10].
+- Wall: OC agent time mean 212 s, median 90, p90 435 vs dev65 411 / 146 / 1161 — NOT comparable: the main run had
+  6 concurrent trials per runner (3 arms x 2 attempts), the OC run 2 (n_concurrent_trials = arms x attempts), so
+  test commands ran on a less loaded runner. A fair speed comparison needs OC with the same per-runner load.
+- Reading: on fresh FAIR tasks KaroX, Claude Code and OpenCode solve the same (~75%); KaroX and OpenCode cost the
+  same and ~1/3 less than Claude Code. "Number one" is not established. Spend $3.59 (+ pilot $0.04).
+
 ## 2026-11-27: dev69 speed screen (bench/prereg_dev69_screen.md) — GO to a fresh-pool confirmation
 - Run 45913961216 (tag s69): dev65 vs dev69 (= dev68 + "do not pipe through tail/head merely to shorten; search
   the saved log" + shell/job_output inline caps 30k -> 12k chars), 62 scr66 dev tasks x 2 attempts, Haiku 5.5;

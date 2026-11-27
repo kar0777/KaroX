@@ -22,6 +22,13 @@ tasks, 10 000 resamples, seed 1).**
 - Secondary (no decision): the same for dev69 vs CC, all/PARTIAL/UNFAIR solves, p50/p90 wall, pooled pool9+pool10
   dev-vs-CC numbers (descriptive).
 
-**Rules.** Cap $16. No re-runs; a task lacking a verifier reward for any arm is dropped for all arms and reported.
+**Rival run R2 (amended 2026-11-27 before pool10 exists).** A second run on the same pool10 ids: karox6 = dev68 +
+opencode_v2 (OpenCode V2 2.3.2, same gateway), 2 attempts, so both arms share the same per-runner load (4 concurrent
+trials). Decisions on R2 alone, FAIR tasks, same estimators: **O1** dev68 leads OpenCode on solves iff the lower CI
+bound of the solve difference > 0; **O2** cheaper iff the upper CI bound of the cost/solve ratio < 0.85; **O3**
+faster iff the upper CI bound of the geometric wall ratio dev68/OC < 1.0. (pool9 showed per-runner load confounds
+wall time across runs.)
+
+**Rules.** Cap $16 for the main run, $8 for R2. No re-runs; a task lacking a verifier reward for any arm is dropped for all arms and reported.
 Artifacts that `gh run download` skips are fetched individually before evaluation. Arm versions checked on the first
 finished job. Evaluation script written and dry-run before the run.
