@@ -1051,7 +1051,10 @@ class Session:
         if not any(m.images for m in self.messages):
             return False
         remember(self.config.home, self.config.model, vision=False)
-        self._model_facts = (self.config.model, replace(self.model(), vision=False))
+        self._model_facts = (
+            self.config.model,
+            replace(self.model(), vision=False, source="learned"),
+        )
         emit(
             ev.Notice(
                 kind="no_images",

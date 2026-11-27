@@ -110,6 +110,7 @@ def test_a_refused_picture_is_learned_and_the_request_sent_again(tmp_path):
     assert provider.requests[1].messages[-1].images == []
     assert any(getattr(e, "kind", "") == "no_images" for e in events)
     assert model_info("zai-org/GLM-5.3-Flash", home).vision is False
+    assert session.model().source == "learned"
 
     # a refusal that is not about pictures stays an error
     other = ProviderError("bad_request", "the image field is wrong", status=400)
