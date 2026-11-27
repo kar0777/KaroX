@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,23 @@ from karox6.providers.base import (
 )
 
 CACHE_MESSAGE_BREAKPOINTS = 2
+_CLAUDE_VERSION = re.compile(r"claude-(?:opus|sonnet|haiku)-(\d+)(?:[-.](\d{1,2}))?(?!\d)")
+_EFFORTS = {"minimal": "low", "low": "low", "medium": "medium", "high": "high"}
+_EFFORTS |= {"xhigh": "xhigh", "max": "max"}
+
+
+def adaptive_thinking(model: str) -> bool:
+    """Models that take ``thinking: adaptive`` plus ``output_config.effort``: 4.6 and
+    later, Fable and Mythos. They answer a ``budget_tokens`` request with HTTP 400 (4.7+)
+    or deprecate it (4.6); older models only know the budget."""
+    name = model.lower()
+    if "fable" in name or "mythos" in name:
+        return True
+    match = _CLAUDE_VERSION.search(name)
+    if match is None:
+        return False
+    major, minor = int(match.group(1)), int(match.group(2) or 0)
+    return (major, minor) >= (4, 6)
 
 
 @dataclass(slots=True)
@@ -94,10 +112,14 @@ class AnthropicProvider(StreamProvider):
                 {"name": t.name, "description": t.description, "input_schema": t.parameters}
                 for t in request.tools
             ]
+        effort = _EFFORTS.get((request.reasoning_effort or "").lower())
         budget = {"low": 2048, "medium": 8192, "high": 16384, "max": 32000}.get(
             request.reasoning_effort or ""
         )
-        if budget:
+        if effort and adaptive_thinking(request.model):
+            body["thinking"] = {"type": "adaptive"}
+            body["output_config"] = {"effort": effort}
+        elif budget:
             body["thinking"] = {"type": "enabled", "budget_tokens": budget}
             body["max_tokens"] = max(body["max_tokens"], budget + 8192)
         elif request.temperature is not None:

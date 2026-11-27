@@ -286,3 +286,34 @@ def test_reading_stops_at_done_even_if_the_connection_stays_open():
             await provider.aclose()
 
     assert asyncio.run(invoke()).message.content
+
+
+@pytest.mark.parametrize(
+    ("model", "adaptive"),
+    [
+        ("claude-haiku-5-5", True),
+        ("claude-sonnet-4-6", True),
+        ("claude-opus-4-7-20260101", True),
+        ("claude-opus-5", True),
+        ("claude-fable-5-2", True),
+        ("anthropic/claude-sonnet-5.5", True),
+        ("claude-sonnet-4-5-20250929", False),
+        ("claude-haiku-4-5", False),
+        ("claude-3-7-sonnet-latest", False),
+        ("some-other-model", False),
+    ],
+)
+def test_effort_uses_adaptive_thinking_on_models_that_reject_a_budget(model, adaptive):
+    from karox6.providers.anthropic import adaptive_thinking
+
+    assert adaptive_thinking(model) is adaptive
+    request = ModelRequest(model, "", [Message("user", "hi")], reasoning_effort="medium")
+    body = AnthropicProvider("https://example.test", "key").build_body(request)
+    if adaptive:
+        assert body["thinking"] == {"type": "adaptive"}
+        assert body["output_config"] == {"effort": "medium"}
+    else:
+        assert body["thinking"] == {"type": "enabled", "budget_tokens": 8192}
+        assert "output_config" not in body
+    plain = ModelRequest(model, "", [Message("user", "hi")])
+    assert "thinking" not in AnthropicProvider("https://example.test", "key").build_body(plain)
