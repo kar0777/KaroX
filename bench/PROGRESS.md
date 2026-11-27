@@ -1,3 +1,19 @@
+## 2026-11-27: pool10 (bench/prereg_pool10.md) — INVALID: Anthropic API usage limit reached mid-run
+- Runs 45940508653 (tag p10: dev68 + dev69 + CC) and 45940511720 (tag p10oc: dev68 + OpenCode), 114 fresh tasks
+  x 2 attempts, launched in parallel. From 04:35 UTC the API returned "concurrent requests across all models exceeded"
+  (581 + 2 calls; retried) and from 05:33 UTC "You have reached your specified API usage limits. You will regain
+  access on 2026-12-01 00:00 UTC" (2054 + 754 calls): 368 of 678 main-run trials ended within 30 s. The
+  pre-registered decisions C/A/O are void (not a model result). No re-run possible before 2026-12-01.
+- Descriptive only, tasks with no usage-limit failure (49 main / 48 R2; early ids, biased to quick tasks; 20 / 19
+  FAIR): dev69 - dev68 -5.0 pp [-15.0, +5.0], cost/solve 1.21x, geo wall 0.95x [0.86, 1.06] -> no sign dev69 beats
+  dev68 on fresh tasks (dev68 stays shipping). dev68 - CC +10.0 pp [0.0, +22.5], cost/solve 0.56x. R2 same-load:
+  dev68 - OpenCode +5.3 pp [0.0, +13.2], cost/solve 0.89x [0.73, 1.02], geo wall dev68/OC 1.19x [1.00, 1.43].
+- pool9 check for the same failure: 326 concurrency 429s spread over all arms (karox6 86, karox6b 96, CC 137), no
+  agent stream ended on one (retried) -> pool9 verdicts stand, with that caveat on wall time.
+- Lessons: never run two Anthropic hard12 runs at once (20 jobs x 6 trials exceed the org concurrency limit);
+  check remaining API budget before a large run. pool10 tasks 530-607 never got a real run; usable later as a
+  fresh holdout (trajectories unread). Spend this run ~$9.0 (gateway audit prices incl. interview).
+
 ## 2026-11-27: sibling-note idea — $0 offline check fails, not built
 - Council r4: Codex picked "after the first source edit, git-grep identifiers of the hunk outside the file and attach
   <= 6 snippets"; Devin (r8) predicted it misses same-file siblings and proposed a same-state rule (sibling methods
