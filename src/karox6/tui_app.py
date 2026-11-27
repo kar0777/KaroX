@@ -468,9 +468,17 @@ class _TranscriptControl(UIControl):
     def _sync_wrap(self, width: int) -> None:
         width = max(1, width)
         count = self._displayed_logical_count()
+        anchor: tuple[int, int] | None = None
         if width != self._wrap_width:
             if self._wrap_width:
                 self._reset_selection()  # the rows re-wrap: their numbers mean other text
+                if not self.follow and self._visual_offsets:
+                    # Scrolled up: keep the text at the top of the view there, not the
+                    # row number (which after re-wrapping is somewhere else entirely).
+                    index = bisect_right(self._visual_offsets, self.scroll_top) - 1
+                    if index >= 0:
+                        row = self.scroll_top - self._visual_offsets[index]
+                        anchor = (index, row * self._wrap_width // width)
             self._wrap_width = width
             self._wrapped_cache = []
             self._visual_offsets = []
@@ -517,6 +525,11 @@ class _TranscriptControl(UIControl):
         self._dirty_from = count
         self._live_lines = _wrap_fragments(list(self._live), width) if self._live else []
         self.total_visual_lines = len(self._visual_lines) + len(self._live_lines)
+        if anchor is not None and anchor[0] < len(self._visual_offsets):
+            index, row = anchor
+            self.scroll_top = self._visual_offsets[index] + min(
+                row, len(self._wrapped_cache[index]) - 1
+            )
 
     def scroll_by(self, delta: int) -> bool:
         max_top = self.max_scroll

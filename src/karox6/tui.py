@@ -1422,7 +1422,9 @@ class ChatApp:
                 self.write("no saved sessions\n")
             for session_id, title in rows:
                 mark = "*" if session_id == self.session.session_id else " "
-                self.write(f"{mark} {session_id}  {self.paint('dim', title)}\n")
+                # A title is the start of a saved message: none of its control
+                # sequences may reach the terminal.
+                self.write(f"{mark} {session_id}  {self.paint('dim', _plain_text(title))}\n")
         elif name == "/resume":
             from karox6.core.store import resume_kwargs
 
@@ -1977,7 +1979,7 @@ def build_completer(*, workspace: Path | None = None, home: Path | None = None) 
                     from karox6.core.store import recent_sessions
 
                     for sid, title in recent_sessions(home, limit=15, workspace=ws):
-                        choices.append((sid, title or "saved session"))
+                        choices.append((sid, _plain_text(title) or "saved session"))
             for value, desc in choices:
                 if value.lower().startswith(low):
                     yield Completion(

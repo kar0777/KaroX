@@ -101,3 +101,17 @@ def test_old_lines_are_dropped_past_the_cap_and_the_view_stays_consistent():
     assert lines[0] != "line 0"
     control.append("tail")
     assert text_of(frame(control, 30, 5))[-1] == "tail"
+
+
+def test_a_resize_keeps_the_text_at_the_top_of_a_scrolled_up_view():
+    control = _TranscriptControl()
+    for n in range(200):
+        control.append(f"line {n:03d} " + "word " * (n % 7 * 6) + "\n")
+    frame(control, width=80, height=10)
+    control.scroll_by(-120)  # reading somewhere in the middle
+    top = text_of(frame(control, width=80, height=10))[control.scroll_top]
+    assert top.startswith("line ")
+    for width in (40, 120, 23, 80):
+        rows = text_of(frame(control, width=width, height=10))
+        assert rows[control.scroll_top].startswith(top[:8]), (width, top)
+    assert not control.follow

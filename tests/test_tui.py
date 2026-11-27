@@ -566,3 +566,18 @@ def test_quit_aborts_a_running_update(tmp_path, monkeypatch):
     app._updating = True  # /update is running in its executor thread
     asyncio.run(app.close())
     assert aborted == [True]
+
+
+def test_sessions_list_never_replays_control_sequences_from_a_title(tmp_path):
+    term = FakeTerm(["hi \x1b]0;pwned\x07\x1b[2Jthere", "/quit"])
+    app, _ = make_app(tmp_path, [Turn(text="ok")], term)
+    asyncio.run(app.run())
+
+    term2 = FakeTerm(["/sessions", "/quit"])
+    app2, _ = make_app(tmp_path, [], term2)
+    asyncio.run(app2.run())
+    line = next(x for x in term2.text.splitlines() if app.session.session_id in x)
+    assert "hi " in line
+    assert "there" in line
+    assert "\x1b]0" not in line
+    assert "\x1b[2J" not in line
