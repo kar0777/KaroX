@@ -103,6 +103,8 @@ _SESSION_COMMANDS = frozenset(
         "/resume",
         "/key",
         "/model",
+        "/models",
+        "/provider",
         "/effort",
         "/setup",
         "/bridge",
@@ -120,6 +122,7 @@ _EXIT_CODE = re.compile(r"^\[exit code:\s*(-?\d+)", re.MULTILINE)
 _CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MENTION_MAX_BYTES = 64 * 1024
 REPLAY_TURNS = 10  # exchanges a resumed session shows
+MODELS_SHOWN = 60  # /models lines
 MENTION_TOTAL_BYTES = 128 * 1024
 
 
@@ -187,6 +190,13 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "Workspace & Context",
     ),
     CommandSpec("/model", "/model [NAME]", "show or change the model", "Model & Setup"),
+    CommandSpec("/models", "/models [TEXT]", "the models this provider offers", "Model & Setup"),
+    CommandSpec(
+        "/provider",
+        "/provider [NAME]",
+        "list the saved providers or switch to one",
+        "Model & Setup",
+    ),
     CommandSpec(
         "/reasoning", "/reasoning [show|hide]", "show or hide model reasoning", "Model & Setup"
     ),
@@ -558,6 +568,7 @@ class ChatApp:
         self._prefill = prefill  # puts text into the input line (an undone message)
         self._fork_source: dict[str, Any] | None = None  # --fork: history to start from
         self.replay_on_start = False  # --resume: show the saved conversation at the start
+        self.key_name = ""  # the saved key of this provider (credentials-<name>)
         self._checkpoints: Checkpoints | None = None
         self._turns: list[_TurnRecord] = []  # what /undo can take back, oldest first
         self._undone: list[tuple[_TurnRecord, list[Message]]] = []  # what /redo can put back
@@ -1575,6 +1586,10 @@ class ChatApp:
                 self.session.forget_model_state(provider_changed=False)
             self.write(f"model: {self.config.model}\n")
             self.write(self.paint("dim", f"  {self.session.model().describe()}") + "\n")
+        elif name == "/models":
+            await self._models(arg)
+        elif name == "/provider":
+            await self._provider(arg)
         elif name == "/setup":
             await self._setup()
         elif name == "/bridge":
@@ -1722,7 +1737,7 @@ class ChatApp:
         if not key:
             self.write("key unchanged\n")
             return
-        where = save_key(self.config.home, key)
+        where = save_key(self.config.home, key, self.key_name)
         if hasattr(self.provider, "api_key"):
             self.provider.api_key = key
         if self.bridge_env:
@@ -1730,7 +1745,6 @@ class ChatApp:
         self.write(f"key saved (encrypted for your user) in {where}; in use now\n")
 
     async def _setup(self) -> None:
-        from karox6.providers import make_provider
         from karox6.setup import run_setup
 
         try:
@@ -1742,17 +1756,91 @@ class ChatApp:
             return
         if choice is None:
             return
-        key = choice.key or getattr(self.provider, "api_key", None)
+        await self._use(choice.provider, choice.base_url, choice.model, choice.key, choice.name)
+
+    async def _use(
+        self, kind: str, base_url: str, model: str, key: str | None, key_name: str
+    ) -> None:
+        """Talk to another provider (or model) from the next request on."""
+        from karox6.providers import make_provider
+
         old = self.provider
-        self.provider = make_provider(choice.provider, base_url=choice.base_url, api_key=key)
+        self.provider = make_provider(kind, base_url=base_url or None, api_key=key)
         self.session.provider = self.provider
-        switched = choice.provider != self.config.provider_name
+        switched = kind != self.config.provider_name or base_url != getattr(
+            old, "base_url", base_url
+        )
         self.session.forget_model_state(provider_changed=switched)
-        self.config.model = choice.model
-        self.config.provider_name = choice.provider
+        self.config.model = model
+        self.config.provider_name = kind
+        self.key_name = key_name
+        if self.bridge_env:
+            self.bridge_env = {name: key or "" for name in self.bridge_env}
         with contextlib.suppress(Exception):
             await old.aclose()
-        self.write(f"now using {choice.model}\n")
+        self.write(f"now using {model}\n")
+
+    async def _provider(self, arg: str) -> None:
+        from karox6.credentials import load_key
+        from karox6.settings import SettingsError, save_provider, saved_providers
+
+        saved = saved_providers()
+        if not arg:
+            if not saved:
+                self.write("no saved providers yet: /setup adds one\n")
+                return
+            here = getattr(self.provider, "base_url", "")
+            for name, row in saved.items():
+                mark = "*" if row.get("base_url") == here else " "
+                where = row.get("base_url") or row.get("provider", "")
+                self.write(f" {mark} {name}: {row['model']} ({where})\n")
+            self.write(self.paint("dim", "  /provider NAME switches; /setup adds one") + "\n")
+            return
+        table = saved.get(arg)
+        if table is None:
+            names = ", ".join(saved) or "none yet"
+            line = f"no saved provider {arg!r} (saved: {names})"
+            self.write(self.paint("yellow", line) + "\n")
+            return
+        key_name = str(table.get("saved_key") or "")
+        env = table.get("api_key_env")
+        key = os.environ.get(env) if isinstance(env, str) and env else None
+        key = key or load_key(self.config.home, key_name)
+        kind = str(table.get("provider") or "openai-chat")
+        await self._use(kind, str(table.get("base_url") or ""), str(table["model"]), key, key_name)
+        try:
+            save_provider(arg, table)  # the next start uses it too
+        except SettingsError as exc:
+            self.write(self.paint("yellow", f"not saved as the default: {exc}") + "\n")
+        if key is None:
+            self.write(self.paint("yellow", "  no key saved for it: /key adds one") + "\n")
+
+    async def _models(self, arg: str) -> None:
+        from karox6.providers.catalog import CatalogError, list_models, pick
+
+        try:
+            models = await list_models(
+                self.config.provider_name,
+                getattr(self.provider, "base_url", None),
+                getattr(self.provider, "api_key", None),
+            )
+        except CatalogError as exc:
+            self.write(self.paint("yellow", f"no model list: {_plain_text(str(exc))}") + "\n")
+            return
+        if arg:
+            chosen, matches = pick(models, arg)
+            models = [chosen] if chosen else matches
+        if not models:
+            self.write(f"no model matches {arg!r}\n")
+            return
+        shown = models[:MODELS_SHOWN]
+        for m in shown:
+            mark = "*" if m == self.config.model else " "
+            self.write(f" {mark} {m}\n")
+        more = ""
+        if len(models) > len(shown):
+            more = f"{len(models) - len(shown)} more (/models TEXT filters); "
+        self.write(self.paint("dim", f"  {more}/model NAME switches") + "\n")
 
     async def _bridge(self, arg: str) -> None:
         from karox6.bridge import BridgeError

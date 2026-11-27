@@ -1,4 +1,7 @@
-"""The API key saved by the chat's setup (`/key`), for when no environment variable holds one.
+"""API keys saved by the chat's setup (`/key`), for when no environment variable holds one.
+
+Each saved provider has its own key (``credentials-<name>``); ``credentials`` is the one
+of a setup without a name (older versions saved only that one).
 
 Kept in <home>/credentials: on Windows encrypted with DPAPI for the current user (another
 account or machine cannot read it), elsewhere as a file only the owner may read. The key
@@ -10,6 +13,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,15 +21,16 @@ from typing import Any
 FILE = "credentials"
 
 
-def key_path(home: Path) -> Path:
-    return home / FILE
+def key_path(home: Path, name: str = "") -> Path:
+    slug = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-")
+    return home / (f"{FILE}-{slug}" if slug else FILE)
 
 
-def save_key(home: Path, key: str) -> Path:
-    path = key_path(home)
+def save_key(home: Path, key: str, name: str = "") -> Path:
+    path = key_path(home, name)
     path.parent.mkdir(parents=True, exist_ok=True)
     blob = _protect(key.encode("utf-8"))
-    tmp = path.with_name(f"{FILE}.{os.getpid()}.tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as fh:
         fh.write(blob)
@@ -33,9 +38,9 @@ def save_key(home: Path, key: str) -> Path:
     return path
 
 
-def load_key(home: Path) -> str | None:
+def load_key(home: Path, name: str = "") -> str | None:
     try:
-        blob = key_path(home).read_bytes()
+        blob = key_path(home, name).read_bytes()
     except OSError:
         return None
     with contextlib.suppress(Exception):
@@ -44,9 +49,9 @@ def load_key(home: Path) -> str | None:
     return None
 
 
-def forget_key(home: Path) -> None:
+def forget_key(home: Path, name: str = "") -> None:
     with contextlib.suppress(OSError):
-        key_path(home).unlink()
+        key_path(home, name).unlink()
 
 
 def _protect(data: bytes) -> bytes:

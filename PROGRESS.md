@@ -2549,4 +2549,21 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   version header (strict spec would break connector hosts / reconnects). Deferred: inline-mode streaming of a
   partial line; images in tool results to the model (needs a per-model vision flag: GLM/DeepSeek Flash have
   none); outbound OAuth and bidirectional SSE in the MCP client (L-size).
-- Live check of real npx MCP servers was blocked by the permission classifier (downloads npm packages).
+- Live check of real npx MCP servers (run by the user, the classifier blocks npx for the agent): server-everything
+  2026.8.31 (13 tools) + server-filesystem 2.4.0 (16 tools): echo, an image result saved (4033 B), structured
+  content, a file read through ${MCP_LIVE_DIR}; both process trees closed with rc 0. PASS.
+- Model registry (models.json: user > learned > built-in): /status and /model say whether the model takes
+  pictures and its window; a refused picture is learned (vision false) and the request sent again (live on
+  Dahl GLM); tool pictures (MCP images, screenshots, read of a .png) follow the results only for a model
+  known to see them.
+
+## 2026-11-27: providers are remembered, models come from the provider ($0)
+- User report: KaroX forgot earlier providers and the model had to be typed from memory. Cause: /setup
+  overwrote the top-level config and the single `credentials` file (a new provider lost the old one and its
+  key; a key-less new provider would even have been sent the old provider's key).
+- Now: every provider set up is kept as [profiles.NAME] with its own encrypted key (credentials-NAME,
+  setting saved_key) and becomes the default; /setup lists the saved ones first; /provider [NAME] lists /
+  switches; the key is asked before the model and the model is picked from the provider's own list
+  (GET /models; Anthropic /v1/models with paging; Gemini v1beta/models, generateContent only), filtered by
+  typing; /models [TEXT] in the chat. Live: Dahl lists 3 models. Tests: test_catalog.py, test_setup.py, two
+  ConPTY setup tests. Version not bumped (dev69 is the pool10 candidate).

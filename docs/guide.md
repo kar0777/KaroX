@@ -67,6 +67,13 @@ base_url = "http://127.0.0.1:11434/v1"
 api_key_env = ""
 ```
 
+In the chat, `/setup` does the same without editing files: pick a provider, paste its key
+(hidden, saved encrypted for your user, one file per provider) and pick the model from the
+list the provider gives for that key. Every provider set up this way is kept as a
+`[profiles.NAME]` table and becomes the default; `/provider` lists the saved ones and
+`/provider NAME` switches back without typing the URL or key again. `/models [TEXT]` shows
+the current provider's models.
+
 Other useful settings: `reasoning_effort`, `temperature`, `context_window`,
 `max_output_tokens`, prices (`price_input`, `price_output`, `price_cached`, USD per 1M
 tokens; they enable cost display and `--max-cost`).
@@ -124,7 +131,8 @@ window the symbols are limited to what its fonts draw.
 | `/compact` | shrink the conversation to free context |
 | `/new`, `/clear` | start a fresh session; clear the screen |
 | `/sessions`, `/resume [ID\|last]` | list and continue saved sessions |
-| `/model [NAME]`, `/setup`, `/key` | change the model, the provider, the API key |
+| `/model [NAME]`, `/models [TEXT]` | change the model; the provider's models |
+| `/provider [NAME]`, `/setup`, `/key` | saved providers, set up a provider, the API key |
 | `/approve ask\|allow\|deny` | how destructive commands are handled |
 | `/reasoning` | show or hide the model's reasoning |
 | `/export [FILE]` | save the conversation as Markdown (default `karox-<session>.md` in the project) |

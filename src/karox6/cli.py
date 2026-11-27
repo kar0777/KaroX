@@ -775,7 +775,7 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
 
             raise asyncio.CancelledError from None
         if typed:
-            save_key(home, typed)
+            save_key(home, typed, getattr(args, "saved_key", None) or "")
             app.provider.api_key = typed
             app.bridge_agent_args += ["--api-key-env", "KAROX_BRIDGE_API_KEY"]
             app.bridge_env = {"KAROX_BRIDGE_API_KEY": typed}
@@ -816,6 +816,7 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
         if ui is not None:
             ui.attach_app(created)
         created.replay_on_start = bool(args.resume)
+        created.key_name = getattr(args, "saved_key", None) or ""
         return created
 
     app: ChatApp | None = None
@@ -843,6 +844,7 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
                     choice.base_url,
                     choice.model,
                 )
+                args.saved_key = choice.name
             if app is None:
                 app = make_app()
             _start_update_check(args, home, app)
@@ -983,7 +985,8 @@ def _provider(args: argparse.Namespace) -> Any:
         from karox6.core.store import default_home
         from karox6.credentials import load_key
 
-        api_key = load_key((args.home or default_home()).expanduser())
+        home = (args.home or default_home()).expanduser()
+        api_key = load_key(home, getattr(args, "saved_key", None) or "")
     return make_provider(
         args.provider or default_provider(args.model, args.base_url),
         base_url=args.base_url,

@@ -42,6 +42,18 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args: Any) -> None:
         pass
 
+    def do_GET(self) -> None:
+        """The model list (``GET /models``) the setup and /models read."""
+        if not self.path.rstrip("/").endswith("/models"):
+            self.send_error(404)
+            return
+        data = json.dumps({"data": [{"id": "fake-one"}, {"id": "fake-two"}]}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self) -> None:
         model: FakeModel = self.server.model  # type: ignore[attr-defined]
         raw = self.rfile.read(int(self.headers.get("content-length", 0)))

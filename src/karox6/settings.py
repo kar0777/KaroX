@@ -29,6 +29,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "provider": (str,),
     "base_url": (str,),
     "api_key_env": (str,),
+    "saved_key": (str,),  # which key the setup saved for this provider (never the key)
     "context_window": (int,),
     "context_limit": (int,),
     "max_output_tokens": (int,),
@@ -120,11 +121,14 @@ def requested_profile(argv: list[str]) -> str | None:
     return None
 
 
-def save_settings(updates: dict[str, Any], path: Path | None = None) -> Path:
-    """Set top-level keys in the config file (other keys and profiles stay as they are)."""
+def save_settings(
+    updates: dict[str, Any], path: Path | None = None, *, replace: bool = False
+) -> Path:
+    """Set top-level keys in the config file (other keys and profiles stay as they are);
+    ``replace`` writes ``updates`` as the whole file."""
     path = path or config_path()
     data: dict[str, Any] = {}
-    if path.is_file():
+    if path.is_file() and not replace:
         try:
             data = tomllib.loads(path.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as exc:
@@ -139,6 +143,54 @@ def save_settings(updates: dict[str, Any], path: Path | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+# What a saved provider is: switching to one replaces exactly these top-level keys.
+PROVIDER_KEYS = ("provider", "base_url", "model", "saved_key", "api_key_env")
+
+
+def saved_providers(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """The ``[profiles.NAME]`` tables that name a provider (what /setup and /provider list)."""
+    path = path or config_path()
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict):
+        return {}
+    return {
+        name: table
+        for name, table in profiles.items()
+        if isinstance(table, dict) and isinstance(table.get("model"), str) and table.get("model")
+    }
+
+
+def save_provider(name: str, values: dict[str, Any], path: Path | None = None) -> Path:
+    """Keep ``values`` as ``[profiles.NAME]`` and make it the default (the top-level keys):
+    the next start uses it, and the other saved providers stay for /provider."""
+    path = path or config_path()
+    data: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise SettingsError(f"cannot read {path}: {exc}") from exc
+    values = {k: v for k, v in values.items() if k in PROVIDER_KEYS and v not in (None, "")}
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = {}
+    old = profiles.get(name)
+    table = dict(old) if isinstance(old, dict) else {}
+    for key in PROVIDER_KEYS:
+        table.pop(key, None)
+    table.update(values)
+    profiles[name] = table
+    for key in PROVIDER_KEYS:
+        data.pop(key, None)
+    data.pop("profiles", None)
+    data = {**values, **data, "profiles": profiles}
+    return save_settings(data, path, replace=True)
 
 
 def _toml_key(name: str) -> str:

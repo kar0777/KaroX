@@ -284,19 +284,23 @@ def test_first_run_without_a_model_starts_with_setup(launch: Launcher) -> None:
     chat = launch.start([Reply(text="first answer")], model=False, ready="Number [1]:", env=env)
     t = chat.term
     assert "Set up KaroX: choose where the model runs." in t.text()
-    t.line("6")
+    t.line("7")
     t.wait("Server URL")
     t.line(chat.model.url)
-    t.wait("Model:")
-    t.line("fake")
     t.wait("Hidden input")
     t.key("enter")  # a local server needs no key
+    t.wait("Model:")
+    assert "2. fake-two" in t.text()  # the server's own list
+    t.line("fake")  # both match: the list is shown again
+    t.wait(lambda s: s.count("Model:") >= 2)
+    t.line("2")
     t.wait("Type a task to start.")
     chat.turn("hi")
     assert "first answer" in t.text()
     config = (chat.home / "config.toml").read_text(encoding="utf-8")
-    assert 'model = "fake"' in config
+    assert 'model = "fake-two"' in config
     assert chat.model.url in config
+    assert "[profiles.localhost-" in config  # kept for /provider and /setup
 
 
 def test_inline_mode_stays_in_the_scrollback(launch: Launcher) -> None:
@@ -385,14 +389,19 @@ def test_key_is_hidden_and_setup_switches_the_model(launch: Launcher) -> None:
     t.wait("setup cancelled")
     t.line("/setup")
     t.wait("Number [1]:")
-    t.line("6")
+    t.line("7")
     t.wait("Server URL")
     t.line(chat.model.url)
-    t.wait("Model:")
-    t.line("fake-two")
     t.wait("Hidden input")
     t.key("enter")
+    t.wait("Model:")
+    t.line("fake-two")
     t.wait("now using fake-two")
+    t.line("/models")
+    t.wait("* fake-two")
+    t.line("/provider")
+    t.wait("/provider NAME switches")
+    assert ": fake-two (http://127.0.0.1:" in t.text()
     chat.turn("hi")
     assert chat.model.requests[-1]["model"] == "fake-two"
     assert chat.model.requests[-1]["messages"][-1]["content"] == "hi"
