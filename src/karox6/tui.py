@@ -114,6 +114,7 @@ _SESSION_COMMANDS = frozenset(
 )
 DIFF_CAP = 40_000
 _EXIT_LINE = re.compile(r"^\[exit code:\s*-?\d+")
+_EXIT_CODE = re.compile(r"^\[exit code:\s*(-?\d+)", re.MULTILINE)
 _CLEAR_SCREEN = "\x1b[2J\x1b[H"
 MENTION_MAX_BYTES = 64 * 1024
 REPLAY_TURNS = 10  # exchanges a resumed session shows
@@ -1084,7 +1085,14 @@ class ChatApp:
             elif m.role == "tool":
                 made = calls.pop(m.tool_call_id or "", None)
                 name = made.name if made is not None else (m.name or "tool")
-                self.render(ev.ToolFinished(m.tool_call_id or "", name, m.is_error, m.content, -1))
+                # The exit code is not stored with the message: its marker line tells it,
+                # so a failed command shows as failed again.
+                codes = _EXIT_CODE.findall(m.content)
+                meta = {"exit_code": int(codes[-1])} if codes else {}
+                finished = ev.ToolFinished(
+                    m.tool_call_id or "", name, m.is_error, m.content, -1, meta=meta
+                )
+                self.render(finished)
         self._end_stream()
         self._active_tools.clear()  # calls the history has no result for
         self._had_tools = False

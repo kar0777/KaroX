@@ -641,3 +641,15 @@ def test_effort_command_changes_the_next_request(tmp_path):
     assert "reasoning effort: high" in term.text
     assert "usage: /effort [low|medium|high|xhigh|max|off]" in term.text
     assert "reasoning effort: provider default" in term.text
+
+
+def test_replay_shows_a_failed_command_as_failed(tmp_path):
+    turns = [Turn(calls=[("bash", {"command": "exit 3"})]), Turn(text="it failed")]
+    term = FakeTerm(["run it", "/quit"])
+    app, _ = make_app(tmp_path, turns, term)
+    asyncio.run(app.run())
+    assert "✗ exit 3" in term.text
+    term2 = FakeTerm(["/resume last", "/quit"])
+    app2, _ = make_app(tmp_path, [], term2)
+    asyncio.run(app2.run())
+    assert "✗ exit 3" in term2.text
