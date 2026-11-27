@@ -1,3 +1,13 @@
+## 2026-11-27: sibling-note idea — $0 offline check fails, not built
+- Council r4: Codex picked "after the first source edit, git-grep identifiers of the hunk outside the file and attach
+  <= 6 snippets"; Devin (r8) predicted it misses same-file siblings and proposed a same-state rule (sibling methods
+  sharing a seed, callers of the enclosing function, external definitions of rare helpers).
+- Offline check (karox6-bench-data/scripts/sib_check.py, repos at base commits, first source hunk of the final
+  agent.diff as the first-edit proxy, 248 KaroX trials of the s69 dev run): relevant = the note points at a gold-patch
+  symbol the agent left untouched. Codex rule: relevant 0/58 failed trials with missed gold symbols, fires on
+  107/157 solved. Devin rule: relevant 12/58 (5 of 19 tasks), fires on 95/157 solved. Below Devin's own bar
+  (>= 50% of incomplete losses) and noisy on solved trials -> not built; no paid run spent.
+
 ## 2026-11-27: pool9 extension (bench/prereg_pool9_opencode.md) — OpenCode on Haiku ties KaroX on solves and cost
 - Pilot ocpil (dev tasks 75,76,78): 3/3 trials with rewards and gateway cost lines -> gate passed. Run 45912362507
   (tag p9oc): OpenCode V2 2.3.2, Haiku 5.5 via the same anthropic gateway, pool9 x 2 attempts; 123 valid (456 drop).
