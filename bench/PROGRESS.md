@@ -1,3 +1,18 @@
+## 2026-11-27: pre-registered pool9 (bench/prereg_pool9.md) — dev68 ADOPTED; dev65 ties Claude Code on solves at 0.66x cost/solve
+- pool9 = 124 fresh tasks (ids 370-493, windows 2026-07-10..09-10), labels 55 FAIR/29 PARTIAL/39 UNFAIR/1 DISPUTED
+  fixed before the run. Run 45909555070 (tag p9d68): dev65 + dev68 + Claude Code 2.1.329 side by side, 2 attempts,
+  Haiku 5.5. Task 456 lost to infra (runner Docker daemon died, no trials): 123 valid, 54 FAIR valid.
+- A1 (dev65 leads CC on solves): NO. FAIR solves (mean over attempts, summed) dev65 40.5, CC 40.5: +0.0 pp,
+  95% CI [-6.5, +6.5]. ALL 45.5 vs 46.0.
+- A2 (dev65 cheaper): YES. cost/solve FAIR $0.0282 vs $0.0431 = 0.66x, CI [0.55, 0.80].
+- B (adopt dev68): ADOPT. Geometric wall dev68/dev65 0.897, CI [0.82, 0.98]; mean-wall ratio 0.87 [0.75, 1.00];
+  FAIR solve diff -1.9 pp, CI [-6.5, +2.8] (margin -8); cost/solve 0.96x. Wall per trial mean 411 / 359 / 336 s,
+  median 146 / 137 / 119 s, p90 1161 / 947 / 898 s (dev65 / dev68 / CC).
+- Reading: on 54 fresh FAIR tasks KaroX solves as many as Claude Code for two thirds of the price; the pool6-8
+  solve leads did not hold on this larger pool. dev68 (waiting-tool text only) cuts the long tail (p90 -18%).
+- Spend $12.258 (dev65 3.417, dev68 3.125, CC 4.273, interview 1.443). Evaluation: scripts/eval_pool9.py ->
+  runs/p9d68_eval.txt.
+
 
 ## 2026-11-26: pre-registered pool8 (bench/prereg_pool8_dev67.md) — dev67 NOT adopted; dev65 beats Claude Code
 - pool8 = 49 fresh tasks (ids 321-369, 2026-09-10..10-01), labels 24 FAIR/12 PARTIAL/12 UNFAIR/1 DISPUTED fixed
