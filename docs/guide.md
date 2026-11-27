@@ -179,7 +179,10 @@ List servers in `~/.karox6/mcp.json` (or pass `--mcp-config FILE`; `--no-mcp` sk
 }
 ```
 
-Tokens come from the environment variable named in `bearer_token_env`, never from the file.
+Tokens come from the environment variable named in `bearer_token_env`, never from the file;
+`${VAR}` (or `${env:VAR}`) in `env`, `args`, `headers` and `url` is taken from the
+environment too, so configs written for other MCP clients work as they are. Pictures a
+server returns (a browser screenshot) are saved to a file named in the tool's output.
 Their tools appear to the agent as `mcp__<server>__<tool>`. Tools marked read-only by the
 server run in parallel with other reads; large outputs are cut and the rest saved to a file the
 agent can read. `timeout` (seconds, default 600) limits each call; a call that runs over it,

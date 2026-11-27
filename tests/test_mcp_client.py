@@ -3,6 +3,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from karox6.core.session import Session, SessionConfig
 from karox6.mcp.client import close_all, load_mcp_tools, render_result, tool_name
 from karox6.mcp.protocol import McpServer
@@ -391,3 +393,163 @@ def test_sse_message_with_a_line_separator_in_a_string_is_kept():
     payload = {"jsonrpc": "2.0", "id": 1, "result": {"text": "x\N{LINE SEPARATOR}y"}}
     text = "event: message\r\ndata: " + json.dumps(payload, ensure_ascii=False) + "\r\n\r\n"
     assert _sse_messages(text) == [payload]
+
+
+def test_a_resources_only_server_connects_with_no_tools(tmp_path):
+    config = write_config(
+        tmp_path, {"docs": {"command": sys.executable, "args": [FAKE, "--resources-only"]}}
+    )
+    warnings = []
+
+    async def go():
+        tools, handles = await load_mcp_tools(config, warn=warnings.append)
+        try:
+            assert tools == []
+            assert [h.name for h in handles] == ["docs"]  # connected, not skipped
+        finally:
+            await close_all(handles)
+
+    asyncio.run(go())
+    assert warnings == []
+
+
+def test_an_image_result_is_saved_to_a_file_not_dropped(tmp_path, ctx):
+    from karox6.mcp.client import McpTool
+
+    config = write_config(tmp_path, {"web": {"command": sys.executable, "args": [FAKE]}})
+
+    async def go():
+        _tools, handles = await load_mcp_tools(config)
+        try:
+            tool = McpTool(handles[0], {"name": "picture"})
+            return await tool.run({}, ctx)
+        finally:
+            await close_all(handles)
+
+    result = asyncio.run(go())
+    assert result.content.startswith("shot taken\n[image image/png, ")
+    saved = Path(result.content.split("saved to ", 1)[1].rstrip("]"))
+    assert saved.read_bytes().startswith(b"\x89PNG")
+    assert render_result({"content": [{"type": "image", "data": "x"}]}) == (
+        "[image content omitted]"
+    )
+
+
+def test_config_variables_and_the_legacy_sse_type(tmp_path, monkeypatch):
+    from karox6.mcp.client import McpClientError, expand_vars
+
+    monkeypatch.setenv("KX_TEST_TOKEN", "tok123")
+    assert expand_vars("Bearer ${KX_TEST_TOKEN}") == "Bearer tok123"
+    assert expand_vars("${env:KX_TEST_TOKEN}/x") == "tok123/x"
+    assert expand_vars("$HOME and {plain}") == "$HOME and {plain}"
+    monkeypatch.delenv("KX_MISSING_VAR", raising=False)
+    with pytest.raises(McpClientError, match="KX_MISSING_VAR"):  # never an empty token
+        expand_vars("${KX_MISSING_VAR}")
+
+    config = write_config(
+        tmp_path,
+        {
+            "old": {"type": "sse", "url": "http://127.0.0.1:9/sse"},
+            "fake": {
+                "command": sys.executable,
+                "args": [FAKE],
+                "env": {"FAKE_TOKEN": "${KX_TEST_TOKEN}"},
+            },
+        },
+    )
+    warnings = []
+
+    async def go():
+        tools, handles = await load_mcp_tools(config, warn=warnings.append)
+        await close_all(handles)
+        return tools
+
+    tools = asyncio.run(go())
+    assert {t.name for t in tools} == {"mcp__fake__echo", "mcp__fake__add"}
+    assert len(warnings) == 1
+    assert "legacy HTTP+SSE" in warnings[0]
+
+
+def test_same_named_tools_get_a_suffix_instead_of_hiding_one(tmp_path):
+    config = write_config(
+        tmp_path,
+        {
+            "a.b": {"command": sys.executable, "args": [FAKE]},
+            "a_b": {"command": sys.executable, "args": [FAKE]},
+        },
+    )
+    warnings = []
+
+    async def go():
+        tools, handles = await load_mcp_tools(config, warn=warnings.append)
+        await close_all(handles)
+        return sorted(t.name for t in tools)
+
+    names = asyncio.run(go())
+    assert names == [
+        "mcp__a_b__add",
+        "mcp__a_b__add_2",
+        "mcp__a_b__echo",
+        "mcp__a_b__echo_2",
+    ]
+    assert len(warnings) == 2
+
+
+def test_http_header_carries_the_version_the_server_chose():
+    import httpx
+
+    from karox6.mcp.client import HttpConnection
+
+    versions = []
+
+    def handler(request):
+        message = json.loads(request.content)
+        versions.append(request.headers.get("mcp-protocol-version"))
+        if message["method"] == "initialize":
+            body = {
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": {"protocolVersion": "2025-03-26"},
+            }
+            return httpx.Response(200, json=body)
+        if "id" not in message:
+            return httpx.Response(202)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": message["id"], "result": {}})
+
+    async def go():
+        conn = HttpConnection("http://mcp.test/mcp", transport=httpx.MockTransport(handler))
+        await conn.request("initialize", {"protocolVersion": "2025-06-18"}, 10)
+        await conn.notify("notifications/initialized", {})
+        await conn.request("tools/list", {}, 10)
+        await conn.close()
+
+    asyncio.run(go())
+    assert versions == [None, "2025-03-26", "2025-03-26"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="npx.cmd process trees are a Windows case")
+def test_closing_a_wrapped_server_ends_the_server_under_the_wrapper(tmp_path):
+    import subprocess
+
+    from karox6.mcp.client import connect
+
+    pid_file = tmp_path / "child.pid"
+    wrapper = (
+        "import subprocess, sys; "
+        f"p = subprocess.Popen([sys.executable, {FAKE!r}, '--linger']); "
+        f"open({str(pid_file)!r}, 'w').write(str(p.pid)); p.wait()"
+    )
+
+    def alive(pid):
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"], check=False, capture_output=True, text=True
+        ).stdout
+        return str(pid) in out
+
+    async def go():
+        handle = await connect("wrapped", {"command": sys.executable, "args": ["-c", wrapper]})
+        await handle.connection.close()
+
+    asyncio.run(go())
+    child = int(pid_file.read_text())
+    assert not alive(child)

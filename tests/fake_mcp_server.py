@@ -27,6 +27,7 @@ TOOLS = [
 ]
 
 CANCELLED = []
+RESOURCES_ONLY = "--resources-only" in sys.argv  # no tools: tools/list is "not found"
 
 
 def hidden_tool(name, args):
@@ -39,6 +40,17 @@ def hidden_tool(name, args):
     if name == "slow":
         time.sleep(float(args.get("seconds", 1)))
         return {"content": [{"type": "text", "text": "slept"}]}
+    if name == "picture":  # a 1x1 PNG, as a browser server returns a screenshot
+        png = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9a"
+            "wAAAABJRU5ErkJggg=="
+        )
+        return {
+            "content": [
+                {"type": "text", "text": "shot taken"},
+                {"type": "image", "data": png, "mimeType": "image/png"},
+            ]
+        }
     if name == "cancelled":
         return {"content": [{"type": "text", "text": json.dumps(CANCELLED)}]}
     if name == "crash":
@@ -65,10 +77,10 @@ for line in sys.stdin:
     if method == "initialize":
         result = {
             "protocolVersion": "2025-06-18",
-            "capabilities": {"tools": {}},
+            "capabilities": {"resources": {}} if RESOURCES_ONLY else {"tools": {}},
             "serverInfo": {"name": "fake", "version": "0"},
         }
-    elif method == "tools/list":
+    elif method == "tools/list" and not RESOURCES_ONLY:
         if params.get("cursor"):
             result = {"tools": TOOLS[1:]}
         else:
@@ -90,3 +102,6 @@ for line in sys.stdin:
         )
         continue
     print(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}), flush=True)
+
+if "--linger" in sys.argv:  # a server that outlives its stdin, as node under npx.cmd can
+    time.sleep(120)

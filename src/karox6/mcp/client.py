@@ -11,7 +11,8 @@ Config (the ``mcpServers`` shape other MCP clients use)::
 stdio servers are spawned as child processes (newline-delimited JSON-RPC); HTTP
 servers use Streamable HTTP (JSON or SSE replies, ``Mcp-Session-Id`` kept, a new
 session started when the server forgets the old one). Secrets come from the environment
-(``bearer_token_env``), never from the config text. ``timeout`` (seconds) limits each
+(``bearer_token_env``, or ``${VAR}`` / ``${env:VAR}`` in env, args, headers and url),
+never from the config text. ``timeout`` (seconds) limits each
 tool call. A server that fails to start is skipped with a warning that quotes the end of
 its stderr; the run goes on without it. A stdio server that dies mid-run is restarted
 on its next call (at most ``MAX_RESTARTS`` times). Calls that time out or are interrupted
@@ -21,6 +22,8 @@ are cancelled on the server (``notifications/cancelled``), and server pings are 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import itertools
 import json
@@ -28,6 +31,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +43,7 @@ from karox6 import __version__
 from karox6.context.spill import limit_output
 from karox6.lifetime import bind_to_karox, join_karox_job
 from karox6.tools.base import ToolContext, ToolResult
+from karox6.tools.proc import kill_tree
 
 PROTOCOL_VERSION = "2025-06-18"
 CONNECT_TIMEOUT_S = 30.0
@@ -234,6 +239,11 @@ class StdioConnection:
         finally:
             # Runs even if close() itself is cancelled: no process or task is left behind.
             if proc is not None and proc.returncode is None:
+                if sys.platform == "win32":
+                    # npx.cmd -> cmd.exe -> node: killing the first leaves the server
+                    # itself running until KaroX exits.
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(kill_tree, proc.pid)
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
             tasks = [t for t in (self._stderr, self._reader, *self._replies) if t is not None]
@@ -275,6 +285,7 @@ class HttpConnection:
         self.sessions_started = 0
         self._initialized = False
         self._init_params: dict[str, Any] | None = None
+        self.protocol_version = PROTOCOL_VERSION  # what the server's initialize chose
         self._ids = itertools.count(1)
         self._background: set[asyncio.Task[Any]] = set()
         self._session_lock = asyncio.Lock()
@@ -283,7 +294,7 @@ class HttpConnection:
         headers = dict(self.headers)
         if not fresh:  # an initialize request carries neither header
             if self._initialized:
-                headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
+                headers["MCP-Protocol-Version"] = self.protocol_version
             if self.session_id:
                 headers["Mcp-Session-Id"] = self.session_id
         return headers
@@ -348,6 +359,7 @@ class HttpConnection:
         result = _result(reply)
         if method == "initialize":
             self.session_id = response.headers.get("mcp-session-id") or None
+            self.protocol_version = negotiated_version(result)
             self._initialized = True
             self.sessions_started += 1
         return result
@@ -451,7 +463,7 @@ class McpTool:
             )
         except (McpClientError, httpx.HTTPError, OSError) as exc:
             return ToolResult(f"MCP server {server.name} failed: {exc}", is_error=True)
-        text = render_result(result)
+        text = render_result(result, save_dir=ctx.spill_dir, name=self.name)
         inline, _ = limit_output(
             text, spill_dir=ctx.spill_dir, name=self.name, max_chars=INLINE_CHARS
         )
@@ -463,11 +475,17 @@ def tool_name(server: str, tool: str) -> str:
     return name[:64]
 
 
-def render_result(result: dict[str, Any]) -> str:
+def render_result(
+    result: dict[str, Any], *, save_dir: Path | None = None, name: str = "mcp"
+) -> str:
     parts: list[str] = []
     for block in result.get("content") or []:
+        if not isinstance(block, dict):
+            continue
         kind = block.get("type")
-        if kind == "text":
+        if kind in ("image", "audio") and save_dir is not None:
+            parts.append(_save_media(block, save_dir, name, len(parts) + 1))
+        elif kind == "text":
             parts.append(str(block.get("text", "")))
         elif kind == "resource":
             resource = block.get("resource") or {}
@@ -481,6 +499,38 @@ def render_result(result: dict[str, Any]) -> str:
     return "\n".join(parts) or "(no output)"
 
 
+_MEDIA_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "audio/wav": ".wav",
+    "audio/mpeg": ".mp3",
+}
+
+
+def _save_media(block: dict[str, Any], save_dir: Path, name: str, number: int) -> str:
+    """An image or audio block: its bytes go to a file the model can name to the user (or
+    open with a tool) instead of being dropped."""
+    kind = str(block.get("type"))
+    mime = str(block.get("mimeType") or "")
+    try:
+        data = base64.b64decode(str(block.get("data") or ""), validate=True)
+    except (binascii.Error, ValueError):
+        return f"[{kind} content omitted: not valid base64]"
+    if not data:
+        return f"[{kind} content omitted: empty]"
+    ext = _MEDIA_EXT.get(mime, ".bin")
+    stem = _NAME_RX.sub("_", name)[:60]
+    path = save_dir / f"{stem}-{time.strftime('%H%M%S')}-{number}{ext}"
+    try:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    except OSError as exc:
+        return f"[{kind} content omitted: cannot save it ({exc})]"
+    return f"[{kind} {mime or 'of unknown type'}, {len(data)} bytes, saved to {path}]"
+
+
 def call_timeout(spec: dict[str, Any]) -> float:
     """Per-call limit from the server's ``timeout`` (seconds), else the default."""
     value = spec.get("timeout")
@@ -489,22 +539,45 @@ def call_timeout(spec: dict[str, Any]) -> float:
     return CALL_TIMEOUT_S
 
 
+_VAR_RX = re.compile(r"\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def expand_vars(value: str) -> str:
+    """``${VAR}`` and ``${env:VAR}`` (the Claude Code and Cursor spellings) from the
+    environment; an unset variable is an error, never an empty string sent as a token."""
+
+    def one(match: re.Match[str]) -> str:
+        found = os.environ.get(match.group(1))
+        if found is None:
+            raise McpClientError(f"environment variable {match.group(1)} is not set")
+        return found
+
+    return _VAR_RX.sub(one, value)
+
+
 async def _open(spec: dict[str, Any]) -> StdioConnection | HttpConnection:
+    kind = str(spec.get("type") or spec.get("transport") or "").lower()
+    if kind == "sse":
+        raise McpClientError(
+            "the legacy HTTP+SSE transport is not supported; use the server's Streamable "
+            "HTTP endpoint (type 'http', usually the URL ending in /mcp)"
+        )
     if spec.get("url"):
-        headers = {str(k): str(v) for k, v in (spec.get("headers") or {}).items()}
+        headers = {str(k): expand_vars(str(v)) for k, v in (spec.get("headers") or {}).items()}
         token_env = spec.get("bearer_token_env")
         if token_env:
             token = os.environ.get(str(token_env))
             if not token:
                 raise McpClientError(f"environment variable {token_env} is not set")
             headers["Authorization"] = f"Bearer {token}"
-        return HttpConnection(str(spec["url"]), headers, call_timeout=call_timeout(spec))
+        url = expand_vars(str(spec["url"]))
+        return HttpConnection(url, headers, call_timeout=call_timeout(spec))
     if spec.get("command"):
-        env = {str(k): str(v) for k, v in (spec.get("env") or {}).items()}
+        env = {str(k): expand_vars(str(v)) for k, v in (spec.get("env") or {}).items()}
         path = env.get("PATH") or env.get("Path")
         command = [
             _executable(str(spec["command"]), path),
-            *[str(a) for a in spec.get("args") or []],
+            *[expand_vars(str(a)) for a in spec.get("args") or []],
         ]
         connection = StdioConnection(command, env, spec.get("cwd"))
         await connection.start()
@@ -512,8 +585,14 @@ async def _open(spec: dict[str, Any]) -> StdioConnection | HttpConnection:
     raise McpClientError("needs 'command' (stdio) or 'url' (HTTP)")
 
 
-async def _initialize(connection: Connection) -> None:
-    await connection.request(
+def negotiated_version(result: Any) -> str:
+    """The revision the server chose in its initialize reply (ours when it names none)."""
+    version = result.get("protocolVersion") if isinstance(result, dict) else None
+    return version if isinstance(version, str) and version.strip() else PROTOCOL_VERSION
+
+
+async def _initialize(connection: Connection) -> dict[str, Any]:
+    result = await connection.request(
         "initialize",
         {
             "protocolVersion": PROTOCOL_VERSION,
@@ -523,21 +602,33 @@ async def _initialize(connection: Connection) -> None:
         CONNECT_TIMEOUT_S,
     )
     await connection.notify("notifications/initialized", {})
+    return result if isinstance(result, dict) else {}
+
+
+MAX_TOOL_PAGES = 1000
 
 
 async def connect(name: str, spec: dict[str, Any]) -> McpServerHandle:
     connection = await _open(spec)
     try:
-        await _initialize(connection)
+        info = await _initialize(connection)
+        capabilities = info.get("capabilities")
         tools: list[dict[str, Any]] = []
-        cursor: str | None = None
-        for _ in range(50):
-            params = {"cursor": cursor} if cursor else {}
-            page = await connection.request("tools/list", params, CONNECT_TIMEOUT_S)
-            tools += [t for t in page.get("tools") or [] if isinstance(t, dict) and t.get("name")]
-            cursor = page.get("nextCursor")
-            if not cursor:
-                break
+        # A server that declares its capabilities without "tools" (resources or prompts
+        # only) is connected with no tools rather than skipped over a failed tools/list.
+        if not isinstance(capabilities, dict) or "tools" in capabilities:
+            cursor: str | None = None
+            seen: set[str] = set()
+            for _ in range(MAX_TOOL_PAGES):
+                params = {"cursor": cursor} if cursor else {}
+                page = await connection.request("tools/list", params, CONNECT_TIMEOUT_S)
+                tools += [
+                    t for t in page.get("tools") or [] if isinstance(t, dict) and t.get("name")
+                ]
+                cursor = page.get("nextCursor")
+                if not cursor or cursor in seen:  # a server repeating a cursor loops forever
+                    break
+                seen.add(cursor)
     except BaseException:
         await connection.close()
         raise
@@ -628,13 +719,28 @@ async def load_mcp_tools(
                         f"{exc}\n"
                     )
                     continue
-                if tool.name not in seen:
-                    seen.add(tool.name)
-                    tools.append(tool)
+                if tool.name in seen:
+                    unique = _unique_name(tool.name, seen)
+                    report(
+                        f"karox: MCP tool {tool.remote_name!r} of {handle.name!r} is named "
+                        f"{unique} (its usual name {tool.name} is taken)\n"
+                    )
+                    tool.name = unique
+                seen.add(tool.name)
+                tools.append(tool)
     except BaseException:
         await asyncio.shield(close_all(connected))
         raise
     return tools, handles
+
+
+def _unique_name(name: str, taken: set[str]) -> str:
+    for n in itertools.count(2):
+        suffix = f"_{n}"
+        candidate = name[: 64 - len(suffix)] + suffix
+        if candidate not in taken:
+            return candidate
+    raise AssertionError("unreachable")
 
 
 async def close_all(handles: list[McpServerHandle]) -> None:
