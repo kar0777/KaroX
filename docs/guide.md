@@ -71,8 +71,9 @@ In the chat, `/setup` does the same without editing files: pick a provider, past
 (hidden, saved encrypted for your user, one file per provider) and pick the model from the
 list the provider gives for that key. Every provider set up this way is kept as a
 `[profiles.NAME]` table and becomes the default; `/provider` lists the saved ones and
-`/provider NAME` switches back without typing the URL or key again. `/models [TEXT]` shows
-the current provider's models.
+`/provider NAME` switches back without typing the URL or key again. `/model` (and `/provider`, `/setup`) open a
+picker: arrows move, typing filters, Enter chooses, Esc cancels; `/model NAME|NUMBER` switches
+directly and `/models [TEXT]` prints the current provider's models.
 
 Other useful settings: `reasoning_effort`, `temperature`, `context_window`,
 `max_output_tokens`, prices (`price_input`, `price_output`, `price_cached`, USD per 1M

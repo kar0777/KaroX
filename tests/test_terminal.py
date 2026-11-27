@@ -281,21 +281,21 @@ def test_ctrl_c_twice_leaves_and_names_the_session(launch: Launcher) -> None:
 def test_first_run_without_a_model_starts_with_setup(launch: Launcher) -> None:
     env = launch.env()
     del env["KAROX_API_KEY"]
-    chat = launch.start([Reply(text="first answer")], model=False, ready="Number [1]:", env=env)
+    chat = launch.start([Reply(text="first answer")], model=False, ready="filter ›", env=env)
     t = chat.term
-    assert "Set up KaroX: choose where the model runs." in t.text()
-    t.line("8")
+    t.wait("Provider (8)")  # the picker: presets, nothing saved yet
+    t.send("other")  # typing filters the list
+    t.wait("Provider (1 of 8)")
+    t.key("enter")
     t.wait("Server URL")
     t.line(chat.model.url)
     t.wait("Name for this provider [localhost-")
     t.line("my box")
     t.wait("Hidden input")
     t.key("enter")  # a local server needs no key
-    t.wait("Model:")
-    assert "2. fake-two" in t.text()  # the server's own list
-    t.line("fake")  # both match: the list is shown again
-    t.wait(lambda s: s.count("Model:") >= 2)
-    t.line("2")
+    t.wait("Model (2)")  # the server's own list
+    t.key("down")
+    t.key("enter")
     t.wait("Type a task to start.")
     chat.turn("hi")
     assert "first answer" in t.text()
@@ -338,7 +338,10 @@ def test_every_command_answers(launch: Launcher) -> None:
     chat.say("/status", "messages   0")
     assert "context    0 / 400.0k (0%)" in t.text()  # the same number as the status bar
     chat.say("/cost", "requests   0")
-    chat.say("/model", "model: fake")
+    t.line("/model")  # the picker, with the fake server's list
+    t.wait("Model (2)")
+    t.key("esc")
+    t.wait(lambda _s: "Model (2)" not in t.text())  # closed, nothing chosen
     chat.say("/approve", "dangerous commands: ask")
     chat.say("/reasoning show", "reasoning shown")
     chat.say("/sessions", "no saved sessions")
@@ -386,30 +389,42 @@ def test_key_is_hidden_and_setup_switches_the_model(launch: Launcher) -> None:
     t.key("esc")
     t.wait("key unchanged")
     t.line("/setup")
-    t.wait("Number [1]:")
+    t.wait("Provider (8)")
     t.key("esc")
     t.wait("setup cancelled")
     t.line("/setup")
-    t.wait("Number [1]:")
-    t.line("8")
+    t.wait("Provider (8)")
+    t.send("other")
+    t.wait("Provider (1 of 8)")
+    t.key("enter")
     t.wait("Server URL")
     t.line(chat.model.url)
     t.wait("Name for this provider")
     t.key("enter")
     t.wait("Hidden input")
     t.key("enter")
-    t.wait("Model:")
-    t.line("fake-two")
+    t.wait("Model (2)")
+    t.send("two")
+    t.key("enter")
     t.wait("now using fake-two")
-    t.line("/models")
-    t.wait("2. fake-two *")
-    t.line("/model 1")  # a number from the list shown last
+    t.line("/model")  # the picker starts on the current model
+    t.wait("Model (2)")
+    t.key("up")
+    t.key("enter")
     t.wait("model: fake-one")
-    t.line("/model two")  # part of a name
+    t.line("/models")
+    t.wait("1. fake-one *")
+    t.line("/model 2")  # a number from the list shown last
     t.wait("model: fake-two")
+    t.line("/model one")  # part of a name
+    t.wait(lambda s: s.count("model: fake-one") >= 2)
+    t.line("/model fake-two")
+    t.wait(lambda s: s.count("model: fake-two") >= 2)
     t.line("/provider")
-    t.wait("/provider NAME switches")
+    t.wait("Provider (2)")  # the saved one and "+ another provider"
     assert ": fake-two (http://127.0.0.1:" in t.text()
+    t.key("esc")
+    t.wait(lambda _s: "Provider (2)" not in t.text())
     chat.turn("hi")
     assert chat.model.requests[-1]["model"] == "fake-two"
     assert chat.model.requests[-1]["messages"][-1]["content"] == "hi"

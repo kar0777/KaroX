@@ -574,6 +574,9 @@ class ChatApp:
         self._fork_source: dict[str, Any] | None = None  # --fork: history to start from
         self.replay_on_start = False  # --resume: show the saved conversation at the start
         self.key_name = ""  # the saved key of this provider (credentials-<name>)
+        # The full-screen list picker (title, items, current) -> choice or None; without
+        # it /model and /provider print numbered lists.
+        self.picker: Callable[[str, list[str], str | None], Awaitable[str | None]] | None = None
         self._model_list: tuple[Any, list[str] | None] | None = None  # server, its models
         self._shown_models: list[str] = []  # what a number in /model picks from
         self._checkpoints: Checkpoints | None = None
@@ -1752,7 +1755,11 @@ class ChatApp:
 
         try:
             choice = await run_setup(
-                self.read_answer, self.read_secret, self.write, self.config.home
+                self.read_answer,
+                self.read_secret,
+                self.write,
+                self.config.home,
+                picker=self.picker,
             )
         except (EOFError, KeyboardInterrupt):
             self.write("setup cancelled\n")
@@ -1788,6 +1795,23 @@ class ChatApp:
         from karox6.settings import SettingsError, save_provider, saved_providers
 
         saved = saved_providers()
+        if not arg and self.picker is not None:
+            labels = {
+                f"{n}: {t['model']} ({t.get('base_url') or t.get('provider', '')})": n
+                for n, t in saved.items()
+            }
+            new = "+ another provider (setup)"
+            here = getattr(self.provider, "base_url", "")
+            current = next(
+                (lbl for lbl, n in labels.items() if saved[n].get("base_url") == here), None
+            )
+            picked = await self.picker("Provider", [*labels, new], current)
+            if picked is None:
+                return
+            if picked == new:
+                await self._setup()
+                return
+            arg = labels.get(picked, "")
         if not arg:
             if not saved:
                 self.write("no saved providers yet: /setup adds one\n")
@@ -1868,9 +1892,14 @@ class ChatApp:
         from karox6.providers.catalog import pick
 
         if not arg:
+            models = await self._provider_models()
+            if models and self.picker is not None:
+                picked = await self.picker("Model", models, self.config.model)
+                if picked is not None:
+                    self._switch_model(picked)
+                return
             self.write(f"model: {self.config.model}\n")
             self.write(self.paint("dim", f"  {self.session.model().describe()}") + "\n")
-            models = await self._provider_models()
             if models:
                 self._show_models(models, "/model NUMBER or NAME (or part of one) switches")
             return
@@ -1889,6 +1918,9 @@ class ChatApp:
             if found is None and models:
                 note = f"  {arg} is not in the provider's list; using it as typed"
                 self.write(self.paint("yellow", note) + "\n")
+        self._switch_model(chosen)
+
+    def _switch_model(self, chosen: str) -> None:
         if chosen != self.config.model:
             self.config.model = chosen
             self.session.forget_model_state(provider_changed=False)

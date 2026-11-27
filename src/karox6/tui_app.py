@@ -18,7 +18,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, NamedTuple, override
+from typing import TYPE_CHECKING, Any, NamedTuple, cast, override
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -61,6 +61,8 @@ from karox6.tui import (
 )
 from karox6.tui_input import coalescing_input
 from karox6.tui_paste import WARN_BYTES, PasteChunks
+from karox6.tui_picker import ROWS as PICK_ROWS
+from karox6.tui_picker import PickState
 from karox6.tui_text import (
     DECO_END,
     DECO_START,
@@ -842,6 +844,9 @@ def _build_style(color: bool, theme: Theme | None = None) -> Style:
                 "question-bar": "bold",
                 "secret-bar": "bold",
                 "selected": "reverse",
+                "pick-current": "reverse",
+                "pick-bar": "bold",
+                "pick-match": "bold",
             }
         )
     theme = theme or Theme("ansi", 4)
@@ -865,6 +870,14 @@ def _build_style(color: bool, theme: Theme | None = None) -> Style:
             "scrollbar.background": "",
             "scrollbar.button": subtle,
             "selected": "reverse",
+            "pick-bar": f"bold {t('accent')}",
+            "pick-keys": t("muted"),
+            "pick-prompt": f"bold {t('accent')}",
+            "pick-item": "",
+            "pick-current": current,
+            "pick-match": "bold underline",
+            "pick-mark": t("accent") if "#" not in current else "",
+            "pick-dim": t("muted"),
         }
     )
 
@@ -913,7 +926,9 @@ class FullScreenTui:
         self._fallback_branch = _git_branch(self._workspace)
         self._chat_app: ChatApp | None = None
 
-        self._mode: str = "prompt"  # "prompt" | "running" | "question" | "secret"
+        self._mode: str = "prompt"  # "prompt" | "running" | "question" | "secret" | "pick"
+        self._pick: PickState | None = None  # the list being picked from (mode "pick")
+        self._pick_future: asyncio.Future[str | None] | None = None
         self._prompt_text: str = self._glyph["prompt"]
         self._more_text: str = self._glyph["more"]
         self._question_prompt: str = ""
@@ -959,6 +974,9 @@ class FullScreenTui:
         )
         self._answer_buffer = Buffer(name="karox_answer", multiline=False)
         self._secret_buffer = Buffer(name="karox_secret", multiline=False)
+        self._pick_buffer = Buffer(
+            name="karox_pick", multiline=False, on_text_changed=self._pick_filter_changed
+        )
         self._search_toolbar = SearchToolbar(ignore_case=True)
 
         self._transcript_window = Window(
@@ -1009,6 +1027,19 @@ class FullScreenTui:
             get_line_prefix=lambda _ln, _wc: [("class:secret-prompt", self._secret_prompt)],
         )
         self._question_banner = line(self._question_banner_text)
+        self._pick_window = Window(
+            content=BufferControl(buffer=self._pick_buffer),
+            height=1,
+            wrap_lines=False,
+            get_line_prefix=lambda _ln, _wc: [("class:pick-prompt", "filter › ")],
+        )
+        self._pick_list = Window(
+            content=FormattedTextControl(self._pick_lines, show_cursor=False),
+            height=lambda: Dimension.exact(self._pick.rows() if self._pick else 1),
+            wrap_lines=False,
+            always_hide_cursor=True,
+        )
+        pick_panel = HSplit([line(self._pick_header), self._pick_list])
         self._secret_banner = line(self._secret_banner_text)
         self._attach_window = line(self._attach_text)
 
@@ -1017,6 +1048,7 @@ class FullScreenTui:
         in_input = in_prompt | in_running
         in_question = Condition(lambda: self._mode == "question")
         in_secret = Condition(lambda: self._mode == "secret")
+        in_pick = Condition(lambda: self._mode == "pick")
         has_attach = Condition(
             lambda: (
                 self._chat_app is not None
@@ -1029,6 +1061,7 @@ class FullScreenTui:
                 ConditionalContainer(self._input_window, filter=in_input),
                 ConditionalContainer(self._answer_window, filter=in_question),
                 ConditionalContainer(self._secret_window, filter=in_secret),
+                ConditionalContainer(self._pick_window, filter=in_pick),
                 ConditionalContainer(self._attach_window, filter=in_input & has_attach),
             ]
         )
@@ -1060,6 +1093,7 @@ class FullScreenTui:
                 ConditionalContainer(self._search_toolbar, filter=is_searching),
                 ConditionalContainer(self._question_banner, filter=in_question),
                 ConditionalContainer(self._secret_banner, filter=in_secret),
+                ConditionalContainer(pick_panel, filter=in_pick),
                 box,
                 self._status_window,
             ]
@@ -1273,7 +1307,7 @@ class FullScreenTui:
         self._fail_pending(exc)
 
     def _fail_pending(self, exc: BaseException) -> None:
-        for fut in (self._read_future, self._question_future):
+        for fut in (self._read_future, self._question_future, self._pick_future):
             if fut is not None and not fut.done():
                 fut.set_exception(exc)
 
@@ -1338,13 +1372,63 @@ class FullScreenTui:
                 self._question_future = None
             self._set_mode("running" if self._turn_active else "prompt")
 
+    async def pick(
+        self,
+        title: str,
+        items: list[str],
+        current: str | None = None,
+        *,
+        allow_typed: bool = True,
+    ) -> str | None:
+        """A choice from ``items`` (arrows, typing filters, Enter); None on Esc. With
+        ``allow_typed``, Enter on a filter that matches nothing returns the typed text."""
+        if self._closed or (self._app_task is not None and self._app_task.done()):
+            raise EOFError
+        self._pick = PickState(title, list(items), current, allow_typed)
+        self._pick_buffer.reset()
+        self._transcript.scroll_to_bottom()
+        self._set_mode("pick")
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[str | None] = loop.create_future()
+        self._pick_future = fut
+        try:
+            return await fut
+        finally:
+            if self._pick_future is fut:
+                self._pick_future = None
+            self._pick = None
+            self._set_mode("running" if self._turn_active else "prompt")
+
+    def _pick_filter_changed(self, buffer: Buffer) -> None:
+        if self._pick is not None:
+            self._pick.set_query(buffer.text)
+            self.invalidate()
+
+    def _pick_header(self) -> StyleAndTextTuples:
+        if self._pick is None:
+            return []
+        return cast(StyleAndTextTuples, self._pick.header(self._glyph["dot"]))
+
+    def _pick_lines(self) -> StyleAndTextTuples:
+        if self._pick is None:
+            return []
+        pointer = self._glyph["prompt"].strip() or ">"
+        mark = self._glyph.get("bullet", "*")
+        return cast(StyleAndTextTuples, self._pick.lines(pointer, mark))
+
+    def _pick_done(self, value: str | None) -> None:
+        if self._pick is not None and value is not None:
+            self.write(f"  {_plain_text(self._pick.title)}: {_plain_text(value)}\n")
+        if self._pick_future is not None and not self._pick_future.done():
+            self._pick_future.set_result(value)
+
     # -- turn & mode transitions -------------------------------------------------------
 
     def _begin_turn(self, status: Callable[[], str], interrupt: Callable[[], None]) -> None:
         self._turn_active = True
         self._turn_status_fn = status
         self._turn_interrupt_fn = interrupt
-        if self._mode not in ("question", "secret"):
+        if self._mode not in ("question", "secret", "pick"):
             self._set_mode("running")
         else:
             self.invalidate()
@@ -1364,6 +1448,7 @@ class FullScreenTui:
             "prompt": self._input_window,
             "question": self._answer_window,
             "secret": self._secret_window,
+            "pick": self._pick_window,
             "running": self._input_window,
         }[mode]
         with contextlib.suppress(ValueError):
@@ -1754,6 +1839,43 @@ class FullScreenTui:
             del event
             if self._question_future is not None and not self._question_future.done():
                 self._question_future.set_exception(EOFError())
+
+        # -- the list picker --
+
+        in_pick = Condition(lambda: self._mode == "pick")
+
+        def _move(delta: int) -> Callable[[KeyPressEvent], None]:
+            def handler(event: KeyPressEvent) -> None:
+                del event
+                if self._pick is not None:
+                    self._pick.move(delta)
+                    self.invalidate()
+
+            return handler
+
+        keys.add("up", filter=in_pick)(_move(-1))
+        keys.add("c-p", filter=in_pick)(_move(-1))
+        keys.add("down", filter=in_pick)(_move(1))
+        keys.add("c-n", filter=in_pick)(_move(1))
+        keys.add("tab", filter=in_pick)(_move(1))
+        keys.add("s-tab", filter=in_pick)(_move(-1))
+        keys.add("pageup", filter=in_pick)(_move(-PICK_ROWS))
+        keys.add("pagedown", filter=in_pick)(_move(PICK_ROWS))
+
+        @keys.add("enter", filter=in_pick)
+        def _pick_enter(event: KeyPressEvent) -> None:
+            del event
+            if self._pick is not None:
+                choice = self._pick.chosen()
+                if choice is not None:
+                    self._pick_done(choice)
+
+        @keys.add("escape", eager=True, filter=in_pick)
+        @keys.add("c-c", eager=True, filter=in_pick)
+        @keys.add("<sigint>", eager=True, filter=in_pick)
+        def _pick_cancel(event: KeyPressEvent) -> None:
+            del event
+            self._pick_done(None)
 
         # -- main prompt editing, history, completions & exit --
 

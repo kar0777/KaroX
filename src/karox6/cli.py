@@ -709,10 +709,12 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
 
         write_fn = stdout_write
         display_factory = terminal_display
+        pick_fn = None
     else:
         read_line = ui.read_line
         read_answer = ui.read_answer
         read_secret = ui.read_secret
+        pick_fn = ui.pick
         write_fn = ui.write
         display_factory = ui.turn_display
 
@@ -817,6 +819,7 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
             ui.attach_app(created)
         created.replay_on_start = bool(args.resume)
         created.key_name = getattr(args, "saved_key", None) or ""
+        created.picker = ui.pick if ui is not None else None
         return created
 
     app: ChatApp | None = None
@@ -834,7 +837,9 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
                 from karox6.setup import run_setup
 
                 try:
-                    choice = await run_setup(read_answer, read_secret, write_fn, home)
+                    choice = await run_setup(
+                        read_answer, read_secret, write_fn, home, picker=pick_fn
+                    )
                 except (EOFError, KeyboardInterrupt):
                     return 2
                 if choice is None:

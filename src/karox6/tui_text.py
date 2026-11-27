@@ -403,6 +403,8 @@ def key_hints(mode: str) -> list[tuple[str, str]]:
         return [("enter", "answer"), ("esc", "cancel")]
     if mode == "secret":
         return [("enter", "submit"), ("esc", "cancel")]
+    if mode == "pick":
+        return [("enter", "choose"), ("esc", "cancel")]
     return [
         ("enter", "send"),
         ("alt+enter", "new line"),

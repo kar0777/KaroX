@@ -22,6 +22,7 @@ from karox6.settings import save_provider, saved_providers
 ReadLine = Callable[[str], Awaitable[str]]
 Write = Callable[[str], None]
 Lister = Callable[[str, str, str | None], Awaitable[list[str]]]
+Picker = Callable[[str, list[str], str | None], Awaitable[str | None]]
 
 SHOW_ALL = 300  # a list this long is printed whole; a longer one is filtered by typing
 
@@ -68,6 +69,7 @@ class _Talk:
     write: Write
     home: Path
     lister: Lister | None
+    picker: Picker | None = None  # the full-screen list picker, when there is one
 
 
 @dataclass
@@ -86,26 +88,38 @@ async def run_setup(
     home: Path,
     *,
     lister: Lister | None = None,
+    picker: Picker | None = None,
 ) -> Choice | None:
     """Ask, save and return the choice; None when the user leaves with an empty answer."""
     saved = saved_providers()
-    write("\nSet up KaroX: choose where the model runs.\n")
     entries: list[tuple[str, Any]] = []
-    if saved:
-        write("Saved:\n")
-        for name, table in saved.items():
-            entries.append(("saved", name))
-            write(f"  {len(entries)}. {name}: {table['model']} ({_host(table)})\n")
-        write("New:\n")
+    labels: list[str] = []
+    for name, table in saved.items():
+        entries.append(("saved", name))
+        labels.append(f"{name}: {table['model']} ({_host(table)})")
     for p in PRESETS:
         entries.append(("preset", p))
-        write(f"  {len(entries)}. {p.label}\n")
-    answer = (await read_line("Number [1]: ")).strip() or "1"
-    if not answer.isdigit() or not 1 <= int(answer) <= len(entries):
-        write("setup cancelled\n")
-        return None
-    kind, item = entries[int(answer) - 1]
-    talk = _Talk(read_line, read_secret, write, home, lister)
+        labels.append(f"+ {p.label}")
+    if picker is not None:
+        picked = await picker("Provider", labels, labels[0] if saved else None)
+        if picked is None or picked not in labels:
+            write("setup cancelled\n")
+            return None
+        kind, item = entries[labels.index(picked)]
+    else:
+        write("\nSet up KaroX: choose where the model runs.\n")
+        if saved:
+            write("Saved:\n")
+        for i, label in enumerate(labels, 1):
+            if saved and i == len(saved) + 1:
+                write("New:\n")
+            write(f"  {i}. {label.removeprefix('+ ')}\n")
+        answer = (await read_line("Number [1]: ")).strip() or "1"
+        if not answer.isdigit() or not 1 <= int(answer) <= len(entries):
+            write("setup cancelled\n")
+            return None
+        kind, item = entries[int(answer) - 1]
+    talk = _Talk(read_line, read_secret, write, home, lister, picker)
     if kind == "saved":
         return await _saved(talk, item, saved[item])
     return await _new(talk, item)
@@ -178,6 +192,11 @@ async def _model(
         chat = chat_models(models) or models
         hidden = len(models) - len(chat)
         models = chat
+        if talk.picker is not None:
+            picked = await talk.picker("Model", models, default or None)
+            if picked is None:
+                write("setup cancelled\n")
+            return picked
         _show(write, models, default)
         note = f" ({hidden} embedding/speech/OCR models not shown)" if hidden else ""
         write(f"  {len(models)} models{note}: a number, a name or part of one\n")
