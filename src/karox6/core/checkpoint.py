@@ -108,6 +108,15 @@ class Checkpoints:
         parts = out.split("\0")
         return [(parts[i][:1], parts[i + 1]) for i in range(0, len(parts) - 1, 2) if parts[i]]
 
+    def diff(self, before: str, after: str) -> str:
+        """A unified diff (git's format) between two snapshots."""
+        if before == after:
+            return ""
+        with self._lock:
+            return self._git(
+                "diff-tree", "-r", "-p", "--no-renames", "--no-color", before, after, timeout=60
+            )
+
     def move(self, source: str, target: str, current: str) -> tuple[list[str], list[str]]:
         """Take the files that differ between snapshots ``source`` and ``target`` from
         their ``source`` state to their ``target`` state: (paths changed, paths skipped).

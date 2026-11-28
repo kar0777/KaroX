@@ -515,3 +515,15 @@ def test_file_mention_cap_does_not_cut_a_utf8_character(tmp_path, monkeypatch):
     res = expand_file_mentions("See @ru.txt", ws)
     assert "abЖ\n... [truncated" in res.text
     assert "\N{REPLACEMENT CHARACTER}" not in res.text
+
+
+def test_outcome_skips_bare_tags_and_brackets():
+    def done(name, output, **meta):
+        return ev.ToolFinished(
+            call_id="c", name=name, is_error=False, output=output, duration_ms=1, meta=meta
+        )
+
+    assert outcome(done("mcp__calc__add", '{\n  "sum": 42\n}')) == '"sum": 42'
+    assert outcome(done("x", '<result id="1">\nthe answer\n</result>')) == "the answer"
+    assert outcome(done("skill", '<skill name="fix">\nSteps', skill="fix")) == "loaded fix"
+    assert outcome(done("x", "{}")) == "{}"  # nothing else to say

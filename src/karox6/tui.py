@@ -566,6 +566,7 @@ class ChatApp:
         self._streamed_text = False
         self._stream_newline = False
         self._text_before_tools = False  # the model wrote text: a gap before tool lines
+        self._last_retry = ""  # the last retry reason written (repeats stay on the activity line)
         self._initialize = initialize
         self._before_turn = before_turn
         self._session_task: asyncio.Task[Session] | None = None
@@ -592,6 +593,7 @@ class ChatApp:
         self._model_notes: dict[str, str] = {}  # model -> "1M · pictures" (from the list)
         self._checkpoints: Checkpoints | None = None
         self._turns: list[_TurnRecord] = []  # what /undo can take back, oldest first
+        self._first_snapshot: str | None = None  # the workspace before this session's work
         self._undone: list[tuple[_TurnRecord, list[Message]]] = []  # what /redo can put back
         self._pending_images: list[Path] = []  # pictures waiting for the next message
         self._next_images: list[Path] | None = None  # set: a sent message's own pictures
@@ -1086,6 +1088,8 @@ class ChatApp:
     async def _record_start(self, prompt: str) -> _TurnRecord:
         messages = self.session.messages
         before = await self._snapshot(SNAPSHOT_WAIT_S)
+        if self._first_snapshot is None:
+            self._first_snapshot = before
         return _TurnRecord(
             prompt=prompt,
             anchor=messages[-1] if messages else None,
@@ -1177,6 +1181,7 @@ class ChatApp:
     def _forget_turns(self) -> None:
         self._turns.clear()
         self._undone.clear()
+        self._first_snapshot = None
 
     def _rewind_to(self, record: _TurnRecord) -> list[Message] | None:
         """Drop the turn's messages; None when its start is no longer in the history
@@ -1305,6 +1310,8 @@ class ChatApp:
             self._streamed_text = False
             self._end_stream()
             return
+        if isinstance(event, ev.UsageUpdate | ev.RunStarted):
+            self._last_retry = ""  # a reply came (or a new turn): a new refusal is news
         if isinstance(
             event, ev.UsageUpdate | ev.RunStarted | ev.ApprovalRequested | ev.ApprovalResolved
         ):
@@ -1318,11 +1325,15 @@ class ChatApp:
             self._streamed_text = False
             self._phase = f"Retrying model (attempt {event.attempt})"
             error = clip(_plain_text(explain_error(event.error)[0]), 140)
-            self.write(
-                p("warning", f"  {g['warn']} retry {event.attempt}")
-                + p("muted", f" in {event.delay_s:.0f}s: {error}")
-                + "\n"
-            )
+            # The same refusal again (a busy provider answers 429 a dozen times): one line
+            # says it, the activity line counts the attempts.
+            if error != self._last_retry:
+                self._last_retry = error
+                self.write(
+                    p("warning", f"  {g['warn']} retry {event.attempt}")
+                    + p("muted", f" in {event.delay_s:.0f}s: {error}")
+                    + "\n"
+                )
         elif isinstance(event, ev.Notice):
             self.write(p("warning", f"  [{event.kind}] {_plain_text(event.text)[:200]}") + "\n")
         elif isinstance(event, ev.Compacted):
@@ -2157,6 +2168,14 @@ class ChatApp:
 
         workspace = self.session.workspace
         text, untracked = await asyncio.to_thread(git_diff, workspace)
+        if text is None and self._first_snapshot is not None:
+            # no git repository: the session's own snapshots (the ones /undo uses) know
+            # what the workspace looked like before this session's first turn
+            now = await self._snapshot()
+            if now is not None:
+                with contextlib.suppress(Exception):
+                    text = await asyncio.to_thread(self._store().diff, self._first_snapshot, now)
+                    untracked = []
         if text is None:
             changed = await asyncio.to_thread(self.session.files.changed_files)
             self.write("not a git repository; files changed this session:\n")

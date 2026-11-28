@@ -2639,3 +2639,8 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   an indented `---` closed the front matter, `# comments` and escapes in front matter, a user skill hid a
   project command of the same name (now project > plugin > user across both), skills named like built-in
   commands were listed but unreachable (now hidden), the skill tool's full listing was unbounded.
+- Second live TUI round (Dahl): tool lines showed `<skill name=...>` and `{` as the result (the first
+  line); now the first line that says something (`loaded sum-check`, `"sum": 42`). A busy provider wrote one
+  line per retry (5-10 identical 429 lines); now one line per reason, the activity line counts attempts.
+  /diff outside a git repository only listed file names; it now shows the diff against the snapshot
+  taken before the session's first turn (the /undo store). Checked fine: /status, @file, /undo, /redo hint.

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -739,3 +740,34 @@ def test_skills_and_slash_commands_in_the_chat(tmp_path, monkeypatch):
     assert "Hunt." in sent[1]
     assert sent[1].endswith("Arguments: the parser")
     assert "did you mean" in term.text  # /fix-bug is close to /fix-bugs
+
+
+def test_the_same_retry_reason_is_written_once(tmp_path):
+    from karox6.core import events as ev
+
+    term = FakeTerm([])
+    app, _ = make_app(tmp_path, [], term)
+    for attempt in (1, 2, 3):
+        app.render(ev.Retry(attempt=attempt, delay_s=10, error="HTTP 429 busy"))
+    app.render(ev.Retry(attempt=4, delay_s=10, error="HTTP 503 down"))
+    app.render(ev.UsageUpdate(step=1, usage={}, total={}, cost_usd=None, total_cost_usd=None))
+    app.render(ev.Retry(attempt=1, delay_s=10, error="HTTP 503 down"))
+    text = term.text
+    assert text.count("HTTP 429 busy") == 1
+    assert text.count("HTTP 503 down") == 2  # a reply came between: news again
+
+
+def test_diff_without_git_shows_this_sessions_changes(tmp_path):
+    if not shutil.which("git"):
+        pytest.skip("git unavailable")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+    edit = {"file_path": "calc.py", "old_string": "a - b", "new_string": "a + b"}
+    turns = [Turn(calls=[("read", {"file_path": "calc.py"})]), Turn(calls=[("edit", edit)])]
+    term = FakeTerm(["fix it", "/diff", "/quit"])
+    app, _ = make_app(tmp_path, [*turns, Turn(text="done")], term, snapshots=True)
+    asyncio.run(app.run())
+    assert "-    return a - b" in term.text
+    assert "+    return a + b" in term.text
+    assert "not a git repository" not in term.text

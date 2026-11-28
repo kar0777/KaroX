@@ -98,7 +98,14 @@ def outcome(event: ev.ToolFinished, limit: int = 140) -> str:
         if matches:
             return f"{matches} match" if matches == 1 else f"{matches} matches"
         return f"{len(lines)} line" if len(lines) == 1 else f"{len(lines)} lines"
-    return lines[0][:limit]
+    if name == "skill" and meta.get("skill"):
+        return f"loaded {meta['skill']}"
+    # the first line that says something: not a bare tag or bracket (`<skill ...>`, `{`)
+    told = [ln for ln in lines if not _BARE_MARK.fullmatch(ln)]
+    return (told or lines)[0][:limit]
+
+
+_BARE_MARK = re.compile(r"</?[\w-]+(?:\s[^<>]*)?>|[\[\]{}()]+,?")
 
 
 def clip(text: str, limit: int) -> str:
