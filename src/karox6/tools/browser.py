@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from karox6.lifetime import join_karox_job
 from karox6.tools.base import ToolContext, ToolResult
 from karox6.tools.proc import kill_tree
 
@@ -32,6 +33,7 @@ MAX_WAIT_MS = 20_000
 MAX_SIDE = 2560
 MAX_CONSOLE_LINES = 30
 MAX_SCRIPT_CHARS = 20_000
+COPY_PREFIX = ".karox-shot-"
 STDERR_KEEP = 256 * 1024  # bytes of the browser's log kept (console lines are in it)
 JOB_MEMORY_MB = 2048  # Windows: the browser's whole process tree may not commit more
 # new Chromium: `:CONSOLE:5] "text", source: url (5)`; older: `:CONSOLE(5)] ...`
@@ -138,8 +140,9 @@ class PageScreenshotTool:
             "script": {
                 "type": "string",
                 "description": "JavaScript run as a module after the page's own scripts "
-                "(await allowed), before `wait_ms` elapses; errors and console output are "
-                "reported. Workspace files only.",
+                "(import and await allowed), before `wait_ms` elapses; errors and console "
+                "output are reported. Workspace files only; it runs on a copy of the page "
+                "next to it (.karox-shot-*.html), so location differs.",
             },
         },
         "required": ["target"],
@@ -187,11 +190,13 @@ class PageScreenshotTool:
             # A copy next to the page (relative imports and assets still resolve) with the
             # script appended; removed after the shot.
             page = path.resolve()
-            copy = page.with_name(f".karox-shot-{os.urandom(4).hex()}.html")
+            _remove_stale_copies(page.parent)
+            copy = page.with_name(f"{COPY_PREFIX}{os.urandom(4).hex()}.html")
             try:
-                html = page.read_bytes().decode("utf-8", "replace")
-                copy.write_bytes(_with_script(html, script).encode("utf-8"))
+                copy.write_bytes(_with_script(page.read_bytes(), script))
             except OSError as exc:
+                with contextlib.suppress(OSError):
+                    copy.unlink()
                 return ToolResult(f"Error: cannot prepare the page: {exc}", is_error=True)
             url = copy.as_uri() + suffix
         if self._lock is None:
@@ -223,7 +228,6 @@ class PageScreenshotTool:
                 "--disable-component-update",
                 "--disable-default-apps",
                 "--mute-audio",
-                "--allow-file-access-from-files",  # a page's own local ES modules load
                 "--hide-scrollbars",
                 "--js-flags=--max-old-space-size=1024",  # a runaway page cannot eat the RAM
                 "--enable-logging=stderr",
@@ -231,8 +235,10 @@ class PageScreenshotTool:
                 f"--window-size={width},{height}",
                 f"--virtual-time-budget={wait}",
                 f"--screenshot={png}",
-                url,
             ]
+            if url.startswith("file:"):
+                argv.append("--allow-file-access-from-files")  # its own local ES modules
+            argv.append(url)
             code, log = await _run(argv, folder)
             if code is None:
                 return ToolResult(
@@ -266,17 +272,23 @@ class PageScreenshotTool:
         )
 
 
-def _with_script(html: str, script: str) -> str:
-    """``html`` with ``script`` as the last module script of the page."""
+def _with_script(html: bytes, script: str) -> bytes:
+    """The page's bytes as they are, then ``script`` as its last module script: after
+    the end of the document a parser still puts it in the body, and nothing of the page
+    is searched, decoded or re-encoded. Top level, so `import` and `await` work; an
+    error shows in the console as an uncaught one."""
     body = script.replace("</script", "<\\/script")
-    tag = (
-        '<script type="module">\ntry {\n'
-        + body
-        + '\n} catch (error) {\n  console.error("page_screenshot script failed: " + '
-        "(error && error.stack || error));\n}\n</script>\n"
-    )
-    at = html.lower().rfind("</body>")
-    return html[:at] + tag + html[at:] if at >= 0 else html + "\n" + tag
+    return html + b'\n<script type="module">\n' + body.encode("utf-8") + b"\n</script>\n"
+
+
+def _remove_stale_copies(folder: Path) -> None:
+    """Copies left by a KaroX that was killed during a shot."""
+    cutoff = time.time() - 600
+    with contextlib.suppress(OSError):
+        for stale in folder.glob(f"{COPY_PREFIX}*.html"):
+            with contextlib.suppress(OSError):
+                if stale.stat().st_mtime < cutoff:
+                    stale.unlink()
 
 
 def _clamp(value: Any, default: int, low: int, high: int) -> int:
@@ -292,11 +304,13 @@ async def _run(argv: list[str], cwd: Path) -> tuple[int | None, str]:
     when closed (and caps its memory), elsewhere its own process group."""
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
+        # below normal even when commands keep the normal priority: it is ours
         kwargs["creationflags"] = (
             subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.BELOW_NORMAL_PRIORITY_CLASS
         )
     else:
         kwargs["start_new_session"] = True
+    join_karox_job()  # Windows: it also dies with KaroX, however KaroX ends
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,

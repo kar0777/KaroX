@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from karox6.lifetime import child_priority, join_karox_job
 from karox6.tools.proc import kill_tree
 from karox6.tools.shell import ShellInfo
 
@@ -288,9 +289,10 @@ class Hooks:
     ) -> tuple[int | None, str, str]:
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | child_priority()
         else:
             kwargs["start_new_session"] = True  # its own group: a timeout kills the whole tree
+        join_karox_job()  # Windows: a hook also dies with KaroX
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self.shell.argv(self._command(hook), script),

@@ -278,6 +278,9 @@ http(s) URL in a headless browser on your GPU, lets the page run for `wait_ms` o
 time, and returns the picture with the page's console messages and uncaught errors. One
 browser at a time, at below-normal priority, at most 90 seconds and 2 GB (Windows) per
 call; everything it started is killed and its throwaway profile deleted afterwards.
+`script` runs your JavaScript in the page first (on a copy next to it), for other views.
+Commands the agent runs start at below-normal priority on Windows, so they never take the
+CPU from your own programs; `KAROX_COMMAND_PRIORITY=normal` keeps the normal priority.
 `KAROX_BROWSER=<path>` picks the browser, `KAROX_BROWSER=0` turns the tool off.
 
 Only the newest 8 pictures of a conversation are sent again with each request (older ones

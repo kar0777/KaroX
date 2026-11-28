@@ -35,6 +35,22 @@ _lock = threading.Lock()
 _held: dict[str, Any] = {}
 
 
+def child_priority() -> int:
+    """Windows creation flags for the commands KaroX runs: below-normal priority, so a
+    build, a test run or a browser an agent starts never takes the CPU from the user's
+    own programs (a game, the IDE); children inherit it. KAROX_COMMAND_PRIORITY=normal
+    keeps the normal priority. 0 elsewhere."""
+    import os
+    import subprocess
+
+    if sys.platform != "win32":
+        return 0
+    if os.environ.get("KAROX_COMMAND_PRIORITY", "").strip().lower() == "normal":
+        # explicit: 0 would inherit KaroX's own class, below normal when it runs so
+        return int(getattr(subprocess, "NORMAL_PRIORITY_CLASS", 0))
+    return int(getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+
+
 def join_karox_job() -> bool:
     """Before starting a child: put KaroX in its kill-on-exit job (Windows, once).
     True when KaroX is in it, so the children it starts from now on are too."""

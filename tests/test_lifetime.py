@@ -99,3 +99,37 @@ def test_hard_killed_karox_takes_its_commands_along(tmp_path: Path, mode: str) -
             karox.kill()
         if child and _alive(child):
             subprocess.run(["taskkill", "/F", "/PID", str(child)], capture_output=True, check=False)
+
+
+def test_commands_run_below_normal_priority_unless_asked(monkeypatch, tmp_path: Path) -> None:
+    import asyncio
+
+    from karox6.lifetime import child_priority
+    from karox6.tools.proc import ProcessRun
+
+    monkeypatch.setenv("KAROX_COMMAND_PRIORITY", "normal")
+    assert child_priority() == getattr(subprocess, "NORMAL_PRIORITY_CLASS", 0)
+    monkeypatch.delenv("KAROX_COMMAND_PRIORITY")
+    if sys.platform != "win32":
+        assert child_priority() == 0
+        return
+    assert child_priority() == subprocess.BELOW_NORMAL_PRIORITY_CLASS
+    probe = (
+        "import ctypes; k = ctypes.windll.kernel32; "
+        "k.GetCurrentProcess.restype = ctypes.c_void_p; "
+        "k.GetPriorityClass.argtypes = [ctypes.c_void_p]; "
+        "print(hex(k.GetPriorityClass(k.GetCurrentProcess())))"
+    )
+
+    async def run() -> str:
+        started = await ProcessRun.start(
+            [sys.executable, "-c", probe],
+            cwd=tmp_path,
+            env=dict(__import__("os").environ),
+            log_path=tmp_path / "log.txt",
+            command="probe",
+        )
+        await started.wait(30)
+        return started.output_text()[0]
+
+    assert "0x4000" in asyncio.run(run())  # BELOW_NORMAL_PRIORITY_CLASS, inherited

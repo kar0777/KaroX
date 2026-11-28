@@ -2673,3 +2673,12 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   WebGL, ~65 processes each) to move the camera and hide objects: the tool now does that.
   Also --allow-file-access-from-files (a page's local ES modules were blocked on file://) and
   console messages that span lines (an error's stack).
+- Commands, hooks and page_screenshot's browser run at below-normal priority on Windows
+  (KAROX_COMMAND_PRIORITY=normal opts out): in two Flash aquarium reruns the model kept its own
+  Playwright with --use-angle=swiftshader (CPU WebGL) despite page_screenshot: tree peak 4.3 GB,
+  71 processes, 50% CPU on average (Large 4 with page_screenshot: 343 MB, 7%). The browser and
+  hooks also join KaroX's kill-on-exit job. page_screenshot `script` is now appended to the page
+  bytes as they are (top level: import works); stale copies are removed. Codex review $0.09.
+- Aquarium reruns (same task, Mistral): Flash 250 steps/32 min, clearly better than the original
+  session (it could see its screenshots); Large 4 at medium effort 12 steps/7.5 min, plainer;
+  Large 4 at its default effort spent 7 minutes and 30k reasoning tokens on `pwd && ls`.

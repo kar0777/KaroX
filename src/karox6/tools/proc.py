@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from karox6.lifetime import bind_to_karox, join_karox_job
+from karox6.lifetime import bind_to_karox, child_priority, join_karox_job
 
 HEAD_CAP = 64 * 1024
 TAIL_CAP = 64 * 1024
@@ -77,7 +77,7 @@ class ProcessRun:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         kwargs: dict[str, object] = {}
         if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | child_priority()
         else:
             kwargs["start_new_session"] = True
         join_karox_job()  # Windows: the child is born in the kill-on-exit job
