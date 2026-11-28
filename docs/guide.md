@@ -103,7 +103,8 @@ download off:
 ```
 
 A model that takes no pictures gets a short note in their place. When a provider refuses
-pictures, KaroX writes `{"vision": false}` for that model under `"learned"` and sends the
+pictures, KaroX writes `{"vision": false}` for that model and that server under
+`"learned_by_server"` (another route serving the name may take them) and sends the
 request again without them. Pictures from tools (a screenshot, an MCP browser, `read` of a
 `.png`) go to every model not known to refuse them; a refusal is learned the same way.
 
@@ -268,6 +269,34 @@ karox6 plugin disable their-plugin        # enable / remove
 Plugins live in `~/.karox6/plugins`; your own `mcp.json` wins over a plugin's server of the
 same name. Installing a plugin runs nothing, but its MCP servers start with every chat:
 install plugins only from sources you trust.
+
+## Hooks
+
+Hooks are your own commands that run at fixed points of the agent loop, in the Claude Code
+format. Put them in `~/.karox6/hooks.json` (a plugin brings its own in `hooks/hooks.json`):
+
+```json
+{"hooks": {
+  "PreToolUse": [{"matcher": "Bash|Write", "hooks": [
+    {"type": "command", "command": "python ~/guard.py", "timeout": 30}]}],
+  "Stop": [{"hooks": [{"type": "command", "command": "python ~/tests_ran.py"}]}]
+}}
+```
+
+Events: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `SessionStart`. A hook reads
+a JSON object on stdin (`tool_name`, `tool_input`, `tool_response`, `prompt`,
+`last_assistant_message` and so on) and answers with its exit code: 0 is fine (stdout may be
+JSON such as `{"decision": "block", "reason": "..."}` or `additionalContext`; plain stdout of
+`UserPromptSubmit` / `SessionStart` goes to the model with your message), 2 blocks (stderr is
+the reason: the tool call is not run, the prompt is not sent, or the model is sent back to
+work, at most three times per message), anything else is a warning. `matcher` is a regular
+expression on the tool name; KaroX names (`bash`, `write`, `mcp__server__tool`) and Claude
+Code names (`Bash`, `Write`) both match. Project folders never add hooks (a repository could
+run commands on your machine). `{"continue": false, "stopReason": "..."}` ends the run; a
+`PreToolUse` hook may rewrite the call with `hookSpecificOutput.updatedInput`; `tool_name` on
+stdin is the Claude Code name (`Bash`). A plugin's command gets `CLAUDE_PLUGIN_ROOT` as an
+environment variable: write `"${CLAUDE_PLUGIN_ROOT}/check.py"` in quotes. Off with
+`hooks = false` or `KAROX_HOOKS=0`.
 
 ## KaroX as an MCP server
 

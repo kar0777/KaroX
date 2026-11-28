@@ -55,6 +55,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "update_check": (bool,),
     "model_catalog": (bool,),
     "skills": (bool,),
+    "hooks": (bool,),
     "update_repo": (str,),
     "update_branch": (str,),
     "theme": (str,),

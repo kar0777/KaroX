@@ -114,6 +114,7 @@ class Launcher:
             KAROX_API_KEY="test-key",
             KAROX_MODEL_CATALOG="0",
             KAROX_SKILLS="0",
+            KAROX_HOOKS="0",
             PYTHONPATH=str(SRC),
             TERM="xterm-256color",
         )

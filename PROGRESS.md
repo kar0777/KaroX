@@ -2644,3 +2644,11 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   line per retry (5-10 identical 429 lines); now one line per reason, the activity line counts attempts.
   /diff outside a git repository only listed file names; it now shows the diff against the snapshot
   taken before the session's first turn (the /undo store). Checked fine: /status, @file, /undo, /redo hint.
+- Hooks (karox6/hooks.py), the Claude Code format: PreToolUse / PostToolUse / UserPromptSubmit /
+  Stop / SessionStart from ~/.karox6/hooks.json and plugins' hooks/hooks.json (never from the
+  project). Exit 2 or a JSON deny blocks; context goes to the model; a Stop hook sends the model
+  back at most 3 times; failures and timeouts only warn (the whole process tree is killed).
+  `continue: false` ends the run, `updatedInput` rewrites a call, `tool_name` is Claude Code's name.
+  `hooks = false` / KAROX_HOOKS=0. Codex review (gpt-6.1-terra, $0.07): 9 findings, all fixed.
+- A vision refusal is now learned per server (`learned_by_server` in models.json): a gateway that
+  refuses pictures no longer marks the model blind on every other route.

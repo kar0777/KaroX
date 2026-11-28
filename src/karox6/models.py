@@ -147,15 +147,19 @@ def model_info(model: str, home: Path | None = None, server: str | None = None) 
     data = _read(home)
     info = ModelInfo()
     listed: Any = {}
+    learned_here: Any = {}
     if server:
         by_server = data.get("provider")
         listed = by_server.get(server_key(server)) if isinstance(by_server, dict) else {}
+        by_server = data.get("learned_by_server")
+        learned_here = by_server.get(server_key(server)) if isinstance(by_server, dict) else {}
     # Lowest priority first: each later source overwrites what it knows.
     for source, found in (
         ("built-in", _builtin(model)),
         ("catalog", model_catalog.lookup(home, model, server)),
         ("provider", _exact(listed, model)),
-        ("learned", _match(data.get("learned"), model)),
+        ("learned", _match(data.get("learned"), model)),  # older KaroX: any server
+        ("learned", _exact(learned_here, model)),  # what this server answered
         ("user", _match(data.get("models"), model)),
     ):
         facts = _clean(found)
@@ -164,17 +168,30 @@ def model_info(model: str, home: Path | None = None, server: str | None = None) 
     return info
 
 
-def remember(home: Path | None, model: str, **facts: Any) -> None:
-    """Save what a session found out about ``model`` (best effort, atomic write)."""
+def remember(home: Path | None, model: str, server: str | None = None, **facts: Any) -> None:
+    """Save what a session found out about ``model`` (best effort, atomic write): for the
+    server that said it when known (another route serving the name may differ: a gateway
+    that refuses pictures says nothing about the vendor's own API)."""
     if home is None:
         return
     data = _read(home)
-    stored = data.get("learned")
-    learned: dict[str, Any] = stored if isinstance(stored, dict) else {}
-    entry = dict(learned.get(model) or {})
-    entry.update(_clean(facts))
-    learned[model] = entry
-    data["learned"] = learned
+    if server:
+        stored = data.get("learned_by_server")
+        servers: dict[str, Any] = stored if isinstance(stored, dict) else {}
+        old = servers.get(server_key(server))
+        table: dict[str, Any] = dict(old) if isinstance(old, dict) else {}
+        entry = dict(table.get(model) or {})
+        entry.update(_clean(facts))
+        table[model] = entry
+        servers[server_key(server)] = table
+        data["learned_by_server"] = servers
+    else:
+        stored = data.get("learned")
+        learned: dict[str, Any] = stored if isinstance(stored, dict) else {}
+        entry = dict(learned.get(model) or {})
+        entry.update(_clean(facts))
+        learned[model] = entry
+        data["learned"] = learned
     _write(home, data)
 
 

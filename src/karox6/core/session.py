@@ -125,6 +125,7 @@ EMPTY_REPLY_NOTICE = (
     "now: call the next tool you need, or give your final answer if you are done."
 )
 MAX_EMPTY_REPLIES = 3  # per run; after that the run ends with the provider's error
+MAX_STOP_BLOCKS = 3  # a Stop hook may send the model back this many times per run
 MAX_SERVER_SHRINKS = 2  # per run: requests cut down after a server error on every retry
 FINAL_CALL_STEPS = 30  # after the wrap-up notice, ask for the final answer
 WRAP_UP_NOTICE = (
@@ -188,6 +189,17 @@ class Session:
             self.skills = discover(self.workspace, config.home, git_root=_git_root(self.workspace))
             if any(s.kind == "skill" for s in self.skills):
                 self.tools.append(SkillTool(self.skills))
+        self.hooks: Any = None  # karox6.hooks.Hooks when the user or a plugin has some
+        self.hook_problems: list[str] = []
+        if config.hooks and tools is None:
+            from karox6.hooks import Hooks, load
+
+            found = load(config.home, self.hook_problems)
+            if found:
+                self.hooks = Hooks(found, session_id="", workspace=self.workspace, shell=self.shell)
+        self._session_started = False
+        self._start_context: list[str] = []  # SessionStart's, until a prompt is accepted
+        self._hook_halt = ""  # a hook said {"continue": false}: why
         self._subagents = 0
         self._tool_map = {t.name: t for t in self.tools}
         self.session_id = session_id or new_session_id()
@@ -299,7 +311,29 @@ class Session:
         )
         self.guard.reset()
         self._close_dangling_calls()
+        for problem in self.hook_problems:  # even when no hook could be loaded
+            emit(ev.Notice(kind="hook", text=problem))
+        self.hook_problems = []
+        self._hook_halt = ""
+        if self.hooks:
+            self.hooks.session_id = self.session_id
+            blocked, prompt = await self._prompt_hooks(prompt, emit)
+            if blocked is not None:
+                emit(
+                    ev.RunFinished(
+                        status="error",
+                        reason=blocked,
+                        final_text="",
+                        steps=0,
+                        elapsed_s=round(time.monotonic() - started, 2),
+                        usage=self.usage.to_dict(),
+                        cost_usd=round(self.cost_usd, 6) if self.config.price else None,
+                        session_id=self.session_id,
+                    )
+                )
+                return
         self._append(Message("user", prompt, images=list(images)))
+        stop_blocks = 0  # times a Stop hook sent the model back to work
         steps = 0
         truncations = 0
         empties = 0  # empty replies answered with EMPTY_REPLY_NOTICE
@@ -452,10 +486,37 @@ class Session:
                             )
                             final_text = ""
                             continue
+                    if (
+                        self.hooks
+                        and self.hooks.has("Stop")
+                        and stop_blocks < MAX_STOP_BLOCKS
+                        and not self._hook_halt
+                    ):
+                        outcome = await self.hooks.run(
+                            "Stop",
+                            {
+                                "stop_hook_active": stop_blocks > 0,
+                                "last_assistant_message": final_text,
+                            },
+                        )
+                        self._hook_warnings(outcome, emit)
+                        if outcome.block and not outcome.halt:
+                            stop_blocks += 1
+                            self._notice(
+                                "hook",
+                                "A Stop hook says the task is not finished yet: "
+                                + (outcome.reason or "(no reason given)"),
+                                emit,
+                            )
+                            final_text = ""
+                            continue
                     break
                 stop = await self._run_calls(message.tool_calls, ctx, emit)
                 if stop:
                     status, reason = "loop", stop
+                    break
+                if self._hook_halt:
+                    status, reason = "error", f"stopped by a hook: {self._hook_halt}"
                     break
                 if progress_guard is not None and monitor is not None and gate_cap is None:
                     diff_hash = await asyncio.to_thread(monitor.diff_hash)
@@ -816,8 +877,15 @@ class Session:
                     True,
                 )
             else:
+                denied, args, notes = await self._pre_tool_hook(tool, args, emit)
                 try:
-                    result = await tool.run(args, ctx)
+                    if denied is not None:
+                        result = ToolResult(denied, is_error=True, meta={"hook": "blocked"})
+                    else:
+                        result = await tool.run(args, ctx)
+                        result = await self._post_tool_hook(tool.name, args, result, emit)
+                    if notes:
+                        result.content = _with_hook_notes(result.content, notes)
                     content, is_error, meta = result.content, result.is_error, result.meta
                     pictures = list(result.images)
                 except asyncio.CancelledError:
@@ -851,6 +919,80 @@ class Session:
             is_error=is_error,
             images=self._keep_pictures(pictures, meta),
         )
+
+    # -- hooks (karox6.hooks) ---------------------------------------------------------
+
+    def _hook_warnings(self, outcome: Any, emit: Callable[[ev.Event], None]) -> None:
+        for text in outcome.warnings:
+            emit(ev.Notice(kind="hook", text=text))  # for the user; the model is not told
+
+    async def _prompt_hooks(
+        self, prompt: str, emit: Callable[[ev.Event], None]
+    ) -> tuple[str | None, str]:
+        """SessionStart (first message of the chat) and UserPromptSubmit: (why the prompt
+        is blocked or None, the prompt with the hooks' context)."""
+        if not self._session_started:
+            self._session_started = True
+            if self.hooks.has("SessionStart"):
+                source = "resume" if self.resumed else "startup"
+                outcome = await self.hooks.run("SessionStart", {"source": source}, match=source)
+                self._hook_warnings(outcome, emit)
+                self._start_context = list(outcome.context)
+        context = list(self._start_context)  # kept until a prompt gets through
+        if self.hooks.has("UserPromptSubmit"):
+            outcome = await self.hooks.run("UserPromptSubmit", {"prompt": prompt})
+            self._hook_warnings(outcome, emit)
+            if outcome.block or outcome.halt:
+                reason = outcome.reason or "(no reason given)"
+                emit(ev.Notice(kind="hook", text=f"a UserPromptSubmit hook blocked it: {reason}"))
+                return f"blocked by a hook: {reason}", prompt
+            context += outcome.context
+        self._start_context = []
+        if context:
+            joined = "\n".join(context)
+            prompt = f"{prompt}\n\n<hook-context>\n{joined}\n</hook-context>"
+        return None, prompt
+
+    async def _pre_tool_hook(
+        self, tool: Tool, args: dict[str, Any], emit: Callable[[ev.Event], None]
+    ) -> tuple[str | None, dict[str, Any], list[str]]:
+        """(why the call is refused or None, the arguments to run it with, context notes)."""
+        if not (self.hooks and self.hooks.has("PreToolUse")):
+            return None, args, []
+        outcome = await self.hooks.run("PreToolUse", {"tool_input": args}, tool=tool.name)
+        self._hook_warnings(outcome, emit)
+        if outcome.halt:
+            self._hook_halt = outcome.reason or "(no reason given)"
+        if outcome.block or outcome.halt:
+            why = outcome.reason or "(no reason given)"
+            return f"Error: a PreToolUse hook blocked this call: {why}", args, []
+        if outcome.updated_input is not None:
+            try:
+                args = parse_arguments(json.dumps(outcome.updated_input), tool.parameters)
+            except (ToolArgsError, TypeError, ValueError) as exc:
+                why = f"its updatedInput is not valid ({exc})"
+                return f"Error: a PreToolUse hook blocked this call: {why}", args, []
+            emit(ev.Notice(kind="hook", text=f"a PreToolUse hook changed the {tool.name} call"))
+        return None, args, list(outcome.context)
+
+    async def _post_tool_hook(
+        self, name: str, args: dict[str, Any], result: ToolResult, emit: Callable[[ev.Event], None]
+    ) -> ToolResult:
+        if not (self.hooks and self.hooks.has("PostToolUse")):
+            return result
+        response = {"output": result.content[:20_000], "is_error": result.is_error}
+        outcome = await self.hooks.run(
+            "PostToolUse", {"tool_input": args, "tool_response": response}, tool=name
+        )
+        self._hook_warnings(outcome, emit)
+        if outcome.halt:
+            self._hook_halt = outcome.reason or "(no reason given)"
+        notes = list(outcome.context)
+        if outcome.block:
+            notes.insert(0, "a PostToolUse hook objects: " + (outcome.reason or "(no reason)"))
+        if notes:
+            result.content = _with_hook_notes(result.content, notes)
+        return result
 
     def _keep_pictures(self, pictures: list[Path], meta: dict[str, Any]) -> list[dict[str, str]]:
         """Copy a tool result's pictures into the session (later requests send the same
@@ -1093,7 +1235,9 @@ class Session:
             return False
         if not any(m.images for m in self.messages):
             return False
-        remember(self.config.home, self.config.model, vision=False)
+        server = getattr(self.provider, "base_url", None)
+        server = server if isinstance(server, str) else None
+        remember(self.config.home, self.config.model, server, vision=False)
         self._model_facts = (
             self.config.model,
             replace(self.model(), vision=False, source="learned"),
@@ -1586,3 +1730,7 @@ def _tool_pictures(messages: list[Message], *, show: bool) -> list[Message]:
         out.append(m)
     flush()
     return out
+
+
+def _with_hook_notes(content: str, notes: list[str]) -> str:
+    return f"{content}\n[hook] " + "\n[hook] ".join(notes)

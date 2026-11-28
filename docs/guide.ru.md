@@ -104,7 +104,8 @@ DeepSeek V4.1 Flash видят; gpt-oss и DeepSeek V3/R1 — нет). `model_ca
 ```
 
 Модель без зрения получает вместо картинки короткую пометку. Если провайдер отказался
-принять картинки, KaroX записывает для этой модели `{"vision": false}` в `"learned"` и
+принять картинки, KaroX записывает `{"vision": false}` для этой модели и этого сервера в
+`"learned_by_server"` (другой маршрут с тем же именем может их принимать) и
 повторяет запрос без них. Картинки от инструментов (скриншот, MCP-браузер, `read` файла
 `.png`) получает любая модель, про которую не известно, что она их не принимает; отказ
 запоминается так же.
@@ -271,6 +272,34 @@ karox6 plugin disable their-plugin        # enable / remove
 Плагины лежат в `~/.karox6/plugins`; ваш собственный `mcp.json` главнее одноимённого
 сервера плагина. Установка ничего не запускает, но MCP-серверы плагина стартуют с каждым
 чатом: ставьте плагины только из источников, которым доверяете.
+
+## Хуки
+
+Хуки — ваши команды, которые запускаются в определённых точках цикла агента, в формате
+Claude Code. Файл `~/.karox6/hooks.json` (у плагина свой `hooks/hooks.json`):
+
+```json
+{"hooks": {
+  "PreToolUse": [{"matcher": "Bash|Write", "hooks": [
+    {"type": "command", "command": "python ~/guard.py", "timeout": 30}]}],
+  "Stop": [{"hooks": [{"type": "command", "command": "python ~/tests_ran.py"}]}]
+}}
+```
+
+События: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `SessionStart`. Хук получает
+JSON на stdin (`tool_name`, `tool_input`, `tool_response`, `prompt`, `last_assistant_message`
+и т. д.) и отвечает кодом выхода: 0 — всё в порядке (stdout может быть JSON вроде
+`{"decision": "block", "reason": "..."}` или `additionalContext`; обычный текст от
+`UserPromptSubmit` / `SessionStart` уходит модели вместе с сообщением), 2 — запрет (причина
+в stderr: вызов не выполняется, сообщение не отправляется, или модель возвращают к работе —
+не больше трёх раз за сообщение), другой код — только предупреждение. `matcher` — регулярное
+выражение по имени инструмента; подходят и имена KaroX (`bash`, `write`, `mcp__server__tool`),
+и имена Claude Code (`Bash`, `Write`). Папка проекта хуки не добавляет (репозиторий мог бы
+запускать команды на вашей машине). `{"continue": false, "stopReason": "..."}` завершает
+запуск; хук `PreToolUse` может переписать вызов через `hookSpecificOutput.updatedInput`;
+`tool_name` на stdin — имя Claude Code (`Bash`). Команде плагина `CLAUDE_PLUGIN_ROOT`
+приходит переменной окружения: пишите `"${CLAUDE_PLUGIN_ROOT}/check.py"` в кавычках.
+Выключить: `hooks = false` или `KAROX_HOOKS=0`.
 
 ## KaroX как MCP-сервер
 

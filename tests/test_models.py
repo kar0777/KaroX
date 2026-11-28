@@ -182,3 +182,14 @@ def test_an_unknown_model_that_refuses_tool_pictures_learns_it(tmp_path):
     assert provider.requests[1].messages[-1].images  # tried: the model may see
     assert not any(m.images for m in provider.requests[2].messages)  # then without them
     assert model_info("some-local-model", home).vision is False
+
+
+def test_a_refusal_is_learned_for_the_server_that_said_it(tmp_path):
+    gateway, vendor = "https://gw.test/v1", "https://api.vendor.test"
+    remember(tmp_path, "m-flash", gateway, vision=False)
+    assert model_info("m-flash", tmp_path, gateway).vision is False
+    assert model_info("m-flash", tmp_path, gateway + "/").source == "learned"
+    assert model_info("m-flash", tmp_path, vendor).vision is None  # another route
+    assert model_info("m-flash", tmp_path).vision is None
+    remember(tmp_path, "m-old", vision=False)  # older KaroX: no server, any route
+    assert model_info("m-old", tmp_path, vendor).vision is False

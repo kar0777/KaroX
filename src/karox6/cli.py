@@ -1058,6 +1058,7 @@ def _session_config(
         progress_guard=args.progress_guard,
         code_mode=args.code_mode,
         skills=_skills_on(args),
+        hooks=_hooks_on(args),
         copy_notes=args.copy_notes,
         command_wait_cap_s=_positive(args.command_wait_cap),
         wrap_up_steps=_positive(args.wrap_up_steps),
@@ -1069,6 +1070,12 @@ def _skills_on(args: argparse.Namespace) -> bool:
     from karox6.skills import enabled
 
     return enabled(getattr(args, "skills", None))
+
+
+def _hooks_on(args: argparse.Namespace) -> bool:
+    from karox6.hooks import enabled
+
+    return enabled(getattr(args, "hooks", None))
 
 
 def _local_url(url: str | None) -> bool:
