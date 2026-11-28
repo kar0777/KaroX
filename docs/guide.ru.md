@@ -229,6 +229,49 @@ karox run --resume last "теперь обнови changelog"
 работы, перезапускается при следующем вызове (не больше 3 раз); если удалённый сервер забыл
 сессию (перезапуск, истечение по простою), KaroX открывает новую и повторяет вызов один раз.
 
+## Скиллы, свои слэш-команды и плагины
+
+**Скилл** — папка с `SKILL.md` (формат Agent Skills, его читают Claude Code, Codex и
+OpenCode): имя, описание того, когда его применять, и инструкции; файлы рядом (скрипты,
+шаблоны) инструкции могут называть.
+
+```markdown
+---
+name: release-notes
+description: Write release notes from the git log. Use when asked for a changelog.
+---
+Write RELEASE_NOTES.md with one bullet per commit since the last tag ...
+```
+
+KaroX ищет их в `.karox/skills`, `.agents/skills` и `.claude/skills` проекта (и его
+git-корня), в установленных плагинах, затем в `~/.karox6/skills`, `~/.agents/skills` и
+`~/.claude/skills`; из одноимённых побеждает первый. В системный промпт попадают только
+имена и описания (с ограничением размера); инструкции модель загружает инструментом
+`skill`, когда задача подходит под описание. В чате `/skills [ТЕКСТ]` показывает список, а
+`/ИМЯ [АРГУМЕНТЫ]` отправляет скилл вместе с вашим сообщением (`$ARGUMENTS` в тексте
+заменяется аргументами). `karox6 skills` показывает, что найдено в текущей папке;
+`skills = false` в `config.toml` (или `KAROX_SKILLS=0`) отключает скиллы.
+
+**Свои слэш-команды** — промпты в файлах: `.karox/commands/ИМЯ.md` или
+`.claude/commands/ИМЯ.md` в проекте, `~/.karox6/commands`, `~/.claude/commands`
+(`group/name.md` становится `/group:name`). `/ИМЯ АРГУМЕНТЫ` отправляет текст файла; сама
+модель их не загружает.
+
+**Плагин** собирает скиллы, команды и MCP-серверы в одну папку (раскладка плагина Claude
+Code подходит): `skills/`, `commands/`, `.mcp.json` или `mcp.json`, по желанию
+`.claude-plugin/plugin.json`. `${CLAUDE_PLUGIN_ROOT}` (или `${KAROX_PLUGIN_ROOT}`) в команде,
+аргументах, окружении или URL сервера — это папка плагина.
+
+```bash
+karox6 plugin install https://github.com/someone/their-plugin.git   # или локальная папка
+karox6 plugin list
+karox6 plugin disable their-plugin        # enable / remove
+```
+
+Плагины лежат в `~/.karox6/plugins`; ваш собственный `mcp.json` главнее одноимённого
+сервера плагина. Установка ничего не запускает, но MCP-серверы плагина стартуют с каждым
+чатом: ставьте плагины только из источников, которым доверяете.
+
 ## KaroX как MCP-сервер
 
 `karox mcp` работает через stdio; `karox mcp --http 8765` — Streamable HTTP на

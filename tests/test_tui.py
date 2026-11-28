@@ -717,3 +717,25 @@ def test_the_models_words_stand_apart_from_the_tool_lines(tmp_path):
     between = text[words + len("Let me look first.") : tool]
     assert between.count("\n") >= 2  # a blank line before what the model ran
     assert "It says alpha." in text
+
+
+def test_skills_and_slash_commands_in_the_chat(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "nobody"))
+    monkeypatch.setenv("HOME", str(tmp_path / "nobody"))
+    ws = tmp_path / "ws"
+    skill = ws / ".karox" / "skills" / "fix-bugs"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: fix-bugs\ndescription: find and fix\n---\nHunt.\n")
+    (ws / ".karox" / "commands").mkdir()
+    (ws / ".karox" / "commands" / "ship.md").write_text("Ship $ARGUMENTS today.\n")
+    term = FakeTerm(["/skills", "/ship v2", "/fix-bugs the parser", "/fix-bug", "/quit"])
+    app, provider = make_app(tmp_path, [Turn(text="shipped"), Turn(text="fixed")], term)
+    app.config.skills = True
+    asyncio.run(app.run())
+    assert "/fix-bugs" in term.text
+    assert "/ship" in term.text
+    sent = [r.messages[-1].content for r in provider.requests]
+    assert "Ship v2 today." in sent[0]
+    assert "Hunt." in sent[1]
+    assert sent[1].endswith("Arguments: the parser")
+    assert "did you mean" in term.text  # /fix-bug is close to /fix-bugs

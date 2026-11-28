@@ -113,6 +113,7 @@ class Launcher:
             KAROX_HOME=str(self.home),
             KAROX_API_KEY="test-key",
             KAROX_MODEL_CATALOG="0",
+            KAROX_SKILLS="0",
             PYTHONPATH=str(SRC),
             TERM="xterm-256color",
         )
@@ -969,3 +970,19 @@ def test_classic_console_gets_symbols_its_fonts_have(launch: Launcher) -> None:
     screen = chat.turn("read it")
     assert "● read hello.py  √ 1 lines" in screen
     assert "✓" not in screen
+
+
+def test_skills_are_found_before_the_first_message(launch: Launcher) -> None:
+    """The chat's session starts with the first message; /skills and /NAME must not wait."""
+    folder = launch.ws / ".karox" / "skills" / "tidy-up"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: tidy-up\ndescription: tidy the project\n---\nTidy.\n", encoding="utf-8"
+    )
+    nobody = str(launch.tmp / "nobody")
+    chat = launch.start([], env=launch.env(KAROX_SKILLS="1", USERPROFILE=nobody, HOME=nobody))
+    t = chat.term
+    t.wait("Type a task")
+    t.line("/skills")
+    t.wait("/tidy-up")
+    t.wait("tidy the project")

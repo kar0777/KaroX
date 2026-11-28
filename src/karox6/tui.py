@@ -166,6 +166,12 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "Workspace & Context",
     ),
     CommandSpec(
+        "/skills",
+        "/skills [TEXT]",
+        "skills and your slash commands; /NAME [ARGS] uses one",
+        "Workspace & Context",
+    ),
+    CommandSpec(
         "/init",
         "/init [FOCUS]",
         "write AGENTS.md: this project's commands, layout and conventions",
@@ -241,6 +247,9 @@ _COMMAND_ALIASES: dict[str, str] = {
     "/exit": "leave the chat (same as /quit)",
     "/q": "leave the chat (same as /quit)",
 }
+
+# a skill or command file named like a built-in command is never reachable as /NAME
+_BUILT_IN_NAMES = frozenset([c.name for c in COMMANDS] + list(_COMMAND_ALIASES))
 
 _APPROVE_ARGS: tuple[tuple[str, str], ...] = (
     ("ask", "ask before running dangerous commands"),
@@ -1562,6 +1571,8 @@ class ChatApp:
             await self._redo()
         elif name == "/fork":
             self._fork()
+        elif name == "/skills":
+            self._show_skills(arg)
         elif name == "/init":
             focus = f"\n\nPay special attention to: {arg}" if arg else ""
             await self.turn(INIT_PROMPT + focus, label="/init" + (f" {arg}" if arg else ""))
@@ -1640,12 +1651,62 @@ class ChatApp:
             else:
                 self.show_reasoning = not self.show_reasoning
             self.write(f"reasoning {'shown' if self.show_reasoning else 'hidden'}\n")
+        elif (skill := self._skill_named(name[1:])) is not None:
+            from karox6.skills import expand
+
+            await self._ensure_session()
+            await self.turn(expand(skill, arg), label=line.strip())
         else:
             known = [spec.name for spec in COMMANDS] + list(_COMMAND_ALIASES)
+            known += [f"/{s.name}" for s in self._all_skills()]
             near = closest_command(name, known)
             meant = f"did you mean {self.paint('cyan', near)}? " if near else ""
             self.write(f"unknown command {name}; {meant}/help lists commands\n")
         return None
+
+    def _all_skills(self) -> list[Any]:
+        """Skills and slash commands found now (a skill added during the chat counts)."""
+        from karox6.skills import discover
+
+        if not self.config.skills:
+            return []
+        from karox6.core.prompt import _git_root
+
+        workspace = self.config.workspace
+        try:
+            found = discover(
+                workspace, self.config.home, git_root=_git_root(workspace), commands=True
+            )
+        except OSError:
+            return []
+        return [s for s in found if f"/{s.name}" not in _BUILT_IN_NAMES]
+
+    def _skill_named(self, name: str) -> Any:
+        low = name.lower()
+        return next((s for s in self._all_skills() if s.name == low), None)
+
+    def _show_skills(self, arg: str) -> None:
+        found = self._all_skills()
+        needle = arg.lower()
+        if needle:
+            found = [s for s in found if needle in s.name or needle in s.description.lower()]
+        if not found:
+            where = ".karox/skills, .claude/skills, ~/.karox6/skills, ~/.claude/skills"
+            self.write(f"no skills found ({where}; `karox6 plugin install` adds more)\n")
+            return
+        width = min(max(len(s.name) for s in found) + 2, 34)
+        for s in found:
+            kind = "command" if s.kind == "command" else s.source
+            screen = self._columns() if self._columns else 100
+            text = clip(s.description, max(screen - width - 16, 30))
+            self.write(
+                f"  {self.paint('cyan', ('/' + s.name).ljust(width))}"
+                f"{self.paint('muted', kind.ljust(12))} {text}\n"
+            )
+        self.write(
+            self.paint("muted", "  the model loads one when a task fits; /NAME [ARGS] sends it")
+            + "\n"
+        )
 
     async def _update(self, arg: str) -> None:
         """/update: what `karox6 update` does, with its lines in the conversation."""
@@ -2213,6 +2274,27 @@ class _WorkspaceFiles:
         return self._files
 
 
+class _Skills:
+    """Skills and slash commands for completion, looked up again every 30 s."""
+
+    def __init__(self, workspace: Path, home: Path | None, ttl_s: float = 30.0) -> None:
+        self.workspace, self.home, self.ttl_s = workspace, home, ttl_s
+        self._found: list[Any] = []
+        self._expires = 0.0
+
+    def get(self) -> list[Any]:
+        if time.monotonic() >= self._expires:
+            from karox6.skills import discover, enabled
+
+            try:
+                found = discover(self.workspace, self.home, commands=True) if enabled() else []
+            except OSError:
+                found = []
+            self._found = [s for s in found if f"/{s.name}" not in _BUILT_IN_NAMES]
+            self._expires = time.monotonic() + self.ttl_s
+        return self._found
+
+
 def _rank_commands(prefix: str) -> list[CommandSpec]:
     """Commands for what is typed after "/": names that start with it, then names that
     hold it, then those whose description has a word starting with it."""
@@ -2267,6 +2349,7 @@ def build_completer(*, workspace: Path | None = None, home: Path | None = None) 
 
     ws = workspace or Path.cwd()
     file_cache = _WorkspaceFiles(ws)
+    skill_cache = _Skills(ws, home)
 
     class _ChatCompleter(Completer):
         def get_completions(
@@ -2288,6 +2371,15 @@ def build_completer(*, workspace: Path | None = None, home: Path | None = None) 
                         display=spec.usage,
                         display_meta=spec.summary,
                     )
+                for skill in skill_cache.get():
+                    full = f"/{skill.name}"
+                    if prefix != "/" and full.startswith(prefix):
+                        yield Completion(
+                            full,
+                            start_position=-len(before),
+                            display=full,
+                            display_meta=clip(skill.description, 60),
+                        )
                 for alias, desc in _COMMAND_ALIASES.items():
                     if alias.startswith(prefix) and prefix != "/":
                         yield Completion(

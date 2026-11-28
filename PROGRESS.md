@@ -2612,3 +2612,30 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   routes without modalities did not count against "yes", redirects followed, run cost cumulative. Not
   changed: mtime+size run-file detection (ns mtimes), concurrent refresh of the digest (worst case an older
   digest for a day).
+
+### Skills, slash commands, plugins — 2026-11-28
+- The user: KaroX had no skills and no plugins at all. Now (karox6/skills.py, karox6/plugins.py):
+  - skills in the Agent Skills format (SKILL.md with name + description) from the project
+    (.karox/.agents/.claude skills), plugins, ~/.karox6/skills, ~/.agents/skills, ~/.claude/skills;
+    names and descriptions in the system prompt (bounded 12k chars), bodies loaded by the `skill` tool;
+    /skills and /NAME [ARGS] in the chat (completion included), `karox6 skills`; off with skills = false /
+    KAROX_SKILLS=0. SessionConfig.skills defaults to off (tests, library use); the CLI turns it on.
+  - slash commands: .karox/commands, .claude/commands, ~/.karox6/commands, ~/.claude/commands (*.md,
+    group/name.md -> /group:name, $ARGUMENTS); never shown to the model.
+  - plugins in ~/.karox6/plugins (Claude Code layout works: skills/, commands/, .mcp.json,
+    .claude-plugin/plugin.json; ${CLAUDE_PLUGIN_ROOT}); `karox6 plugin install|list|enable|disable|remove`;
+    their MCP servers join the user's mcp.json (the user's wins on a name).
+- Live on Dahl (GLM-5.3-Flash, headless): a project skill was loaded and followed exactly (release notes
+  header); a plugin's skill + its MCP server (fake_mcp_server) answered 1234+4321 through mcp__calc__add.
+  All 46 of the user's ~/.claude/skills parse. Perf gate: start 123 ms, RSS 30.5 MiB.
+- Bug found live: the headless tool line showed the result's last line, often `</content>` or `}`; it now
+  skips closing tags and bracket lines.
+- Live TUI on Dahl (real `karox6 chat` in a pseudo-terminal): /skills said "no skills found" until the
+  first message (the chat's placeholder config had skills off; fixed, ConPTY test); a slash command was
+  sent wrapped as a skill, so the model called the skill tool for it and got an error (commands are now
+  sent as written). Dahl answered 503 "no escrow capacity" for minutes: the retry ladder held the turn.
+- Codex review (gpt-6.1-terra, $0.06): 7 findings, all fixed: install could delete a folder another
+  process created (now a hidden staging folder + rename), copying a folder that holds the plugins folder,
+  an indented `---` closed the front matter, `# comments` and escapes in front matter, a user skill hid a
+  project command of the same name (now project > plugin > user across both), skills named like built-in
+  commands were listed but unreachable (now hidden), the skill tool's full listing was unbounded.

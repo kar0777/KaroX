@@ -226,6 +226,49 @@ with a warning that quotes the end of its stderr. A local server that crashes mi
 restarted on its next call (up to 3 times); when a remote server forgets the session (a
 restart, an idle expiry), KaroX opens a new one and repeats the call once.
 
+## Skills, slash commands and plugins
+
+A **skill** is a folder with a `SKILL.md` (the Agent Skills format Claude Code, Codex and
+OpenCode use): a name, a description of when to use it, and instructions; files beside it
+(scripts, templates) may be named in the instructions.
+
+```markdown
+---
+name: release-notes
+description: Write release notes from the git log. Use when asked for a changelog.
+---
+Write RELEASE_NOTES.md with one bullet per commit since the last tag ...
+```
+
+KaroX looks in `.karox/skills`, `.agents/skills` and `.claude/skills` of the project (and its
+git root), in installed plugins, then in `~/.karox6/skills`, `~/.agents/skills` and
+`~/.claude/skills`; the first skill of a name wins. Only names and descriptions go into the
+system prompt (bounded); the model loads a skill's instructions with the `skill` tool when a
+task fits its description. In the chat `/skills [TEXT]` lists them and `/NAME [ARGS]` sends a
+skill with your message (`$ARGUMENTS` in its text becomes ARGS). `karox6 skills` lists what
+it finds in the current folder; `skills = false` in `config.toml` (or `KAROX_SKILLS=0`)
+turns skills off.
+
+**Slash commands** are prompts you keep as files: `.karox/commands/NAME.md` or
+`.claude/commands/NAME.md` in the project, `~/.karox6/commands`, `~/.claude/commands`
+(`group/name.md` becomes `/group:name`). `/NAME ARGS` sends the file's text; the model
+never loads them on its own.
+
+A **plugin** bundles skills, commands and MCP servers in one folder (a Claude Code plugin's
+layout works): `skills/`, `commands/`, `.mcp.json` or `mcp.json`, optional
+`.claude-plugin/plugin.json`. `${CLAUDE_PLUGIN_ROOT}` (or `${KAROX_PLUGIN_ROOT}`) in a
+server's command, arguments, environment or URL is the plugin's folder.
+
+```bash
+karox6 plugin install https://github.com/someone/their-plugin.git   # or a local folder
+karox6 plugin list
+karox6 plugin disable their-plugin        # enable / remove
+```
+
+Plugins live in `~/.karox6/plugins`; your own `mcp.json` wins over a plugin's server of the
+same name. Installing a plugin runs nothing, but its MCP servers start with every chat:
+install plugins only from sources you trust.
+
 ## KaroX as an MCP server
 
 `karox mcp` serves KaroX over stdio; `karox mcp --http 8765` serves Streamable HTTP on

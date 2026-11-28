@@ -54,6 +54,7 @@ SETTINGS: dict[str, tuple[type, ...]] = {
     "command_wait_cap": (int,),
     "update_check": (bool,),
     "model_catalog": (bool,),
+    "skills": (bool,),
     "update_repo": (str,),
     "update_branch": (str,),
     "theme": (str,),

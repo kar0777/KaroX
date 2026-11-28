@@ -686,7 +686,10 @@ class ServerSkipped(str):
 
 
 async def load_mcp_tools(
-    path: Path, *, warn: Callable[[str], object] | None = None
+    path: Path | None,
+    *,
+    warn: Callable[[str], object] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> tuple[list[McpTool], list[McpServerHandle]]:
     """Connect every configured server; return their tools and handles (close them later).
 
@@ -695,12 +698,16 @@ async def load_mcp_tools(
     to ``warn`` as a :class:`ServerSkipped` and left out.
     """
     report = warn or sys.stderr.write
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError(f"{path}: the MCP config must be a JSON object")
-    servers = data.get("mcpServers") or data.get("servers") or {}
-    if not isinstance(servers, dict):
-        raise ValueError(f"{path}: 'mcpServers' must be an object")
+    servers: dict[str, Any] = {}
+    if path is not None:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(f"{path}: the MCP config must be a JSON object")
+        servers = data.get("mcpServers") or data.get("servers") or {}
+        if not isinstance(servers, dict):
+            raise ValueError(f"{path}: 'mcpServers' must be an object")
+    # servers a plugin brings; the user's own config wins on a name both use
+    servers = {**(extra or {}), **servers}
     connected: list[McpServerHandle] = []
 
     async def one(name: str, spec: Any) -> None:

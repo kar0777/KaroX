@@ -38,6 +38,7 @@ class SessionConfig:
     system_append: str | None = None  # appended after the base prompt (A/B variants, users)
     subagents: bool = False  # offer the `agent` tool (M5, off until it wins an A/B)
     code_mode: bool = False  # offer `run_code` (M5, off until it wins an A/B)
+    skills: bool = False  # list installed skills and offer the `skill` tool (CLI: on)
     copy_notes: bool = False  # edit lists other copies of replaced code (off until A/B)
     command_wait_cap_s: int | None = None  # foreground wait cap per command (off until A/B)
     wrap_up_steps: int | None = None  # remind about long runs (off: batch B1 lost its A/B)

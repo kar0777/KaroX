@@ -180,6 +180,14 @@ class Session:
             from karox6.tools.code import RunCodeTool
 
             self.tools.append(RunCodeTool(lambda: self._tool_map))
+        self.skills: list[Any] = []
+        if config.skills and tools is None:
+            from karox6.core.prompt import _git_root
+            from karox6.skills import SkillTool, discover
+
+            self.skills = discover(self.workspace, config.home, git_root=_git_root(self.workspace))
+            if any(s.kind == "skill" for s in self.skills):
+                self.tools.append(SkillTool(self.skills))
         self._subagents = 0
         self._tool_map = {t.name: t for t in self.tools}
         self.session_id = session_id or new_session_id()
@@ -197,6 +205,10 @@ class Session:
             from karox6.tools.code import CODE_MODE_APPEND
 
             append = "\n\n".join(p for p in (append, CODE_MODE_APPEND) if p)
+        if "skill" in self._tool_map:
+            from karox6.skills import listing
+
+            append = "\n\n".join(p for p in (append, listing(self.skills)) if p)
         self.system_prompt = build_system_prompt(
             self.workspace, self.shell, base=config.system_prompt, append=append
         )

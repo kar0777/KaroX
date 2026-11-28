@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
@@ -302,6 +303,22 @@ def _parser(settings: dict[str, Any] | None = None) -> argparse.ArgumentParser:
     update.add_argument("--repo", default=None, help="git repository to update from")
     update.add_argument("--branch", default=None, help="branch of that repository")
 
+    plugin = sub.add_parser(
+        "plugin", help="install and manage plugins (skills, slash commands, MCP servers)"
+    )
+    plugin_sub = plugin.add_subparsers(dest="plugin_command", required=True)
+    plugin_sub.add_parser("list", help="the installed plugins and what each brings")
+    add = plugin_sub.add_parser("install", help="copy a plugin folder or clone a git repository")
+    add.add_argument("source", help="a local folder or a git URL")
+    add.add_argument("--name", default=None, help="the name to install it under")
+    for verb, text in (
+        ("remove", "delete an installed plugin"),
+        ("enable", "turn a disabled plugin back on"),
+        ("disable", "keep a plugin installed but unused"),
+    ):
+        plugin_sub.add_parser(verb, help=text).add_argument("name")
+    sub.add_parser("skills", help="list the skills and slash commands KaroX finds here")
+
     debug = sub.add_parser("debug", help="diagnostics for developers")
     debug_sub = debug.add_subparsers(dest="debug_command", required=True)
     debug_sub.add_parser("rss", help="load the headless stack and print resident memory (MiB)")
@@ -495,9 +512,64 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _mcp(args, parser, argv)
     if args.command == "update":
         return _update(args, settings)
+    if args.command == "plugin":
+        return _plugin(args)
+    if args.command == "skills":
+        return _skills_list()
     if args.command == "debug" and args.debug_command == "rss":
         return _debug_rss()
     parser.print_help()
+    return 0
+
+
+def _plugin(args: argparse.Namespace) -> int:
+    from karox6 import plugins
+    from karox6.settings import default_home
+
+    home = default_home()
+    verb = args.plugin_command
+    try:
+        if verb == "list":
+            found = plugins.plugins(home)
+            if not found:
+                print(f"No plugins in {plugins.root(home)} (karox6 plugin install SOURCE).")
+            for p in found:
+                state = "" if p.enabled else " (disabled)"
+                what = ", ".join(p.parts()) or "nothing usable"
+                version = f" {p.version}" if p.version else ""
+                print(f"{p.name}{version}{state}: {what}")
+                if p.description:
+                    print(f"    {p.description}")
+            return 0
+        if verb == "install":
+            p = plugins.install(home, args.source, name=args.name)
+            print(f"Installed {p.name}: {', '.join(p.parts())} ({p.folder}).")
+            print("New chats use it; a chat already open picks it up after a restart.")
+            return 0
+        if verb == "remove":
+            p = plugins.remove(home, args.name)
+            print(f"Removed {p.name}.")
+            return 0
+        p = plugins.set_enabled(home, args.name, verb == "enable")
+        print(f"{p.name} is {'enabled' if p.enabled else 'disabled'}.")
+        return 0
+    except (plugins.PluginError, OSError, ValueError) as exc:
+        sys.stderr.write(f"karox: {exc}\n")
+        return 1
+
+
+def _skills_list() -> int:
+    from karox6.core.prompt import _git_root
+    from karox6.settings import default_home
+    from karox6.skills import discover
+
+    workspace = Path.cwd()
+    found = discover(workspace, default_home(), git_root=_git_root(workspace), commands=True)
+    if not found:
+        print("No skills or slash commands found (see `karox6 --help` and docs/guide.md).")
+    for s in found:
+        mark = "/" if s.kind == "command" else ""
+        print(f"{mark}{s.name} [{s.source}] {s.description[:100]}")
     return 0
 
 
@@ -794,6 +866,8 @@ async def _chat_async(args: argparse.Namespace, splash: Any = None) -> int:
                 home=home,
                 context_window=args.context_window,
                 context_limit=args.context_limit,
+                # /skills and /NAME work before the session starts (the first message)
+                skills=_skills_on(args),
             ),
             provider=None,
             read_line=read_line,
@@ -983,11 +1057,18 @@ def _session_config(
         finish_gate=args.finish_gate,
         progress_guard=args.progress_guard,
         code_mode=args.code_mode,
+        skills=_skills_on(args),
         copy_notes=args.copy_notes,
         command_wait_cap_s=_positive(args.command_wait_cap),
         wrap_up_steps=_positive(args.wrap_up_steps),
         deadline_notice_s=_positive(args.deadline_notice),
     )
+
+
+def _skills_on(args: argparse.Namespace) -> bool:
+    from karox6.skills import enabled
+
+    return enabled(getattr(args, "skills", None))
 
 
 def _local_url(url: str | None) -> bool:
@@ -1242,12 +1323,17 @@ async def _mcp_tools(
     """Tools of the configured external MCP servers (none unless a config exists)."""
     if args.no_mcp:
         return [], []
-    path = args.mcp_config or home / "mcp.json"
-    if args.mcp_config is None and not path.is_file():
+    from karox6 import plugins
+
+    path: Path | None = args.mcp_config or home / "mcp.json"
+    if args.mcp_config is None and path is not None and not path.is_file():
+        path = None
+    extra = plugins.mcp_servers(home, warn=warn or sys.stderr.write)
+    if path is None and not extra:
         return [], []
     from karox6.mcp.client import load_mcp_tools
 
-    tools, handles = await load_mcp_tools(path, warn=warn)
+    tools, handles = await load_mcp_tools(path, warn=warn, extra=extra)
     return list(tools), list(handles)
 
 
@@ -1292,6 +1378,9 @@ class _JsonRenderer:
         sys.stdout.flush()
 
 
+_CLOSING_TAG = re.compile(r"</[\w-]+>|[\]})]+,?")  # a closing tag or bracket line
+
+
 class _TextRenderer:
     """Plain headless output: assistant text on stdout, tool activity on stderr."""
 
@@ -1327,8 +1416,11 @@ class _TextRenderer:
             sys.stderr.write(f"> {data['name']} {_brief(data['arguments'])}\n")
         elif kind == "tool_finished":
             mark = "x" if data["is_error"] else "ok"
-            first = data["output"].strip().splitlines()[-1:] if data["output"].strip() else [""]
-            sys.stderr.write(f"  [{mark} {data['duration_ms']} ms] {first[0][:160]}\n")
+            # the last line says how it ended ([exit code: N]); a closing tag says nothing
+            lines = [ln for ln in data["output"].strip().splitlines() if ln.strip()]
+            told = [ln for ln in lines if not _CLOSING_TAG.fullmatch(ln.strip())]
+            last = (told or lines or [""])[-1]
+            sys.stderr.write(f"  [{mark} {data['duration_ms']} ms] {last[:160]}\n")
         elif kind in ("notice", "retry", "error", "compacted", "approval_requested"):
             sys.stderr.write(f"[{kind}] {json.dumps(data, ensure_ascii=False)[:300]}\n")
         elif kind == "run_finished":

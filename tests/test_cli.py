@@ -281,3 +281,15 @@ def test_update_check_env_one_overrides_a_config_false(tmp_path, monkeypatch):
     asyncio.run(start())
     assert done.wait(timeout=10)  # the daemon thread fetched despite update_check=false
     assert app.update_source == update.Source()  # no repo/branch in config or env
+
+
+def test_headless_tool_line_skips_closing_tags_and_brackets(capsys):
+    from karox6.cli import _TextRenderer
+    from karox6.core.events import ToolFinished
+
+    render = _TextRenderer()
+    for output in ("<content>\nline one\n</content>", '{\n  "sum": 5\n}', "[exit code: 0]"):
+        render(ToolFinished(call_id="c", name="t", output=output, is_error=False, duration_ms=1))
+    lines = capsys.readouterr().err.splitlines()
+    shown = [line.split("] ", 1)[1] for line in lines]
+    assert shown == ["line one", '  "sum": 5', "[exit code: 0]"]

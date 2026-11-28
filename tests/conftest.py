@@ -25,3 +25,4 @@ def _isolated_home(tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp("karox_home")
     monkeypatch.setenv("KAROX_HOME", str(home))
     monkeypatch.setenv("KAROX_MODEL_CATALOG", "0")  # no test downloads models.dev
+    monkeypatch.setenv("KAROX_SKILLS", "0")  # the user's own skills stay out of tests
