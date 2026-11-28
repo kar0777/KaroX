@@ -71,7 +71,7 @@ from karox6.core.store import (
     SessionStore,
     new_session_id,
 )
-from karox6.models import ModelInfo, model_info, rejects_images, remember
+from karox6.models import ModelInfo, image_limit, model_info, rejects_images, remember
 from karox6.providers.base import (
     UNAVAILABLE_STATUSES,
     Delta,
@@ -126,6 +126,7 @@ EMPTY_REPLY_NOTICE = (
 )
 MAX_EMPTY_REPLIES = 3  # per run; after that the run ends with the provider's error
 MAX_STOP_BLOCKS = 3  # a Stop hook may send the model back this many times per run
+MAX_RECOVERIES = 3  # refusals the session fixes and resends, per step
 MAX_SERVER_SHRINKS = 2  # per run: requests cut down after a server error on every retry
 FINAL_CALL_STEPS = 30  # after the wrap-up notice, ask for the final answer
 WRAP_UP_NOTICE = (
@@ -198,6 +199,8 @@ class Session:
             if found:
                 self.hooks = Hooks(found, session_id="", workspace=self.workspace, shell=self.shell)
         self._session_started = False
+        self._retired_pictures: set[str] = set()  # pictures no longer resent (_recent_pictures)
+        self._picture_cap = MAX_LIVE_PICTURES  # lowered when a provider says fewer
         self._start_context: list[str] = []  # SessionStart's, until a prompt is accepted
         self._hook_halt = ""  # a hook said {"continue": false}: why
         self._subagents = 0
@@ -380,32 +383,39 @@ class Session:
                     self._notice("finish_gate_cap", FINISH_GATE_CAP_NOTICE, emit)
                     gate_cap_notified = True
                 steps += 1
-                try:
-                    response = await self._call_model(
-                        steps, started, emit, allow_tools=not cap_final
-                    )
-                except ProviderError as exc:
-                    if exc.code == "empty_response" and empties < MAX_EMPTY_REPLIES:
-                        empties += 1
-                        self._notice("empty", EMPTY_REPLY_NOTICE, emit)
-                        continue
-                    # The conversation outgrew what the provider accepts (our estimate was
-                    # low, or the route's real window is smaller than configured): shrink
-                    # it once and retry instead of losing the run.
-                    if self._images_refused(exc, emit):
-                        recovered = True  # the same request again, pictures as notes
-                    elif exc.code == "context_window":
-                        recovered = await self._recover_overflow(emit)
-                    else:
-                        recovered = shrinks < MAX_SERVER_SHRINKS and self._shrink_for_server(
-                            exc, emit
+                empty_again = overflowed = False
+                for recovery in range(MAX_RECOVERIES + 1):
+                    try:
+                        response = await self._call_model(
+                            steps, started, emit, allow_tools=not cap_final
                         )
-                        shrinks += recovered
-                    if not recovered:
-                        raise
-                    response = await self._call_model(
-                        steps, started, emit, allow_tools=not cap_final
-                    )
+                        break
+                    except ProviderError as exc:
+                        if exc.code == "empty_response" and empties < MAX_EMPTY_REPLIES:
+                            empties += 1
+                            self._notice("empty", EMPTY_REPLY_NOTICE, emit)
+                            empty_again = True
+                            break
+                        if recovery == MAX_RECOVERIES:
+                            raise
+                        # The request was refused for something the session can change
+                        # (too many pictures, pictures at all, the conversation outgrew
+                        # what the provider accepts): change it and send again; a
+                        # recovery may meet the next refusal (pictures, then the window).
+                        if self._too_many_pictures(exc, emit) or self._images_refused(exc, emit):
+                            recovered = True  # the same request, (fewer) pictures as notes
+                        elif exc.code == "context_window":  # once: twice ends the run
+                            recovered = not overflowed and await self._recover_overflow(emit)
+                            overflowed = True
+                        else:
+                            recovered = shrinks < MAX_SERVER_SHRINKS and (
+                                self._shrink_for_server(exc, emit)
+                            )
+                            shrinks += recovered
+                        if not recovered:
+                            raise
+                if empty_again:
+                    continue
                 if response is None:
                     status, reason = "limit", f"time limit {self.config.max_seconds:.0f}s"
                     break
@@ -730,15 +740,19 @@ class Session:
             )
         )
 
+    def _wire(self, messages: list[Message]) -> list[Message]:
+        """The conversation as it is sent: replayed reasoning, and pictures only as many
+        as go (none for a blind model, the newest otherwise, tool pictures after their
+        results). Pictures from tool results go to every model not known to refuse them:
+        a provider that refuses is remembered (_images_refused) and the request goes
+        again without them, while withholding them blinds a model that sees."""
+        messages = self._replay_view(messages)
+        blind = self.model().vision is False
+        messages = _without_images(messages) if blind else self._recent_pictures(messages)
+        return _tool_pictures(messages, show=not blind)
+
     def _request(self, *, allow_tools: bool = True) -> ModelRequest:
-        messages = self._replay_view(self.messages)
-        vision = self.model().vision
-        if vision is False:
-            messages = _without_images(messages)
-        # Pictures from tool results go to every model not known to refuse them: a
-        # provider that refuses is remembered (_images_refused) and the request goes
-        # again without them, while withholding them blinds a model that sees.
-        messages = _tool_pictures(messages, show=vision is not False)
+        messages = self._wire(self.messages)
         return ModelRequest(
             model=self.config.model,
             system=self.system_prompt,
@@ -749,6 +763,40 @@ class Session:
             reasoning_effort=self._effort or self.config.reasoning_effort,
             extra_body=dict(self.config.extra_body),
         )
+
+    def _recent_pictures(self, messages: list[Message]) -> list[Message]:
+        """Only the newest pictures go out again: every picture in the history was sent
+        with every request (50 screenshots made each request tens of MB and thousands of
+        tokens). Past MAX_LIVE_PICTURES the oldest are retired down to KEEP_PICTURES at
+        once, so the request prefix (and a provider's prompt cache) stays the same between
+        trims. The stored conversation keeps them all."""
+        live = [
+            str(image.get("path"))
+            for m in messages
+            for image in m.images
+            if str(image.get("path")) not in self._retired_pictures
+        ]
+        cap = self._picture_cap
+        if len(live) > cap:
+            keep = min(KEEP_PICTURES, max(1, cap // 2))
+            self._retired_pictures.update(live[: len(live) - keep])
+        if not self._retired_pictures:
+            return messages
+        out: list[Message] = []
+        for m in messages:
+            gone = [i for i in m.images if str(i.get("path")) in self._retired_pictures]
+            if not gone:
+                out.append(m)
+                continue
+            notes = " ".join(
+                image_note(i).replace(
+                    "is no longer available", "not resent (older picture; take a new one)"
+                )
+                for i in gone
+            )
+            kept = [i for i in m.images if str(i.get("path")) not in self._retired_pictures]
+            out.append(replace(m, images=kept, content=f"{m.content}\n{notes}".strip()))
+        return out
 
     def _ease_effort(self, emit: Callable[[ev.Event], None]) -> None:
         """After a reply that spent the whole output limit on reasoning: ask for one step
@@ -1228,6 +1276,22 @@ class Session:
             self._last_input_tokens = self._last_cached_tokens = 0
             self._chars_since_measure = 0
 
+    def _too_many_pictures(self, exc: ProviderError, emit: Callable[[ev.Event], None]) -> bool:
+        """The provider takes at most N pictures per request: resend fewer (the model
+        still sees; nothing is remembered as "no pictures")."""
+        limit = image_limit(exc.code, str(exc.args[0]))
+        if limit is None or limit < 1 or self._picture_cap <= max(1, limit // 2):
+            return False
+        self._picture_cap = max(1, limit // 2)
+        emit(
+            ev.Notice(
+                kind="no_images",
+                text=f"the provider takes at most {limit} pictures per request: only the "
+                f"newest {self._picture_cap} are resent",
+            )
+        )
+        return True
+
     def _images_refused(self, exc: ProviderError, emit: Callable[[ev.Event], None]) -> bool:
         """The provider said the model takes no pictures: remember it (for this model,
         in the KaroX home) and send without them. Once: a second refusal is an error."""
@@ -1570,7 +1634,7 @@ class Session:
         # conversation plus one message (as a "turn" it dropped all reasoning, the prefix
         # changed and the whole head was billed at the full price).
         ask = Message("user", COMPACTION_INSTRUCTION, meta={"kind": "compaction_request"})
-        request.messages = self._replay_view([*head, ask])
+        request.messages = self._wire([*head, ask])  # the same pictures rule as every step
         # Tool schemas stay in the first try so the cached prefix is reused; a model that
         # answers with a tool call instead of text gets one retry without tools.
         summary = await self._summary_call(request, emit)
@@ -1698,6 +1762,8 @@ def _without_images(messages: list[Message]) -> list[Message]:
 
 
 MAX_TOOL_PICTURES = 4  # per tool result
+MAX_LIVE_PICTURES = 8  # pictures resent with each request before the oldest are retired
+KEEP_PICTURES = 4  # how many stay after a trim
 
 
 def _tool_pictures(messages: list[Message], *, show: bool) -> list[Message]:

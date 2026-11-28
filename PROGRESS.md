@@ -2652,3 +2652,18 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   `hooks = false` / KAROX_HOOKS=0. Codex review (gpt-6.1-terra, $0.07): 9 findings, all fixed.
 - A vision refusal is now learned per server (`learned_by_server` in models.json): a gateway that
   refuses pictures no longer marks the model blind on every other route.
+- page_screenshot (tools/browser.py): the installed Chrome/Edge headless on the real GPU via its
+  CLI (no Playwright): one at a time, below-normal priority, 90 s, Windows job object (kills the
+  whole tree, 2 GB cap), POSIX process group, bounded stderr, profile removed; console messages
+  and uncaught errors in the result. The aquarium session showed why: the agent built its own
+  Playwright with software WebGL (about 1 s a frame) and spent hundreds of steps on pixel stats.
+- Every picture of the history was resent with every request (21 screenshots = 9 MB a request);
+  now the newest 8, trimmed to 4 at once (stable prompt-cache prefix), also for compaction.
+- Mistral's "Total number of images exceeds the maximum allowed of 20" was taken for "this model
+  takes no pictures" and blinded DeepSeek V4.1 Flash for the rest of the aquarium session (and
+  every later one: it was remembered). Limits are now told apart; the cap drops to half the limit.
+- A recovered refusal (pictures, window) may meet the next refusal on the resend: up to 3 per step.
+- Codex review (gpt-6.1-terra, $0.07): 9 findings; fixed the stderr growth, children outliving the
+  browser (asyncio's proc.wait() waits for pipes a child holds: now the exit code is polled),
+  double cancel, unclosed pipe transport, compaction resending every picture, the retry, regexes.
+  Not changed: the browser reaches what the shell already reaches (localhost, files).

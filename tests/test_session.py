@@ -940,3 +940,47 @@ def test_an_empty_refused_reply_ends_the_run_and_is_not_kept(tmp_path):
     assert done.status == "error"
     assert "content_filter" in done.reason
     assert not [m for m in session.messages if m.role == "assistant"]
+
+
+def test_only_the_newest_pictures_are_resent(tmp_path):
+    from karox6.core import session as session_mod
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    session = Session(
+        SessionConfig(model="gpt-5", workspace=ws, home=tmp_path / "h"),
+        ScriptedProvider([Turn(text="ok")]),
+    )
+
+    def add_shot(n: int) -> None:
+        picture = tmp_path / f"shot{n}.png"
+        picture.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes([n]))
+        call = ToolCall(id=f"c{n}", name="page_screenshot", arguments="{}")
+        session.messages.append(Message("assistant", "", tool_calls=[call]))
+        session.messages.append(
+            Message(
+                "tool",
+                f"shot {n}",
+                tool_call_id=f"c{n}",
+                name="page_screenshot",
+                images=[{"path": str(picture), "media_type": "image/png"}],
+            )
+        )
+
+    def sent() -> list[str]:
+        request = session._request()
+        return [i["path"].rsplit("shot", 1)[1] for m in request.messages for i in m.images]
+
+    session.messages.append(Message("user", "build it"))
+    for n in range(session_mod.MAX_LIVE_PICTURES):
+        add_shot(n)
+    assert len(sent()) == session_mod.MAX_LIVE_PICTURES  # all, up to the limit
+    add_shot(98)
+    after_trim = sent()
+    assert len(after_trim) == session_mod.KEEP_PICTURES
+    assert after_trim[-1] == "98.png"
+    add_shot(99)
+    assert sent()[:-1] == after_trim  # the prefix stays put until the next trim
+    notes = [m.content for m in session._request().messages if "not resent" in m.content]
+    assert notes  # the model is told an older picture was left out
+    assert sum(len(m.images) for m in session.messages) == session_mod.MAX_LIVE_PICTURES + 2

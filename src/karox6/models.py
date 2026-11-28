@@ -239,8 +239,35 @@ _NO_IMAGES = re.compile(
 )
 
 
+# A limit on the pictures themselves (how many, how large), not "takes none".
+_IMAGE_LIMIT = re.compile(
+    r"(?:too many|number of|count of)\s+(?:\w+\s+){0,2}images?"
+    r"|images?\b[^.;]{0,60}?(?:exceed|maximum|max\b|at most|too large|too big|limit|up to)",
+    re.IGNORECASE,
+)
+_IMAGE_COUNT = re.compile(
+    r"(?:maximum(?: allowed)?(?: of)?|max(?:imum)?|at most|up to|limit(?: of| is)?)\s*:?\s*"
+    r"(\d{1,3})\b(?!\s*(?:[kmg]i?b|bytes?|px|pixels?|tokens?|%|x\d))",
+    re.IGNORECASE,
+)
+
+
 def rejects_images(code: str, message: str) -> bool:
-    """A provider error that says the model does not take pictures."""
-    return code in ("bad_request", "unsupported", "invalid_request") and bool(
-        _NO_IMAGES.search(message)
+    """A provider error that says the model does not take pictures (not one about how
+    many or how large: Mistral answers "Total number of images exceeds the maximum
+    allowed of 20", and that model sees fine)."""
+    return (
+        code in ("bad_request", "unsupported", "invalid_request")
+        and bool(_NO_IMAGES.search(message))
+        and not _IMAGE_LIMIT.search(message)
     )
+
+
+def image_limit(code: str, message: str) -> int | None:
+    """How many pictures a request may hold, from a provider error about too many."""
+    if code not in ("bad_request", "invalid_request") or "image" not in message.lower():
+        return None
+    if not re.search(r"number|too many|count|images? (?:per|in)", message, re.IGNORECASE):
+        return None
+    match = _IMAGE_COUNT.search(message)
+    return int(match.group(1)) if match else None

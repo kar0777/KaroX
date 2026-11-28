@@ -27,3 +27,4 @@ def _isolated_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("KAROX_MODEL_CATALOG", "0")  # no test downloads models.dev
     monkeypatch.setenv("KAROX_SKILLS", "0")  # the user's own skills stay out of tests
     monkeypatch.setenv("KAROX_HOOKS", "0")  # and so do their hooks
+    monkeypatch.setenv("KAROX_BROWSER", "0")  # the same tool set on every machine

@@ -115,6 +115,7 @@ class Launcher:
             KAROX_MODEL_CATALOG="0",
             KAROX_SKILLS="0",
             KAROX_HOOKS="0",
+            KAROX_BROWSER="0",
             PYTHONPATH=str(SRC),
             TERM="xterm-256color",
         )

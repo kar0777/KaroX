@@ -270,6 +270,21 @@ Plugins live in `~/.karox6/plugins`; your own `mcp.json` wins over a plugin's se
 same name. Installing a plugin runs nothing, but its MCP servers start with every chat:
 install plugins only from sources you trust.
 
+## Looking at web pages
+
+When Chrome, Edge, Chromium or Brave is installed, the agent has a `page_screenshot` tool:
+it opens an `.html` file of the workspace (with an optional `?query` or `#hash`) or an
+http(s) URL in a headless browser on your GPU, lets the page run for `wait_ms` of page
+time, and returns the picture with the page's console messages and uncaught errors. One
+browser at a time, at below-normal priority, at most 90 seconds and 2 GB (Windows) per
+call; everything it started is killed and its throwaway profile deleted afterwards.
+`KAROX_BROWSER=<path>` picks the browser, `KAROX_BROWSER=0` turns the tool off.
+
+Only the newest 8 pictures of a conversation are sent again with each request (older ones
+become a line of text; the session keeps them all), and a provider's limit on pictures per
+request ("at most 20 images") lowers that number instead of being taken for "this model
+sees nothing".
+
 ## Hooks
 
 Hooks are your own commands that run at fixed points of the agent loop, in the Claude Code

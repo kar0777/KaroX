@@ -6,7 +6,7 @@ import json
 import pytest
 
 from karox6.core.session import Session, SessionConfig
-from karox6.models import model_info, rejects_images, remember
+from karox6.models import image_limit, model_info, rejects_images, remember
 from karox6.providers.base import ProviderError
 from karox6.providers.scripted import ScriptedProvider, Turn
 
@@ -71,6 +71,35 @@ def test_rejects_images():
     assert rejects_images("bad_request", "Invalid content type: image_url")
     assert not rejects_images("bad_request", "max_tokens too large")
     assert not rejects_images("rate_limit", "image quota")
+    mistral = "Total number of images exceeds the maximum allowed of 20."
+    assert not rejects_images("bad_request", mistral)  # too many is not "takes none"
+    assert image_limit("bad_request", mistral) == 20
+    assert image_limit("bad_request", "Too many images: at most 5 images per request") == 5
+    assert image_limit("bad_request", "image too large (max 5 MB)") is None
+    assert image_limit("bad_request", "this model does not support image input") is None
+    assert image_limit("bad_request", "too many images; max 5 MB") is None  # a size
+    # "takes none" with an unrelated limit in the same message is still "takes none"
+    assert rejects_images("bad_request", "image input is unsupported; max tokens is 4096")
+    assert not rejects_images("bad_request", "image exceeds the maximum size of 5 MB")
+
+
+def test_a_picture_limit_resends_fewer_and_learns_nothing(tmp_path):
+    from karox6.core import session as session_mod
+
+    limit = ProviderError("bad_request", "Total number of images exceeds the maximum allowed of 6.")
+    calls = [("shot", {})] * session_mod.MAX_TOOL_PICTURES
+    provider = ScriptedProvider(
+        [Turn(calls=calls), Turn(calls=calls), Turn(error=limit), Turn(text="done")]
+    )
+    home = tmp_path / "h"
+    config = SessionConfig(model="claude-haiku-5-5", workspace=tmp_path, home=home)
+    session = Session(config, provider, tools=[_picture_tool(tmp_path)])
+    events = _run(session, "look", None)
+    assert events[-1].status == "completed"
+    sent = [sum(len(m.images) for m in r.messages) for r in provider.requests]
+    assert sent[-1] <= 3  # half the provider's limit after the refusal
+    assert any("at most 6 pictures" in getattr(e, "text", "") for e in events)
+    assert model_info("claude-haiku-5-5", home).vision is not False  # still sees
 
 
 def _picture(tmp_path):

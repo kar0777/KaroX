@@ -28,6 +28,11 @@ def build_tools(shell: ShellInfo, *, apply_patch: bool = False) -> list[Tool]:
         from karox6.tools.apply_patch import ApplyPatchTool
 
         tools.insert(4, ApplyPatchTool())
+    from karox6.tools.browser import PageScreenshotTool, find_browser
+
+    browser = find_browser()  # file checks only; KAROX_BROWSER=0 turns the tool off
+    if browser:
+        tools.append(PageScreenshotTool(browser))
     return tools
 
 
