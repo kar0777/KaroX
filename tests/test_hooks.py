@@ -329,7 +329,7 @@ def test_a_timeout_kills_what_the_hook_started(tmp_path):
         "subprocess.run([sys.executable, '-c', 'import time; time.sleep(60)'])\n",
     )
     _hooks_file(tmp_path / "home", {"PreToolUse": _one(child, timeout=1)})
-    session, provider = _session(
+    session, _ = _session(
         tmp_path, [Turn(calls=[("bash", {"command": "echo hi"})]), Turn(text="ok")]
     )
     began = time.monotonic()

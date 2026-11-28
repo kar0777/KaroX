@@ -10,7 +10,6 @@ import argparse
 import contextlib
 import json
 import os
-import re
 import sys
 from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
@@ -1385,9 +1384,6 @@ class _JsonRenderer:
         sys.stdout.flush()
 
 
-_CLOSING_TAG = re.compile(r"</[\w-]+>|[\]})]+,?")  # a closing tag or bracket line
-
-
 class _TextRenderer:
     """Plain headless output: assistant text on stdout, tool activity on stderr."""
 
@@ -1422,12 +1418,12 @@ class _TextRenderer:
         if kind == "tool_started":
             sys.stderr.write(f"> {data['name']} {_brief(data['arguments'])}\n")
         elif kind == "tool_finished":
+            from karox6.core.digest import outcome
+            from karox6.core.events import ToolFinished
+
             mark = "x" if data["is_error"] else "ok"
-            # the last line says how it ended ([exit code: N]); a closing tag says nothing
-            lines = [ln for ln in data["output"].strip().splitlines() if ln.strip()]
-            told = [ln for ln in lines if not _CLOSING_TAG.fullmatch(ln.strip())]
-            last = (told or lines or [""])[-1]
-            sys.stderr.write(f"  [{mark} {data['duration_ms']} ms] {last[:160]}\n")
+            told = outcome(event, 160) if isinstance(event, ToolFinished) else ""  # as the chat
+            sys.stderr.write(f"  [{mark} {data['duration_ms']} ms] {told}\n")
         elif kind in ("notice", "retry", "error", "compacted", "approval_requested"):
             sys.stderr.write(f"[{kind}] {json.dumps(data, ensure_ascii=False)[:300]}\n")
         elif kind == "run_finished":

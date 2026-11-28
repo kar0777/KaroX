@@ -288,8 +288,19 @@ def test_headless_tool_line_skips_closing_tags_and_brackets(capsys):
     from karox6.core.events import ToolFinished
 
     render = _TextRenderer()
-    for output in ("<content>\nline one\n</content>", '{\n  "sum": 5\n}', "[exit code: 0]"):
+    for output in ("<content>\nline one\n</content>", '{\n  "sum": 5\n}'):
         render(ToolFinished(call_id="c", name="t", output=output, is_error=False, duration_ms=1))
+    shell = "a.txt\nb.txt\n[exit code: 0]"  # the same summary as the chat's tool lines
+    render(
+        ToolFinished(
+            call_id="c",
+            name="bash",
+            output=shell,
+            is_error=False,
+            duration_ms=1,
+            meta={"exit_code": 0},
+        )
+    )
     lines = capsys.readouterr().err.splitlines()
     shown = [line.split("] ", 1)[1] for line in lines]
-    assert shown == ["line one", '  "sum": 5', "[exit code: 0]"]
+    assert shown == ["line one", '"sum": 5', "exit 0 · b.txt"]
