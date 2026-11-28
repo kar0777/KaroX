@@ -158,3 +158,27 @@ def test_a_real_page_is_captured_with_its_console(monkeypatch, tmp_path):
     assert "missingFunction is not defined" in result.content
     assert "320x240" in result.content
     assert _leftovers() <= before  # the throwaway profile is gone
+
+
+def test_a_script_runs_in_the_page_and_its_copy_is_removed(monkeypatch, tmp_path):
+    monkeypatch.delenv("KAROX_BROWSER", raising=False)
+    found = browser.find_browser()
+    if found is None:
+        pytest.skip("no Chromium-family browser installed")
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "app.js").write_text("window.debug = { answer: 42 };", encoding="utf-8")
+    (site / "index.html").write_text(
+        "<body><script type='module' src='./app.js'></script></body>", encoding="utf-8"
+    )
+    tool = browser.PageScreenshotTool(found)
+    script = "console.log('answer=' + window.debug.answer); null.boom;"
+    args = {"target": "site/index.html", "script": script, "wait_ms": 200}
+    result = asyncio.run(tool.run(args, _ctx(tmp_path)))
+    assert not result.is_error, result.content
+    assert "answer=42" in result.content  # after the page's own module, relative import kept
+    assert "page_screenshot script failed" in result.content
+    assert ".karox-shot-" not in result.content  # sources name the real page
+    assert sorted(p.name for p in site.iterdir()) == ["app.js", "index.html"]
+    url = asyncio.run(tool.run({"target": "http://localhost:1/", "script": "1"}, _ctx(tmp_path)))
+    assert url.is_error

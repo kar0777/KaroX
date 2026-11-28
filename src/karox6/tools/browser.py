@@ -31,10 +31,15 @@ DEFAULT_WAIT_MS = 2500
 MAX_WAIT_MS = 20_000
 MAX_SIDE = 2560
 MAX_CONSOLE_LINES = 30
+MAX_SCRIPT_CHARS = 20_000
 STDERR_KEEP = 256 * 1024  # bytes of the browser's log kept (console lines are in it)
 JOB_MEMORY_MB = 2048  # Windows: the browser's whole process tree may not commit more
 # new Chromium: `:CONSOLE:5] "text", source: url (5)`; older: `:CONSOLE(5)] ...`
-_CONSOLE = re.compile(r':CONSOLE(?::\d+|\(\d+\))?\]\s*"(?P<text>.*)",\s*source:\s*(?P<source>.*)$')
+# A message may span lines (an error's stack): it ends at `", source: ...`.
+_CONSOLE = re.compile(
+    r':CONSOLE(?::\d+|\(\d+\))?\]\s*"(?P<text>.*?)",\s*source:\s*(?P<source>[^\r\n]*)',
+    re.DOTALL,
+)
 
 _WINDOWS_PATHS = (
     r"Google\Chrome\Application\chrome.exe",
@@ -90,13 +95,11 @@ def find_browser() -> str | None:
 def console_lines(log: str) -> list[str]:
     """The page's console messages (and uncaught errors) from Chromium's stderr log."""
     found: list[str] = []
-    for line in log.splitlines():
-        match = _CONSOLE.search(line)
-        if match is None:
-            continue
+    for match in _CONSOLE.finditer(log):
         source = match["source"].strip()
         where = re.sub(r"^.*/", "", source)  # "file:///C:/x/page.html (12)" -> "page.html (12)"
-        found.append(f"{match['text'][:400]}  [{where[:80]}]")
+        lines = [ln.strip() for ln in match["text"].splitlines() if ln.strip()]
+        found.append(f"{' | '.join(lines)[:600]}  [{where[:80]}]")
     return found
 
 
@@ -109,11 +112,13 @@ class PageScreenshotTool:
         "what you build for the browser (layout, canvas, WebGL/Three.js scenes, animations) "
         "instead of guessing from code or pixel numbers; take several with different "
         "`wait_ms` to see motion. The page runs `wait_ms` of page time before the shot "
-        "(timers and requestAnimationFrame advance). One call takes a few seconds. A file "
-        "target may carry ?query or #hash, so the page can offer other views to check "
-        "(e.g. page.html?view=top). When a check needs scripted input, a Playwright script "
-        "with channel 'chrome' also renders on the GPU; its bundled headless shell renders "
-        "WebGL on the CPU, slowly and with different colours."
+        "(timers and requestAnimationFrame advance). One call takes a few seconds. "
+        "`script` runs your JavaScript in the page after its own scripts (move the camera, "
+        "hide objects, console.log values: the output comes back), so prefer this tool to "
+        "writing Playwright or Puppeteer scripts; the page must expose what you touch, e.g. "
+        "window.debug = { camera, scene }. A file target may carry ?query or #hash. If you "
+        "still need Playwright, launch it with channel 'chrome' (GPU): its bundled headless "
+        "shell renders WebGL on the CPU, slowly, with different colours, loading the machine."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -130,6 +135,12 @@ class PageScreenshotTool:
                 "description": f"Page time before the shot (default {DEFAULT_WAIT_MS}, max "
                 f"{MAX_WAIT_MS}).",
             },
+            "script": {
+                "type": "string",
+                "description": "JavaScript run as a module after the page's own scripts "
+                "(await allowed), before `wait_ms` elapses; errors and console output are "
+                "reported. Workspace files only.",
+            },
         },
         "required": ["target"],
     }
@@ -143,11 +154,12 @@ class PageScreenshotTool:
         raw = str(args.get("target") or "").strip()
         if not raw:
             return ToolResult("Error: `target` is empty.", is_error=True)
+        path: Path | None = None
+        suffix = ""
         if re.match(r"^https?://", raw, re.IGNORECASE):
             url, shown = raw, raw
         else:
             path = ctx.resolve(raw)
-            suffix = ""
             if not path.is_file():
                 match = re.match(r"^(?P<file>[^?#]+)(?P<rest>[?#].*)$", raw)
                 path = ctx.resolve(match["file"]) if match else path
@@ -158,10 +170,42 @@ class PageScreenshotTool:
         width = _clamp(args.get("width"), 1280, 200, MAX_SIDE)
         height = _clamp(args.get("height"), 800, 200, MAX_SIDE)
         wait_ms = _clamp(args.get("wait_ms"), DEFAULT_WAIT_MS, 0, MAX_WAIT_MS)
+        script = str(args.get("script") or "")
+        copy: Path | None = None
+        if script.strip():
+            if path is None:
+                return ToolResult(
+                    "Error: `script` works on workspace files; for a URL, expose a debug "
+                    "view through its query string or use Playwright with channel 'chrome'.",
+                    is_error=True,
+                )
+            if len(script) > MAX_SCRIPT_CHARS:
+                return ToolResult(
+                    f"Error: `script` is longer than {MAX_SCRIPT_CHARS} characters.",
+                    is_error=True,
+                )
+            # A copy next to the page (relative imports and assets still resolve) with the
+            # script appended; removed after the shot.
+            page = path.resolve()
+            copy = page.with_name(f".karox-shot-{os.urandom(4).hex()}.html")
+            try:
+                html = page.read_bytes().decode("utf-8", "replace")
+                copy.write_bytes(_with_script(html, script).encode("utf-8"))
+            except OSError as exc:
+                return ToolResult(f"Error: cannot prepare the page: {exc}", is_error=True)
+            url = copy.as_uri() + suffix
         if self._lock is None:
             self._lock = asyncio.Lock()
-        async with self._lock:  # one browser at a time: a few hundred MB each
-            return await self._shoot(url, shown, width, height, wait_ms)
+        try:
+            async with self._lock:  # one browser at a time: a few hundred MB each
+                result = await self._shoot(url, shown, width, height, wait_ms)
+            if copy is not None and path is not None:  # console sources name the page
+                result.content = result.content.replace(copy.name, path.name)
+            return result
+        finally:
+            if copy is not None:
+                with contextlib.suppress(OSError):
+                    copy.unlink()
 
     async def _shoot(self, url: str, shown: str, width: int, height: int, wait: int) -> ToolResult:
         folder = Path(tempfile.mkdtemp(prefix="karox-shot-"))
@@ -179,6 +223,7 @@ class PageScreenshotTool:
                 "--disable-component-update",
                 "--disable-default-apps",
                 "--mute-audio",
+                "--allow-file-access-from-files",  # a page's own local ES modules load
                 "--hide-scrollbars",
                 "--js-flags=--max-old-space-size=1024",  # a runaway page cannot eat the RAM
                 "--enable-logging=stderr",
@@ -219,6 +264,19 @@ class PageScreenshotTool:
             "\n".join(lines),
             meta={"image_png": data, "console_messages": len(messages)},
         )
+
+
+def _with_script(html: str, script: str) -> str:
+    """``html`` with ``script`` as the last module script of the page."""
+    body = script.replace("</script", "<\\/script")
+    tag = (
+        '<script type="module">\ntry {\n'
+        + body
+        + '\n} catch (error) {\n  console.error("page_screenshot script failed: " + '
+        "(error && error.stack || error));\n}\n</script>\n"
+    )
+    at = html.lower().rfind("</body>")
+    return html[:at] + tag + html[at:] if at >= 0 else html + "\n" + tag
 
 
 def _clamp(value: Any, default: int, low: int, high: int) -> int:

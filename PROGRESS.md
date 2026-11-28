@@ -2667,3 +2667,9 @@ dependencies; the lock was stale since prompt_toolkit became a core dependency
   browser (asyncio's proc.wait() waits for pipes a child holds: now the exit code is polled),
   double cancel, unclosed pipe transport, compaction resending every picture, the retry, regexes.
   Not changed: the browser reaches what the shell already reaches (localhost, files).
+- page_screenshot `script`: JavaScript run as the page's last module (after its own scripts) on a
+  throwaway copy next to the page; console output and errors come back, the copy is removed. In
+  the first aquarium rerun the agent ignored the tool and ran its own Playwright 106 times (CPU
+  WebGL, ~65 processes each) to move the camera and hide objects: the tool now does that.
+  Also --allow-file-access-from-files (a page's local ES modules were blocked on file://) and
+  console messages that span lines (an error's stack).
